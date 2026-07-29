@@ -9,12 +9,12 @@ plugin when one is available in that environment.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.1.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.2.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.1.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.1.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.2.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.2.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -33,20 +33,41 @@ OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 "$OPENCLOUD_CLI" --cli-version
 ```
 
-Keep `OPENCLOUD_TOKEN` in the process environment. Never put it in source,
-shell history, screenshots, or reports.
+## Passwordless project onboarding
+
+For a new project, give the CLI the user's email and agreed title:
 
 ```bash
-export OPENCLOUD_API_URL="https://api.opcl.app"
-export OPENCLOUD_TOKEN="set-without-echoing"
+"$OPENCLOUD_CLI" onboard \
+  --email person@example.com \
+  --name "Family tasks" \
+  --visibility private
+```
 
+OpenCloud selects the app address from the title and adds a six-character
+random suffix.
+
+- A new email gets a provisional account, project, and 24-hour app credential
+  immediately. The user confirms the Resend email within 24 hours.
+- An existing email gets no credential until its owner confirms the emailed
+  request. Then run `"$OPENCLOUD_CLI" onboard-complete`.
+
+The CLI stores the short-lived secret in `.opencloud/session.json`, creates a
+protective `.gitignore`, and forces mode `0600`. Never read, print, copy, or
+commit that session file. Commands use it automatically:
+
+```bash
 "$OPENCLOUD_CLI" app list
 "$OPENCLOUD_CLI" app get "$APP_ID"
+"$OPENCLOUD_CLI" init /absolute/path/to/app --version 2026.07.29-1
 "$OPENCLOUD_CLI" artifact-check /absolute/path/to/app \
   --expect-app-id "$APP_ID" \
   --max-files 4
 "$OPENCLOUD_CLI" validate /absolute/path/to/app
 ```
+
+Existing installations can still supply `OPENCLOUD_API_URL` and
+`OPENCLOUD_TOKEN` explicitly.
 
 See the [OpenCloud CLI reference](https://docs.opcl.app/reference/cli) and
 [agent guide](https://docs.opcl.app/getting-started/agents).

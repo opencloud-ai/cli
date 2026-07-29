@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- Add zero-copy passwordless agent onboarding for new OpenCloud users and
+  projects.
+- Generate readable collision-resistant app addresses on the server.
+- Gate existing-email requests on explicit 24-hour email confirmation.
+- Store app-scoped credentials and completion secrets in an ignored mode-0600
+  workspace session file instead of printing them.
+- Preserve the onboarding idempotency key locally so failed requests retry
+  without creating duplicate users or projects.
+- Infer `init --app-id` from the onboarded workspace.
+
 ## 0.1.0
 
 - First standalone OpenCloud CLI release.

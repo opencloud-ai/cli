@@ -5,6 +5,7 @@ import path from "node:path";
 import { Command, Option } from "commander";
 import YAML from "yaml";
 import { OPEN_CLOUD_JS_VERSION } from "@opencloud/js";
+import type { AgentOnboardingResponse } from "@opencloud/contracts";
 import { OpenCloudClient } from "./api-client.js";
 import { requestApp, smokeApp } from "./app-edge.js";
 import { buildBundle } from "./bundle.js";
@@ -14,11 +15,17 @@ import {
   verifySessions,
 } from "./runtime-verify.js";
 import { verifyAppUi } from "./ui-verify.js";
+import {
+  loadSession,
+  resolveSessionFile,
+  saveSession,
+  type OpenCloudSession,
+} from "./session-store.js";
 
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.1.0", "-V, --cli-version", "print the CLI version")
+  .version("0.2.0", "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -28,18 +35,46 @@ const program = new Command()
     new Option("--token <token>", "API or app-scoped agent token").env(
       "OPENCLOUD_TOKEN",
     ),
+  )
+  .addOption(
+    new Option(
+      "--session-file <path>",
+      "Secure CLI session file created by onboarding",
+    ).env("OPENCLOUD_SESSION_FILE"),
   );
 
+function sessionFile(): string {
+  return resolveSessionFile(
+    program.opts<{ sessionFile?: string }>().sessionFile,
+  );
+}
+
+function availableSession(): OpenCloudSession | null {
+  return loadSession(sessionFile());
+}
+
 function client(): OpenCloudClient {
-  const options = program.opts<{ apiUrl?: string; token?: string }>();
-  if (!options.apiUrl || !options.token) {
+  const options = program.opts<{
+    apiUrl?: string;
+    token?: string;
+  }>();
+  const stored =
+    options.apiUrl && options.token ? null : availableSession();
+  const apiUrl = options.apiUrl ?? stored?.apiUrl;
+  const token =
+    options.token ?? (stored?.state === "ready" ? stored.token : undefined);
+  if (!apiUrl || !token) {
     throw new Error(
-      "Set OPENCLOUD_API_URL and OPENCLOUD_TOKEN or pass --api-url and --token",
+      stored?.state === "awaiting_email_verification"
+        ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
+        : stored?.state === "starting"
+          ? "Onboarding has not completed. Re-run the same opencloud onboard command."
+        : "Run opencloud onboard, set OPENCLOUD_API_URL and OPENCLOUD_TOKEN, or pass --api-url and --token.",
     );
   }
   return new OpenCloudClient({
-    apiUrl: options.apiUrl,
-    token: options.token,
+    apiUrl,
+    token,
   });
 }
 
@@ -58,6 +93,196 @@ function printBundleFiles(files: string[]): void {
       .join("\n")}\n`,
   );
 }
+
+function onboardingApiUrl(): string {
+  return (
+    program.opts<{ apiUrl?: string }>().apiUrl ??
+    availableSession()?.apiUrl ??
+    "https://api.opcl.app"
+  );
+}
+
+function parseOnboardingResponse(value: unknown): AgentOnboardingResponse {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    typeof (value as { onboardingId?: unknown }).onboardingId !== "string" ||
+    typeof (value as { state?: unknown }).state !== "string"
+  ) {
+    throw new Error("OpenCloud returned an invalid onboarding response");
+  }
+  return value as AgentOnboardingResponse;
+}
+
+async function persistOnboardingResponse(
+  response: AgentOnboardingResponse,
+  apiUrl: string,
+  file: string,
+): Promise<Record<string, unknown>> {
+  const { completionToken, credential, ...safe } = response;
+  if (credential?.token && response.app) {
+    await saveSession(file, {
+      schemaVersion: 1,
+      state: "ready",
+      apiUrl,
+      appId: response.app.id,
+      appUrl: response.app.appUrl,
+      token: credential.token,
+      credentialExpiresAt: credential.expiresAt,
+    });
+    return {
+      ...safe,
+      credential: {
+        expiresAt: credential.expiresAt,
+        storedIn: file,
+      },
+      next: "The app-scoped credential is stored locally. Continue with app list, app get, init, validate, and deploy; do not print the session file.",
+    };
+  }
+  if (completionToken) {
+    await saveSession(file, {
+      schemaVersion: 1,
+      state: "awaiting_email_verification",
+      apiUrl,
+      onboardingId: response.onboardingId,
+      completionToken,
+      verificationExpiresAt: response.verification.expiresAt,
+    });
+    return {
+      ...safe,
+      credential: null,
+      sessionFile: file,
+      next: "Ask the user to confirm the email, then run opencloud onboard-complete. Do not print the session file.",
+    };
+  }
+  return {
+    ...safe,
+    credential: null,
+    sessionFile: file,
+    next: "Email verification is still pending. Run opencloud onboard-complete after the user confirms.",
+  };
+}
+
+program
+  .command("onboard")
+  .description(
+    "Create a passwordless OpenCloud identity and automatically addressed project",
+  )
+  .requiredOption("--email <email>", "user email address")
+  .requiredOption("--name <name>", "project title")
+  .addOption(
+    new Option("--visibility <visibility>", "public or private")
+      .choices(["public", "private"])
+      .default("private"),
+  )
+  .option("--idempotency-key <uuid>", "safe retry key")
+  .action(async (options) => {
+    const apiUrl = onboardingApiUrl();
+    const file = sessionFile();
+    const stored = loadSession(file);
+    if (stored?.state === "ready") {
+      throw new Error(
+        `This workspace is already connected to ${stored.appId}. Use another --session-file for a new project.`,
+      );
+    }
+    if (stored?.state === "awaiting_email_verification") {
+      throw new Error(
+        "Email verification is already pending. Confirm it and run opencloud onboard-complete.",
+      );
+    }
+    const request = {
+      email: String(options.email).trim().toLowerCase(),
+      projectName: String(options.name).trim(),
+      visibility: options.visibility as "public" | "private",
+    };
+    if (
+      stored?.state === "starting" &&
+      (stored.apiUrl !== apiUrl ||
+        stored.email !== request.email ||
+        stored.projectName !== request.projectName ||
+        stored.visibility !== request.visibility)
+    ) {
+      throw new Error(
+        "A different onboarding request is already pending in this session file. Re-run the original request or use another --session-file.",
+      );
+    }
+    if (
+      stored?.state === "starting" &&
+      options.idempotencyKey &&
+      options.idempotencyKey !== stored.idempotencyKey
+    ) {
+      throw new Error(
+        "The pending onboarding request already has a retry key. Omit --idempotency-key or use another --session-file.",
+      );
+    }
+    const idempotencyKey =
+      options.idempotencyKey ??
+      (stored?.state === "starting"
+        ? stored.idempotencyKey
+        : randomUUID());
+    await saveSession(file, {
+      schemaVersion: 1,
+      state: "starting",
+      apiUrl,
+      idempotencyKey,
+      ...request,
+    });
+    const response = parseOnboardingResponse(
+      await new OpenCloudClient({ apiUrl }).post(
+        "/v1/onboarding/agent",
+        request,
+        idempotencyKey,
+      ),
+    );
+    output(
+      await persistOnboardingResponse(
+        response,
+        apiUrl,
+        file,
+      ),
+    );
+  });
+
+program
+  .command("onboard-complete")
+  .description("Finish onboarding after an existing user confirms by email")
+  .action(async () => {
+    const file = sessionFile();
+    const stored = loadSession(file);
+    if (!stored) {
+      throw new Error("No OpenCloud onboarding session was found");
+    }
+    if (stored.state === "ready") {
+      output({
+        state: "ready",
+        appId: stored.appId,
+        appUrl: stored.appUrl,
+        credential: {
+          expiresAt: stored.credentialExpiresAt,
+          storedIn: file,
+        },
+      });
+      return;
+    }
+    if (stored.state === "starting") {
+      throw new Error(
+        "The initial onboarding request has not completed. Re-run the same opencloud onboard command.",
+      );
+    }
+    const response = parseOnboardingResponse(
+      await new OpenCloudClient({ apiUrl: stored.apiUrl }).post(
+        `/v1/onboarding/agent/${encodeURIComponent(stored.onboardingId)}/complete`,
+        { completionToken: stored.completionToken },
+      ),
+    );
+    output(
+      await persistOnboardingResponse(
+        response,
+        stored.apiUrl,
+        file,
+      ),
+    );
+  });
 
 const app = program.command("app").description("Manage OpenCloud apps");
 
@@ -317,9 +542,18 @@ program
   .command("init")
   .description("Create a minimal app bundle")
   .argument("<directory>")
-  .requiredOption("--app-id <uuid>")
+  .option("--app-id <uuid>", "defaults to the onboarded project")
   .option("--version <version>", "initial deployment version", "v1")
   .action(async (directory, options) => {
+    const stored = availableSession();
+    const appId =
+      options.appId ??
+      (stored?.state === "ready" ? stored.appId : undefined);
+    if (!appId) {
+      throw new Error(
+        "Pass --app-id or complete opencloud onboard first",
+      );
+    }
     const root = callerPath(directory);
     await mkdir(path.join(root, "frontend"), { recursive: true });
     await mkdir(path.join(root, "migrations"), { recursive: true });
@@ -342,7 +576,7 @@ program
       path.join(root, "opencloud.yaml"),
       YAML.stringify({
         schemaVersion: 1,
-        appId: options.appId,
+        appId,
         version: options.version,
         frontend: { directory: "frontend", spa: true },
         runtime: {

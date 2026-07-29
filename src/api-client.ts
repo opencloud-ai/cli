@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 export interface ClientOptions {
   apiUrl: string;
-  token: string;
+  token?: string;
 }
 
 export class ApiError extends Error {
@@ -65,6 +65,9 @@ export class OpenCloudClient {
     archive: Buffer,
     idempotencyKey = randomUUID(),
   ): Promise<unknown> {
+    if (!this.options.token) {
+      throw new Error("An OpenCloud agent credential is required");
+    }
     const form = new FormData();
     form.append("manifest", JSON.stringify(manifest));
     const bytes = new Uint8Array(archive.byteLength);
@@ -98,7 +101,9 @@ export class OpenCloudClient {
     const response = await fetch(`${this.apiUrl}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${this.options.token}`,
+        ...(this.options.token
+          ? { authorization: `Bearer ${this.options.token}` }
+          : {}),
         accept: "application/json",
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),

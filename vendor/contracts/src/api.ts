@@ -63,6 +63,16 @@ export const createCredentialRequestSchema = z.object({
     .min(1),
 });
 
+export const startAgentOnboardingRequestSchema = z.object({
+  email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
+  projectName: z.string().trim().min(1).max(120),
+  visibility: appVisibilitySchema.default("private"),
+});
+
+export const completeAgentOnboardingRequestSchema = z.object({
+  completionToken: z.string().min(32).max(512),
+});
+
 export const deploymentSubmissionSchema = z.object({
   manifest: openCloudManifestSchema,
   artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -76,6 +86,36 @@ export type CreateAppRequest = z.infer<typeof createAppRequestSchema>;
 export type CreateCredentialRequest = z.infer<
   typeof createCredentialRequestSchema
 >;
+export type StartAgentOnboardingRequest = z.infer<
+  typeof startAgentOnboardingRequestSchema
+>;
+export type CompleteAgentOnboardingRequest = z.infer<
+  typeof completeAgentOnboardingRequestSchema
+>;
+
+export type AgentOnboardingState =
+  | "awaiting_email_verification"
+  | "provisional_ready"
+  | "ready";
+
+export interface AgentOnboardingResponse {
+  onboardingId: string;
+  state: AgentOnboardingState;
+  existingUser: boolean;
+  verification: {
+    required: true;
+    status: "pending" | "verified";
+    expiresAt: string;
+    emailSent: boolean;
+  };
+  app: AppRecord | null;
+  operation: OperationRecord | null;
+  credential: {
+    token: string;
+    expiresAt: string;
+  } | null;
+  completionToken?: string;
+}
 
 export interface AppRecord {
   id: string;
