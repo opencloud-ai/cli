@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm pack
+      - run: sha256sum opencloud-cli-*.tgz > checksums.txt
+      - name: Verify packed CLI
+        run: |
+          install_dir="$(mktemp -d)"
+          npm install --prefix "$install_dir" --ignore-scripts --no-audit --no-fund \
+            "./opencloud-cli-${GITHUB_REF_NAME#v}.tgz"
+          "$install_dir/node_modules/.bin/opencloud" --cli-version
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "opencloud-cli-${GITHUB_REF_NAME#v}.tgz" \
+            checksums.txt \
+            --generate-notes \
+            --title "OpenCloud CLI ${GITHUB_REF_NAME}"

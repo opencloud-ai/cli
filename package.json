@@ -1,0 +1,41 @@
+{
+  "name": "@opencloud/cli",
+  "version": "0.1.0",
+  "description": "Versioned command-line client for building, deploying, and verifying OpenCloud applications",
+  "type": "module",
+  "bin": {
+    "opencloud": "./dist/index.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src vendor/contracts/src",
+    "lint": "npm run typecheck",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "playwright": "1.62.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "@types/ws": "8.18.1",
+    "commander": "15.0.0",
+    "cron-parser": "5.6.2",
+    "esbuild": "0.25.8",
+    "tar": "7.5.22",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10",
+    "ws": "8.21.1",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  }
+}

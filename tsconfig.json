@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@opencloud/contracts": ["./vendor/contracts/src/index.ts"],
+      "@opencloud/js": ["./vendor/browser-client/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "vendor/**/*.ts"],
+  "exclude": ["**/*.test.ts"]
+}
