@@ -25,7 +25,7 @@ import {
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.2.0", "-V, --cli-version", "print the CLI version")
+  .version("0.2.1", "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -98,7 +98,7 @@ function onboardingApiUrl(): string {
   return (
     program.opts<{ apiUrl?: string }>().apiUrl ??
     availableSession()?.apiUrl ??
-    "https://api.opcl.app"
+    "https://api.opencloud.ai"
   );
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Make `opencloud.ai` the default hosted OpenCloud API and documentation
+  domain.
+- Keep existing explicit API URLs and saved sessions compatible with the
+  previous domain during the hosted-service migration.
+
 ## 0.2.0
 
 - Add zero-copy passwordless agent onboarding for new OpenCloud users and

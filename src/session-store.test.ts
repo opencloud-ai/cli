@@ -26,9 +26,9 @@ describe("OpenCloud CLI session store", () => {
     const session: ReadyAgentSession = {
       schemaVersion: 1,
       state: "ready",
-      apiUrl: "https://api.opcl.app",
+      apiUrl: "https://api.opencloud.ai",
       appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
-      appUrl: "https://family-tasks-a1b2c3.opcl.app",
+      appUrl: "https://family-tasks-a1b2c3.opencloud.ai",
       token: "oc_agent_secret",
       credentialExpiresAt: "2026-07-30T12:00:00.000Z",
     };
@@ -50,7 +50,7 @@ describe("OpenCloud CLI session store", () => {
     await saveSession(file, {
       schemaVersion: 1,
       state: "starting",
-      apiUrl: "https://api.opcl.app",
+      apiUrl: "https://api.opencloud.ai",
       idempotencyKey: "b7e0066f-33cb-4f4a-9909-401e9c702f3e",
       email: "person@example.test",
       projectName: "Family tasks",

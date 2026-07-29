@@ -6,8 +6,8 @@ const app = {
   visibility: "private",
   state: "active",
   activeDeploymentId: "22222222-2222-4222-8222-222222222222",
-  appUrl: "https://example.opcl.app",
-  authUrl: "https://auth.opcl.app",
+  appUrl: "https://example.opencloud.ai",
+  authUrl: "https://auth.opencloud.ai",
 };
 
 function launcher(options: {

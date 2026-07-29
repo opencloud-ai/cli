@@ -1,7 +1,7 @@
 # OpenCloud CLI
 
 The public, versioned command-line client for building, validating, deploying,
-and verifying applications on [OpenCloud](https://opcl.app).
+and verifying applications on [OpenCloud](https://opencloud.ai).
 
 The CLI is intended for coding agents and humans with a terminal. A regular
 browser-only chat cannot execute a downloaded CLI; use an OpenCloud tool or
@@ -9,12 +9,12 @@ plugin when one is available in that environment.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.2.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.2.1` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.2.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.2.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.2.1"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.2.1.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -69,8 +69,8 @@ commit that session file. Commands use it automatically:
 Existing installations can still supply `OPENCLOUD_API_URL` and
 `OPENCLOUD_TOKEN` explicitly.
 
-See the [OpenCloud CLI reference](https://docs.opcl.app/reference/cli) and
-[agent guide](https://docs.opcl.app/getting-started/agents).
+See the [OpenCloud CLI reference](https://docs.opencloud.ai/reference/cli) and
+[agent guide](https://docs.opencloud.ai/getting-started/agents).
 
 ## Browser verification
 
