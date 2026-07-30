@@ -33,6 +33,20 @@ await build({
       "src",
       "index.ts",
     ),
+    "@opencloud/bundler": path.join(
+      root,
+      "vendor",
+      "bundler",
+      "src",
+      "index.ts",
+    ),
+    "@opencloud/control-plane-client": path.join(
+      root,
+      "vendor",
+      "control-plane-client",
+      "src",
+      "index.ts",
+    ),
   },
 });
 

@@ -134,6 +134,25 @@ runtime:
     });
   });
 
+  it("can stamp a release-specific system-app version without editing source", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+`,
+    );
+
+    const bundle = await buildBundle(root, {
+      version: "platform-1.2.3-docs.1",
+    });
+
+    expect(bundle.manifest.version).toBe("platform-1.2.3-docs.1");
+  });
+
   it("rejects paths that escape the app before reading them", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));

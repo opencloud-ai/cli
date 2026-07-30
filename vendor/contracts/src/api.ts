@@ -41,9 +41,12 @@ export const operationStateSchema = z.enum([
 
 export const createAppRequestSchema = z.object({
   name: z.string().min(1).max(120),
-  slug: appSlugSchema,
   visibility: appVisibilitySchema.default("private"),
-  ownerUserId: z.uuid(),
+});
+
+export const operatorCreateAppRequestSchema = createAppRequestSchema.extend({
+  slug: appSlugSchema.optional(),
+  ownerUserId: z.uuid().optional(),
 });
 
 export const createCredentialRequestSchema = z.object({

@@ -1,0 +1,1118 @@
+import { z } from "zod";
+import {
+  appStateSchema,
+  appVisibilitySchema,
+  completeAgentOnboardingRequestSchema,
+  createAppRequestSchema,
+  createCredentialRequestSchema,
+  deploymentStateSchema,
+  operationStateSchema,
+  startAgentOnboardingRequestSchema,
+} from "./api.js";
+
+const uuid = z.uuid();
+const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
+const secretName = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
+const jsonObject = z.record(z.string(), z.unknown());
+const unknownOutput = z.unknown();
+const emptyBody = z.object({});
+
+export const controlPlaneAppSchema = z
+  .object({
+    id: uuid,
+    name: z.string(),
+    slug: z.string(),
+    appUrl: z.url(),
+    authUrl: z.url(),
+    apiUrl: z.url(),
+    visibility: appVisibilitySchema,
+    state: appStateSchema,
+    ownerUserId: uuid,
+    desiredDeploymentId: uuid.nullable(),
+    activeDeploymentId: uuid.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
+export const controlPlaneOperationSchema = z
+  .object({
+    id: uuid,
+    appId: uuid.nullable(),
+    deploymentId: uuid.nullable(),
+    type: z.string(),
+    state: operationStateSchema,
+    actorType: z.string(),
+    actorId: z.string(),
+    idempotencyKey: z.string(),
+    error: jsonObject.nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    steps: z
+      .array(
+        z
+          .object({
+            id: uuid,
+            name: z.string(),
+            state: operationStateSchema,
+            attempt: z.number().int(),
+            startedAt: z.string().nullable(),
+            finishedAt: z.string().nullable(),
+            output: jsonObject.nullable(),
+            error: jsonObject.nullable(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough();
+
+export const controlPlaneDeploymentSchema = z
+  .object({
+    id: uuid,
+    appId: uuid,
+    version: z.string(),
+    artifactSha256: sha256,
+    javascriptSdkVersion: z.string(),
+    manifest: z.unknown(),
+    state: deploymentStateSchema,
+    rollbackOfDeploymentId: uuid.nullable(),
+    error: jsonObject.nullable(),
+    createdAt: z.string(),
+    activatedAt: z.string().nullable(),
+  })
+  .passthrough();
+
+const onboardingOutput = z
+  .object({
+    onboardingId: uuid,
+    state: z.enum([
+      "awaiting_email_verification",
+      "provisional_ready",
+      "ready",
+    ]),
+    existingUser: z.boolean(),
+    verification: z
+      .object({
+        required: z.literal(true),
+        status: z.enum(["pending", "verified"]),
+        expiresAt: z.string(),
+        emailSent: z.boolean(),
+      })
+      .passthrough(),
+    app: controlPlaneAppSchema.nullable(),
+    operation: controlPlaneOperationSchema.nullable(),
+    credential: z
+      .object({
+        token: z.string(),
+        expiresAt: z.string(),
+      })
+      .nullable(),
+    completionToken: z.string().optional(),
+  })
+  .passthrough();
+
+const draftOutput = z
+  .object({
+    id: uuid,
+    appId: uuid,
+    baseDeploymentId: uuid.nullable(),
+    name: z.string(),
+    status: z.enum([
+      "open",
+      "validated",
+      "deploying",
+      "deployed",
+      "discarded",
+    ]),
+    revision: z.number().int().positive(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    deployedAt: z.string().nullable(),
+  })
+  .passthrough();
+
+const draftFileOutput = z
+  .object({
+    path: z.string(),
+    sha256,
+    baseSha256: sha256.nullable(),
+    sizeBytes: z.number().int().nonnegative(),
+    deleted: z.boolean(),
+    updatedAt: z.string(),
+    content: z.string().nullable().optional(),
+    contentBase64: z.string().optional(),
+  })
+  .passthrough();
+
+const draftValidationOutput = z
+  .object({
+    id: uuid,
+    draftId: uuid,
+    revision: z.number().int().positive(),
+    passed: z.boolean(),
+    artifactSha256: sha256.nullable(),
+    manifest: z.unknown().nullable(),
+    files: z.array(z.string()),
+    diagnostics: z.array(
+      z.object({
+        level: z.enum(["error", "warning"]),
+        message: z.string(),
+      }),
+    ),
+    createdAt: z.string(),
+  })
+  .passthrough();
+
+const verificationOutput = z
+  .object({
+    id: uuid,
+    appId: uuid,
+    deploymentId: uuid.nullable(),
+    operationId: uuid.nullable(),
+    state: z.enum(["queued", "running", "passed", "failed"]),
+    phases: z.array(
+      z.object({
+        name: z.string(),
+        passed: z.boolean(),
+        detail: z.string(),
+        durationMs: z.number().nonnegative(),
+      }),
+    ),
+    diagnostics: z.array(
+      z.object({
+        level: z.enum(["error", "warning"]),
+        message: z.string(),
+      }),
+    ),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    createdAt: z.string(),
+  })
+  .passthrough();
+
+const secretMetadataOutput = z
+  .object({
+    name: secretName,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
+const cronInvocationOutput = z
+  .object({
+    id: uuid,
+    appId: uuid,
+    deploymentId: uuid,
+    cronName: z.string(),
+    functionName: z.string(),
+    state: z.enum(["running", "succeeded", "failed"]),
+    scheduledAt: z.string(),
+    startedAt: z.string(),
+    finishedAt: z.string().nullable(),
+    responseStatus: z.number().int().nullable(),
+    error: jsonObject.nullable(),
+  })
+  .passthrough();
+
+export type ControlPlaneAuth = "none" | "bearer" | "user";
+
+export interface McpOperationMetadata {
+  toolName: string;
+  title: string;
+  description: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+export interface ControlPlaneOperation<
+  TInput extends z.ZodType = z.ZodType,
+  TOutput extends z.ZodType = z.ZodType,
+> {
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  path: string;
+  summary: string;
+  description: string;
+  auth: ControlPlaneAuth;
+  scopes: string[];
+  input: TInput;
+  output: TOutput;
+  bodyKey?: "body";
+  queryKey?: "query";
+  idempotency: "none" | "optional" | "required";
+  mcp?: McpOperationMetadata;
+}
+
+function operation<
+  TInput extends z.ZodType,
+  TOutput extends z.ZodType,
+>(
+  value: ControlPlaneOperation<TInput, TOutput>,
+): ControlPlaneOperation<TInput, TOutput> {
+  return value;
+}
+
+const appPath = z.object({ appId: uuid });
+const draftPath = appPath.extend({ draftId: uuid });
+const deploymentPath = appPath.extend({ deploymentId: uuid });
+
+export const controlPlaneOperations = {
+  startAgentOnboarding: operation({
+    method: "POST",
+    path: "/v1/onboarding/agent",
+    summary: "Start passwordless agent onboarding",
+    description:
+      "Creates a provisional user and first app for a new email, or requests verification for an existing identity.",
+    auth: "none",
+    scopes: [],
+    input: z.object({ body: startAgentOnboardingRequestSchema }),
+    output: onboardingOutput,
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "start_onboarding",
+      title: "Start OpenCloud onboarding",
+      description:
+        "Start zero-blocking onboarding for a new email or request ownership verification for an existing email.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  completeAgentOnboarding: operation({
+    method: "POST",
+    path: "/v1/onboarding/agent/{onboardingId}/complete",
+    summary: "Complete agent onboarding",
+    description:
+      "Completes an onboarding after email verification and returns the authorized app context.",
+    auth: "none",
+    scopes: [],
+    input: z.object({
+      onboardingId: uuid,
+      body: completeAgentOnboardingRequestSchema,
+    }),
+    output: onboardingOutput,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  createApp: operation({
+    method: "POST",
+    path: "/v1/apps",
+    summary: "Create an app",
+    description:
+      "Creates an app with a server-generated unique address. The authenticated actor supplies only the title and visibility.",
+    auth: "bearer",
+    scopes: ["app:create"],
+    input: z.object({ body: createAppRequestSchema }),
+    output: z.object({
+      app: controlPlaneAppSchema,
+      operation: controlPlaneOperationSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "create_app",
+      title: "Create app",
+      description:
+        "Create another OpenCloud app with an automatically allocated HTTPS address.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  listApps: operation({
+    method: "GET",
+    path: "/v1/apps",
+    summary: "List accessible apps",
+    description: "Lists apps visible to the authenticated actor.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: emptyBody,
+    output: z.array(controlPlaneAppSchema),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_apps",
+      title: "List apps",
+      description: "List OpenCloud apps available in the current session.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  getApp: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}",
+    summary: "Get an app",
+    description: "Returns the app, canonical URLs, and deployment state.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: controlPlaneAppSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_app",
+      title: "Get app",
+      description: "Inspect an OpenCloud app and its active release.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  configureApp: operation({
+    method: "PATCH",
+    path: "/v1/apps/{appId}",
+    summary: "Configure an app",
+    description:
+      "Changes an app title or visibility. Generated addresses remain stable.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({
+      body: z
+        .object({
+          name: z.string().min(1).max(120).optional(),
+          visibility: appVisibilitySchema.optional(),
+        })
+        .refine((value) => Object.keys(value).length > 0),
+    }),
+    output: z.object({
+      app: controlPlaneAppSchema,
+      operation: controlPlaneOperationSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "configure_app",
+      title: "Configure app",
+      description: "Change the app title or public/private visibility.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  createDraft: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/drafts",
+    summary: "Create a source draft",
+    description:
+      "Creates a server-side source draft, cloning the active release by default.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: appPath.extend({
+      body: z.object({
+        name: z.string().min(1).max(120).optional(),
+        cloneActive: z.boolean().default(true),
+      }),
+    }),
+    output: draftOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "create_draft",
+      title: "Create source draft",
+      description:
+        "Create an editable source draft, optionally based on the active release.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  }),
+  listDrafts: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/drafts",
+    summary: "List source drafts",
+    description: "Lists source drafts for an app.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: z.array(draftOutput),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_drafts",
+      title: "List source drafts",
+      description: "List server-side source drafts for an app.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  getDraft: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/drafts/{draftId}",
+    summary: "Get a source draft",
+    description: "Returns source draft status and revision.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: draftPath,
+    output: draftOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_draft",
+      title: "Get source draft",
+      description: "Inspect a source draft and its optimistic revision.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listDraftFiles: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/drafts/{draftId}/files",
+    summary: "List draft files",
+    description: "Lists draft file metadata without returning file contents.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: draftPath,
+    output: z.array(draftFileOutput),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_files",
+      title: "List draft files",
+      description: "List paths and hashes in an OpenCloud source draft.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  readDraftFiles: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/drafts/{draftId}/files/read",
+    summary: "Read draft files",
+    description: "Reads selected draft file contents and hashes.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: draftPath.extend({
+      body: z.object({
+        paths: z.array(z.string().min(1).max(512)).min(1).max(100),
+      }),
+    }),
+    output: z.array(draftFileOutput),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "read_files",
+      title: "Read draft files",
+      description: "Read selected source files from a draft.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  applyDraftChanges: operation({
+    method: "PATCH",
+    path: "/v1/apps/{appId}/drafts/{draftId}/files",
+    summary: "Apply draft file changes",
+    description:
+      "Applies text/base64 changes with revision and per-file hash guards.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: draftPath.extend({
+      body: z.object({
+        expectedRevision: z.number().int().positive(),
+        changes: z
+          .array(
+            z.object({
+              path: z.string().min(1).max(512),
+              baseSha256: sha256.nullable().optional(),
+              content: z.string().optional(),
+              contentBase64: z.string().optional(),
+              delete: z.boolean().optional(),
+            }),
+          )
+          .min(1)
+          .max(200),
+      }),
+    }),
+    output: z.object({
+      draft: draftOutput,
+      files: z.array(draftFileOutput),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "apply_file_changes",
+      title: "Apply file changes",
+      description:
+        "Create, update, or delete draft files with stale-write protection.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  }),
+  diffDraft: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/drafts/{draftId}/diff",
+    summary: "Diff a draft",
+    description: "Summarizes added, changed, and deleted source files.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: draftPath,
+    output: z.object({
+      added: z.array(z.string()),
+      modified: z.array(z.string()),
+      deleted: z.array(z.string()),
+      unchanged: z.array(z.string()),
+    }),
+    idempotency: "none",
+    mcp: {
+      toolName: "diff_draft",
+      title: "Diff source draft",
+      description: "Compare a draft with the release it was based on.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  validateDraft: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/drafts/{draftId}/validate",
+    summary: "Validate a draft",
+    description:
+      "Runs the canonical bundler and records an authoritative digest.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: draftPath.extend({
+      body: z.object({
+        version: z.string().min(1).max(120).optional(),
+      }),
+    }),
+    output: draftValidationOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "validate_draft",
+      title: "Validate source draft",
+      description:
+        "Run OpenCloud's authoritative validation and deterministic bundling.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  deployDraft: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/drafts/{draftId}/deploy",
+    summary: "Deploy a validated draft",
+    description:
+      "Deploys exactly the validated draft revision and returns a durable operation.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: draftPath,
+    output: z.object({
+      draft: draftOutput,
+      deployment: controlPlaneDeploymentSchema,
+      operation: controlPlaneOperationSchema,
+    }),
+    idempotency: "required",
+    mcp: {
+      toolName: "deploy_draft",
+      title: "Deploy source draft",
+      description: "Deploy the exact source revision that passed validation.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  discardDraft: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/drafts/{draftId}",
+    summary: "Discard a draft",
+    description: "Marks an undeployed source draft as discarded.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: draftPath,
+    output: draftOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "discard_draft",
+      title: "Discard source draft",
+      description: "Discard an undeployed source draft.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  verifyApp: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/verifications",
+    summary: "Verify an app release",
+    description:
+      "Starts one durable verification run covering control state, HTTPS health, SDK pinning, and Chromium.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath,
+    output: z.object({
+      verification: verificationOutput,
+      operation: controlPlaneOperationSchema,
+    }),
+    idempotency: "required",
+    mcp: {
+      toolName: "verify_app",
+      title: "Verify app",
+      description:
+        "Run the complete OpenCloud release verification gate.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  getVerification: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/verifications/{verificationId}",
+    summary: "Get a verification run",
+    description: "Returns verification phases and diagnostics.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ verificationId: uuid }),
+    output: verificationOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_verification_run",
+      title: "Get verification run",
+      description: "Inspect the phase results of an app verification run.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listDeployments: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployments",
+    summary: "List deployments",
+    description: "Lists immutable app deployments.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: z.array(controlPlaneDeploymentSchema),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_deployments",
+      title: "List deployments",
+      description: "List immutable releases for an app.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  getDeployment: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployments/{deploymentId}",
+    summary: "Get a deployment",
+    description: "Returns an immutable deployment and manifest.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: deploymentPath,
+    output: controlPlaneDeploymentSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_deployment",
+      title: "Get deployment",
+      description: "Inspect one immutable app release.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  rollbackDeployment: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/deployments/{deploymentId}/rollback",
+    summary: "Roll back an app",
+    description: "Restores a previously active deployment.",
+    auth: "bearer",
+    scopes: ["app:rollback"],
+    input: deploymentPath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+    mcp: {
+      toolName: "rollback_app",
+      title: "Roll back app",
+      description: "Restore a previously active immutable deployment.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  getOperation: operation({
+    method: "GET",
+    path: "/v1/operations/{operationId}",
+    summary: "Get a durable operation",
+    description: "Returns operation state, steps, and sanitized errors.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: z.object({ operationId: uuid }),
+    output: controlPlaneOperationSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_operation",
+      title: "Get operation",
+      description: "Follow a durable OpenCloud operation.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listSecrets: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/secrets",
+    summary: "List secret metadata",
+    description: "Lists secret names and timestamps; values are never returned.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: z.array(secretMetadataOutput),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_secrets",
+      title: "List secrets",
+      description: "List secret metadata without revealing values.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  generateSecret: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/secrets/{name}/generate",
+    summary: "Generate a secret",
+    description:
+      "Generates and stores a random secret entirely inside OpenCloud. The value is never returned.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({
+      name: secretName,
+      body: z.object({
+        bytes: z.number().int().min(16).max(256).default(32),
+        encoding: z.enum(["base64url", "hex"]).default("base64url"),
+      }),
+    }),
+    output: z.object({
+      name: secretName,
+      stored: z.literal(true),
+      generatedBytes: z.number().int().positive(),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "generate_secret",
+      title: "Generate secret",
+      description:
+        "Generate a strong app secret without exposing its value to the agent.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  }),
+  createSecretEntryLink: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/secrets/{name}/entry-link",
+    summary: "Create a secure secret-entry link",
+    description:
+      "Creates a short-lived, one-time browser link where the user can enter a secret outside the agent conversation.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ name: secretName }),
+    output: z.object({
+      name: secretName,
+      url: z.url(),
+      expiresAt: z.string(),
+    }),
+    idempotency: "none",
+    mcp: {
+      toolName: "create_secret_entry_link",
+      title: "Create secret entry link",
+      description:
+        "Create a one-time browser link for a user to enter a secret directly into OpenCloud.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  deleteSecret: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/secrets/{name}",
+    summary: "Delete a secret",
+    description: "Deletes one app secret by name.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ name: secretName }),
+    output: z.object({
+      name: secretName,
+      deleted: z.literal(true),
+    }),
+    idempotency: "none",
+    mcp: {
+      toolName: "delete_secret",
+      title: "Delete secret",
+      description: "Delete one app secret.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listBackups: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/backups",
+    summary: "List backups",
+    description: "Lists immutable app backups.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: z.array(unknownOutput),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_backups",
+      title: "List backups",
+      description: "List app backups and restore points.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  createBackup: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/backups",
+    summary: "Create a backup",
+    description: "Starts an immutable manual backup.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+    mcp: {
+      toolName: "create_backup",
+      title: "Create backup",
+      description: "Create an immutable backup before a risky change.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  configureBackupSchedule: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/backups/schedule",
+    summary: "Configure backup schedule",
+    description: "Sets no, daily, or weekly app backups.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({
+      body: z.object({
+        schedule: z.enum(["none", "daily", "weekly"]),
+      }),
+    }),
+    output: controlPlaneOperationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "configure_backup_schedule",
+      title: "Configure backups",
+      description: "Configure automatic app backups.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  restoreBackup: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/backups/{backupId}/restore",
+    summary: "Restore a backup",
+    description: "Restores an app database through the guarded restore path.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ backupId: uuid }),
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+    mcp: {
+      toolName: "restore_backup",
+      title: "Restore backup",
+      description: "Restore an app database to a selected backup.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listCronInvocations: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/cron/invocations",
+    summary: "List cron invocations",
+    description: "Lists scheduled function invocation history.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: z
+        .object({
+          name: z.string().optional(),
+          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          after: z.iso.datetime({ offset: true }).optional(),
+          limit: z.number().int().min(1).max(200).default(50),
+        })
+        .optional(),
+    }),
+    output: z.array(cronInvocationOutput),
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_cron_invocations",
+      title: "List cron invocations",
+      description: "Inspect cron execution history.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  invokeCron: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/cron/{name}/invoke",
+    summary: "Invoke a cron job",
+    description: "Manually enqueues one enabled cron function.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: appPath.extend({ name: z.string().min(1).max(63) }),
+    output: z
+      .object({
+        accepted: z.literal(true),
+        appId: uuid,
+        deploymentId: uuid,
+        cronName: z.string(),
+        functionName: z.string(),
+        jobId: z.string(),
+      })
+      .passthrough(),
+    idempotency: "none",
+    mcp: {
+      toolName: "invoke_cron",
+      title: "Invoke cron",
+      description: "Manually invoke an enabled app cron job.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  queryLogs: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/logs/query",
+    summary: "Query app logs",
+    description: "Runs an app-scoped, bounded log query.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ body: jsonObject }),
+    output: unknownOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "query_logs",
+      title: "Query logs",
+      description: "Query bounded app-scoped logs.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  queryMetrics: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/metrics/query",
+    summary: "Query app metrics",
+    description: "Runs an app-scoped, bounded metrics query.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ body: jsonObject }),
+    output: unknownOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "query_metrics",
+      title: "Query metrics",
+      description: "Query bounded app-scoped metrics.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  getUsage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/usage",
+    summary: "Get app usage",
+    description: "Returns app-scoped usage rollups.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath,
+    output: unknownOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_usage",
+      title: "Get usage",
+      description: "Inspect app usage rollups.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  createCredential: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/credentials",
+    summary: "Create an app credential",
+    description:
+      "Creates a short-lived app-scoped credential. Kept for CLI compatibility and not exposed as an MCP tool.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ body: createCredentialRequestSchema }),
+    output: z
+      .object({
+        id: uuid,
+        name: z.string(),
+        token: z.string(),
+        prefix: z.string(),
+        scopes: z.array(z.string()),
+        createdAt: z.string(),
+        expiresAt: z.string(),
+      })
+      .passthrough(),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+} as const;
+
+export type ControlPlaneOperationId =
+  keyof typeof controlPlaneOperations;
+
+export type ControlPlaneOperationInput<
+  T extends ControlPlaneOperationId,
+> = z.infer<(typeof controlPlaneOperations)[T]["input"]>;
+
+export type ControlPlaneOperationOutput<
+  T extends ControlPlaneOperationId,
+> = z.infer<(typeof controlPlaneOperations)[T]["output"]>;

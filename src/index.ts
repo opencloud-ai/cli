@@ -25,7 +25,7 @@ import {
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.2.1", "-V, --cli-version", "print the CLI version")
+  .version("0.3.0", "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -289,22 +289,21 @@ const app = program.command("app").description("Manage OpenCloud apps");
 app
   .command("create")
   .requiredOption("--name <name>")
-  .option("--expires-in-hours <hours>", "credential lifetime, max 168", "24")
-  .requiredOption("--slug <slug>")
-  .requiredOption("--owner-user-id <uuid>")
   .option("--visibility <visibility>", "public or private", "private")
   .option("--idempotency-key <key>")
   .action(async (options) => {
     output(
-      await client().post(
-        "/v1/apps",
+      await client().call(
+        "createApp",
         {
+          body: {
           name: options.name,
-          slug: options.slug,
-          ownerUserId: options.ownerUserId,
           visibility: options.visibility,
         },
-        options.idempotencyKey ?? randomUUID(),
+        },
+        {
+          idempotencyKey: options.idempotencyKey ?? randomUUID(),
+        },
       ),
     );
   });
@@ -406,7 +405,9 @@ app
 
 app
   .command("smoke")
-  .description("Check the active deployment and canonical edge behavior")
+  .description(
+    "Legacy local edge check; use `app verify` for the authoritative gate",
+  )
   .argument("<app-id>")
   .action(async (appId) => {
     const value = await client().get(`/v1/apps/${appId}`);
@@ -422,7 +423,7 @@ app
 app
   .command("verify-ui")
   .description(
-    "Load the canonical app in Chromium and verify render, session, SDK, console, and network behavior",
+    "Legacy local Chromium check; use `app verify` for the authoritative gate",
   )
   .argument("<app-id>")
   .option("--timeout-seconds <seconds>", "navigation timeout", "30")
@@ -459,10 +460,64 @@ app
   });
 
 app
+  .command("verify")
+  .description(
+    "Run the authoritative OpenCloud release verification gate",
+  )
+  .argument("<app-id>")
+  .option("--idempotency-key <key>")
+  .option("--follow", "follow the durable verification operation", true)
+  .option("--interval <seconds>", "poll interval", "2")
+  .action(async (appId, options) => {
+    const control = client();
+    const started = (await control.call(
+      "verifyApp",
+      { appId },
+      {
+        idempotencyKey: options.idempotencyKey ?? randomUUID(),
+        timeoutMs: 120_000,
+      },
+    )) as {
+      verification?: { id?: string };
+      operation?: { id?: string; state?: string };
+    };
+    output(started);
+    if (!options.follow || !started.operation?.id) return;
+    let operationValue: { state?: string } = started.operation;
+    while (
+      !["succeeded", "failed", "cancelled"].includes(
+        operationValue.state ?? "",
+      )
+    ) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Number(options.interval) * 1000),
+      );
+      operationValue = (await control.call("getOperation", {
+        operationId: started.operation.id!,
+      })) as { state?: string };
+      output(operationValue);
+    }
+    if (started.verification?.id) {
+      const result = await control.call("getVerification", {
+        appId,
+        verificationId: started.verification.id,
+      });
+      output(result);
+      if (
+        result &&
+        typeof result === "object" &&
+        "state" in result &&
+        result.state !== "passed"
+      ) {
+        process.exitCode = 1;
+      }
+    }
+  });
+
+app
   .command("configure")
   .argument("<app-id>")
   .option("--name <name>")
-  .option("--slug <slug>")
   .option("--visibility <visibility>")
   .option("--idempotency-key <key>")
   .action(async (appId, options) => {
@@ -470,7 +525,6 @@ app
       Object.entries({
         name: options.name,
         expiresInHours: Number(options.expiresInHours),
-        slug: options.slug,
         visibility: options.visibility,
       }).filter(([, value]) => value !== undefined),
     );
@@ -501,22 +555,6 @@ app
       ),
     ),
   );
-
-for (const action of ["archive", "unarchive", "restart"] as const) {
-  app
-    .command(action)
-    .argument("<app-id>")
-    .option("--idempotency-key <key>")
-    .action(async (appId, options) =>
-      output(
-        await client().post(
-          `/v1/apps/${appId}/${action}`,
-          {},
-          options.idempotencyKey ?? randomUUID(),
-        ),
-      ),
-    );
-}
 
 app
   .command("credential-create")
@@ -601,17 +639,71 @@ program
   .argument("<directory>")
   .option("--idempotency-key <key>")
   .action(async (directory, options) => {
-    const bundle = await buildBundle(callerPath(directory));
+    const sourceRoot = callerPath(directory);
+    const bundle = await buildBundle(sourceRoot);
     printBundleFiles(bundle.files);
     process.stderr.write(
-      `Uploading ${bundle.manifest.version} (${bundle.sha256.slice(0, 12)})\n`,
+      `Syncing ${bundle.manifest.version} (${bundle.sha256.slice(0, 12)})\n`,
     );
+    const control = client();
+    const draft = (await control.call("createDraft", {
+      appId: bundle.manifest.appId,
+      body: {
+        name: `CLI ${bundle.manifest.version}`,
+        cloneActive: false,
+      },
+    })) as { id?: string; revision?: number };
+    if (!draft.id || !draft.revision) {
+      throw new Error("Control plane did not return a source draft");
+    }
+    const changes = [];
+    for (const file of bundle.files) {
+      const content =
+        file === "opencloud.json"
+          ? Buffer.from(`${JSON.stringify(bundle.manifest, null, 2)}\n`)
+          : await readFile(path.join(sourceRoot, ...file.split("/")));
+      changes.push({
+        path: file,
+        contentBase64: content.toString("base64"),
+      });
+    }
+    let revision = draft.revision;
+    for (let offset = 0; offset < changes.length; offset += 200) {
+      const applied = (await control.call("applyDraftChanges", {
+        appId: bundle.manifest.appId,
+        draftId: draft.id,
+        body: {
+          expectedRevision: revision,
+          changes: changes.slice(offset, offset + 200),
+        },
+      })) as { draft?: { revision?: number } };
+      revision = applied.draft?.revision ?? revision + 1;
+    }
+    const validation = (await control.call("validateDraft", {
+      appId: bundle.manifest.appId,
+      draftId: draft.id,
+      body: {},
+    })) as { passed?: boolean; artifactSha256?: string };
+    if (!validation.passed) {
+      output({ draft, validation });
+      throw new Error("Authoritative server validation failed");
+    }
+    if (validation.artifactSha256 !== bundle.sha256) {
+      throw new Error(
+        "Local and server canonical bundle digests do not match",
+      );
+    }
     output(
-      await client().uploadDeployment(
-        bundle.manifest.appId,
-        bundle.manifest,
-        bundle.archive,
-        options.idempotencyKey ?? randomUUID(),
+      await control.call(
+        "deployDraft",
+        {
+          appId: bundle.manifest.appId,
+          draftId: draft.id,
+        },
+        {
+          idempotencyKey: options.idempotencyKey ?? randomUUID(),
+          timeoutMs: 120_000,
+        },
       ),
     );
   });
@@ -834,24 +926,42 @@ program
 const secret = program.command("secret").description("Manage app-scoped secrets");
 
 secret
-  .command("set")
+  .command("generate")
+  .description(
+    "Generate and store a random secret without returning its value",
+  )
   .argument("<app-id>")
   .argument("<name>")
-  .option("--value <value>", "secret value; prefer OPENCLOUD_SECRET_VALUE")
-  .action(async (appId, name, options) => {
-    const value = options.value ?? process.env.OPENCLOUD_SECRET_VALUE;
-    if (!value) {
-      throw new Error(
-        "Pass --value or set OPENCLOUD_SECRET_VALUE (preferred for shell history)",
-      );
-    }
+  .option("--bytes <number>", "random byte count", "32")
+  .option("--encoding <encoding>", "base64url or hex", "base64url")
+  .action(async (appId, name, options) =>
     output(
-      await client().put(
-        `/v1/apps/${appId}/secrets/${encodeURIComponent(name)}`,
-        { value },
-      ),
-    );
-  });
+      await client().call("generateSecret", {
+        appId,
+        name,
+        body: {
+          bytes: Number(options.bytes),
+          encoding: options.encoding,
+        },
+      }),
+    ),
+  );
+
+secret
+  .command("entry-link")
+  .description(
+    "Create a one-time browser link for entering a secret outside the agent conversation",
+  )
+  .argument("<app-id>")
+  .argument("<name>")
+  .action(async (appId, name) =>
+    output(
+      await client().call("createSecretEntryLink", {
+        appId,
+        name,
+      }),
+    ),
+  );
 
 secret
   .command("list")

@@ -9,12 +9,12 @@ plugin when one is available in that environment.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.2.1` in
+OpenCloud application skills pin an exact CLI release. To install `v0.3.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.2.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.2.1.tgz"
+OPENCLOUD_CLI_VERSION="v0.3.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.3.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -35,7 +35,8 @@ OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 
 ## Passwordless project onboarding
 
-For a new project, give the CLI the user's email and agreed title:
+Use OpenCloud MCP when the agent supports it. For terminal-only agents, give
+the CLI the user's email and agreed title:
 
 ```bash
 "$OPENCLOUD_CLI" onboard \
@@ -64,7 +65,28 @@ commit that session file. Commands use it automatically:
   --expect-app-id "$APP_ID" \
   --max-files 4
 "$OPENCLOUD_CLI" validate /absolute/path/to/app
+"$OPENCLOUD_CLI" deploy /absolute/path/to/app
+"$OPENCLOUD_CLI" app verify "$APP_ID"
 ```
+
+`deploy` uses the same canonical server draft, file-change, validation, and
+deployment contract as OpenCloud MCP. It refuses deployment when the local and
+server bundle digests differ.
+
+The provisional account may create multiple apps during its 24-hour window.
+If the email remains unverified when that window ends, OpenCloud pauses every
+linked app, function, and cron schedule while preserving data and releases.
+Email verification resumes them.
+
+Secrets never need to cross the terminal transcript:
+
+```bash
+"$OPENCLOUD_CLI" secret generate "$APP_ID" SESSION_KEY
+"$OPENCLOUD_CLI" secret entry-link "$APP_ID" PAYMENT_API_KEY
+```
+
+The first command creates a server-generated value. The second returns a
+one-time browser URL where the user enters a value directly into OpenCloud.
 
 Existing installations can still supply `OPENCLOUD_API_URL` and
 `OPENCLOUD_TOKEN` explicitly.
@@ -72,19 +94,17 @@ Existing installations can still supply `OPENCLOUD_API_URL` and
 See the [OpenCloud CLI reference](https://docs.opencloud.ai/reference/cli) and
 [agent guide](https://docs.opencloud.ai/getting-started/agents).
 
-## Browser verification
+## Verification
 
-`app verify-ui` uses Playwright. Point it at an existing Chromium executable:
+`app verify` is the authoritative durable release gate. OpenCloud runs health,
+SDK-pin, HTTPS, and Chromium checks on the server:
 
 ```bash
-"$OPENCLOUD_CLI" app verify-ui "$APP_ID" \
-  --chromium-path /usr/bin/chromium \
-  --require-interaction
+"$OPENCLOUD_CLI" app verify "$APP_ID"
 ```
 
-If Chromium is not installed, install the browser and its required host
-libraries through the operating system or use OpenCloud's pinned verification
-container from a platform checkout.
+The lower-level `app smoke` and `app verify-ui` commands remain diagnostic
+helpers for platform development; they are not substitutes for `app verify`.
 
 ## Develop
 

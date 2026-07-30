@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+- Converge terminal deployment with MCP on the canonical control-plane
+  registry, generated OpenAPI contract, shared typed client, and shared
+  deterministic bundler.
+- Add server-hosted source drafts with revision and base-hash guards,
+  authoritative validation, exact digest matching, and validated-draft deploy.
+- Add durable `app verify` with server-side HTTPS, SDK-pin, health, and
+  Chromium verification.
+- Support multiple apps from a provisional 24-hour account and automatic
+  pause/resume after email expiry/verification.
+- Add server-generated secrets and one-time browser entry links; remove
+  plaintext secret setting from the CLI.
+- Remove unsupported archive, unarchive, and restart commands from the
+  canonical CLI surface.
+
 ## 0.2.1
 
 - Make `opencloud.ai` the default hosted OpenCloud API and documentation

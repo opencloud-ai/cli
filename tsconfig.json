@@ -14,7 +14,11 @@
     "noEmit": true,
     "paths": {
       "@opencloud/contracts": ["./vendor/contracts/src/index.ts"],
-      "@opencloud/js": ["./vendor/browser-client/src/index.ts"]
+      "@opencloud/js": ["./vendor/browser-client/src/index.ts"],
+      "@opencloud/bundler": ["./vendor/bundler/src/index.ts"],
+      "@opencloud/control-plane-client": [
+        "./vendor/control-plane-client/src/index.ts"
+      ]
     }
   },
   "include": ["src/**/*.ts", "vendor/**/*.ts"],
