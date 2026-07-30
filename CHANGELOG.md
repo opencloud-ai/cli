@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Add `agent-feed` for the stable, bounded app health, signal, alert, and
+  recent-event contract.
+- Add `alert-rule list|put|delete` for app-scoped fixed-window custom metric
+  alert rules.
+- Vendor the JavaScript SDK 0.2.2 custom counter/gauge contract and the updated
+  control-plane/OpenAPI operation registry.
+
 ## 0.3.0
 
 - Converge terminal deployment with MCP on the canonical control-plane

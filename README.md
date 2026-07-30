@@ -9,12 +9,12 @@ plugin when one is available in that environment.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.3.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.4.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.3.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.3.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.4.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.4.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -93,6 +93,26 @@ Existing installations can still supply `OPENCLOUD_API_URL` and
 
 See the [OpenCloud CLI reference](https://docs.opencloud.ai/reference/cli) and
 [agent guide](https://docs.opencloud.ai/getting-started/agents).
+
+## Agent Feed and alert rules
+
+Read the stable app health, signal, alert, and recent-event contract without
+depending on internal Prometheus, Loki, or Grafana APIs:
+
+```bash
+"$OPENCLOUD_CLI" agent-feed "$APP_ID"
+"$OPENCLOUD_CLI" alert-rule list "$APP_ID"
+"$OPENCLOUD_CLI" alert-rule put "$APP_ID" too-many-overdue \
+  --name "Too many overdue tasks" \
+  --metric overdue_tasks \
+  --aggregation latest \
+  --operator gt \
+  --threshold 10 \
+  --window 15m
+```
+
+Custom metrics and rules are bounded platform contracts. Alerts inform an
+agent; they do not authorize automatic rollback or destructive repair.
 
 ## Verification
 

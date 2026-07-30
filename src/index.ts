@@ -25,7 +25,7 @@ import {
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.3.0", "-V, --cli-version", "print the CLI version")
+  .version("0.4.0", "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -1077,6 +1077,84 @@ program
   .argument("<app-id>")
   .action(async (appId) =>
     output(await client().get(`/v1/apps/${appId}/usage`)),
+  );
+
+program
+  .command("agent-feed")
+  .description("Read the stable app health and alert contract for agents")
+  .argument("<app-id>")
+  .option("--since <iso>", "return events and resolved alerts after this time")
+  .action(async (appId, options) => {
+    const query = options.since
+      ? `?since=${encodeURIComponent(String(options.since))}`
+      : "";
+    output(await client().get(`/v1/apps/${appId}/agent-feed${query}`));
+  });
+
+const alertRule = program
+  .command("alert-rule")
+  .description("Manage app-scoped custom metric alert rules");
+
+alertRule
+  .command("list")
+  .argument("<app-id>")
+  .action(async (appId) =>
+    output(await client().get(`/v1/apps/${appId}/alert-rules`)),
+  );
+
+alertRule
+  .command("put")
+  .argument("<app-id>")
+  .argument("<rule-id>")
+  .requiredOption("--name <name>", "human-readable alert name")
+  .requiredOption("--metric <metric>", "declared custom metric")
+  .addOption(
+    new Option("--aggregation <aggregation>")
+      .choices(["sum", "rate", "latest", "min", "max", "avg"])
+      .makeOptionMandatory(),
+  )
+  .addOption(
+    new Option("--operator <operator>")
+      .choices(["gt", "gte", "lt", "lte", "eq"])
+      .makeOptionMandatory(),
+  )
+  .requiredOption("--threshold <number>")
+  .addOption(
+    new Option("--window <window>")
+      .choices(["5m", "15m", "1h", "24h"])
+      .makeOptionMandatory(),
+  )
+  .option("--minimum-samples <number>", "minimum points before evaluation", "1")
+  .addOption(
+    new Option("--severity <severity>")
+      .choices(["info", "warning", "critical"])
+      .default("warning"),
+  )
+  .option("--disabled", "create the rule in a disabled state")
+  .action(async (appId, ruleId, options) =>
+    output(
+      await client().put(`/v1/apps/${appId}/alert-rules/${ruleId}`, {
+        name: options.name,
+        metric: options.metric,
+        aggregation: options.aggregation,
+        operator: options.operator,
+        threshold: Number(options.threshold),
+        window: options.window,
+        minimumSamples: Number(options.minimumSamples),
+        severity: options.severity,
+        enabled: options.disabled !== true,
+      }),
+    ),
+  );
+
+alertRule
+  .command("delete")
+  .argument("<app-id>")
+  .argument("<rule-id>")
+  .action(async (appId, ruleId) =>
+    output(
+      await client().delete(`/v1/apps/${appId}/alert-rules/${ruleId}`),
+    ),
   );
 
 program.parseAsync().catch((error: unknown) => {

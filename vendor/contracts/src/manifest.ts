@@ -39,6 +39,53 @@ export const cronSchema = z.object({
 
 export const storageAuthorizationSchema = z.enum(["app", "owner-prefix"]);
 
+export const customMetricNameSchema = z
+  .string()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z][a-z0-9_]*$/, "metric names must use lowercase snake_case");
+
+export const customMetricDimensionNameSchema = z
+  .string()
+  .min(1)
+  .max(40)
+  .regex(
+    /^[a-z][a-z0-9_]*$/,
+    "metric dimension names must use lowercase snake_case",
+  );
+
+export const customMetricDimensionValueSchema = z
+  .string()
+  .min(1)
+  .max(40)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "metric dimension values must be bounded identifiers",
+  );
+
+export const customMetricDefinitionSchema = z.object({
+  name: customMetricNameSchema,
+  type: z.enum(["counter", "gauge"]),
+  unit: z
+    .string()
+    .min(1)
+    .max(32)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9_./%*-]*$/)
+    .optional(),
+  description: z.string().min(1).max(240).optional(),
+  dimensions: z
+    .record(
+      customMetricDimensionNameSchema,
+      z.object({
+        values: z.array(customMetricDimensionValueSchema).min(1).max(20),
+      }),
+    )
+    .refine((dimensions) => Object.keys(dimensions).length <= 3, {
+      message: "custom metrics may declare at most three dimensions",
+    })
+    .default({}),
+});
+
 export const openCloudManifestSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -76,11 +123,21 @@ export const openCloudManifestSchema = z
       .array(z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/))
       .max(100)
       .default([]),
+    observability: z
+      .object({
+        metrics: z.array(customMetricDefinitionSchema).max(20).default([]),
+      })
+      .optional(),
   })
   .superRefine((manifest, context) => {
     const assertUnique = (
       values: string[],
-      path: "migrations" | "functions" | "cron" | "requiredSecrets",
+      path:
+        | "migrations"
+        | "functions"
+        | "cron"
+        | "requiredSecrets"
+        | "observability",
     ) => {
       const seen = new Set<string>();
       values.forEach((value, index) => {
@@ -104,6 +161,10 @@ export const openCloudManifestSchema = z
     );
     assertUnique(manifest.cron.map((cron) => cron.name), "cron");
     assertUnique(manifest.requiredSecrets, "requiredSecrets");
+    assertUnique(
+      (manifest.observability?.metrics ?? []).map((metric) => metric.name),
+      "observability",
+    );
     const orderedMigrations = [...manifest.migrations]
       .map((migration) => migration.id)
       .sort();
@@ -144,6 +205,9 @@ export type OpenCloudManifest = z.infer<typeof openCloudManifestSchema>;
 export type OpenCloudMigration = z.infer<typeof migrationSchema>;
 export type StorageAuthorization = z.infer<typeof storageAuthorizationSchema>;
 export type JavaScriptSdkVersion = z.infer<typeof javascriptSdkVersionSchema>;
+export type CustomMetricDefinition = z.infer<
+  typeof customMetricDefinitionSchema
+>;
 
 export function parseManifest(value: unknown): OpenCloudManifest {
   return openCloudManifestSchema.parse(value);

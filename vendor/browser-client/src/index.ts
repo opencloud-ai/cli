@@ -7,7 +7,7 @@
  */
 
 /** Exact version of the self-hosted OpenCloud JavaScript SDK. */
-export const OPEN_CLOUD_JS_VERSION = "0.2.1";
+export const OPEN_CLOUD_JS_VERSION = "0.2.2";
 
 /** @deprecated Use {@link OPEN_CLOUD_JS_VERSION}. */
 export const BROWSER_CLIENT_VERSION = OPEN_CLOUD_JS_VERSION;
@@ -144,6 +144,20 @@ export interface OpenCloudTelemetrySummary {
   asOf: string;
   usage: OpenCloudTelemetryRollup | null;
   activity: OpenCloudTelemetryActivity;
+}
+
+export type OpenCloudMetricDimensions = Record<string, string>;
+
+export interface OpenCloudMetricWriteOptions {
+  dimensions?: OpenCloudMetricDimensions;
+  /** Stable key used to make a retried measurement idempotent. */
+  idempotencyKey?: string;
+}
+
+export interface OpenCloudMetricWriteResult {
+  accepted: number;
+  duplicates: number;
+  recordedAt: string;
 }
 
 export class OpenCloudError extends Error {}
@@ -579,7 +593,10 @@ export class OpenCloudFunctionsClient {
 
 export class OpenCloudTelemetryClient {
   constructor(
-    private readonly request: (path: string) => Promise<Response>,
+    private readonly request: (
+      path: string,
+      init?: RequestInit,
+    ) => Promise<Response>,
   ) {}
 
   /**
@@ -596,6 +613,69 @@ export class OpenCloudTelemetryClient {
       );
     }
     return parseTelemetrySummary(await response.json());
+  }
+
+  /** Add a non-negative delta to a deployment-declared counter. */
+  increment(
+    name: string,
+    value = 1,
+    options: OpenCloudMetricWriteOptions = {},
+  ): Promise<OpenCloudMetricWriteResult> {
+    if (!Number.isFinite(value) || value < 0) {
+      throw new OpenCloudError(
+        "OpenCloud counter increments must be finite and non-negative",
+      );
+    }
+    return this.write(name, value, options);
+  }
+
+  /** Record the current value of a deployment-declared gauge. */
+  gauge(
+    name: string,
+    value: number,
+    options: OpenCloudMetricWriteOptions = {},
+  ): Promise<OpenCloudMetricWriteResult> {
+    if (!Number.isFinite(value)) {
+      throw new OpenCloudError("OpenCloud gauge values must be finite");
+    }
+    return this.write(name, value, options);
+  }
+
+  private async write(
+    name: string,
+    value: number,
+    options: OpenCloudMetricWriteOptions,
+  ): Promise<OpenCloudMetricWriteResult> {
+    const response = await this.request("/_opencloud/telemetry/metrics", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        measurements: [
+          {
+            name,
+            value,
+            dimensions: options.dimensions ?? {},
+            ...(options.idempotencyKey
+              ? { idempotencyKey: options.idempotencyKey }
+              : {}),
+          },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      throw new OpenCloudError(
+        `OpenCloud metric ingestion returned HTTP ${response.status}`,
+      );
+    }
+    const result = requiredObject(await response.json(), "metric result");
+    return {
+      accepted: requiredInteger(result.accepted, "accepted"),
+      duplicates: requiredInteger(result.duplicates, "duplicates"),
+      recordedAt: parseIso(result.recordedAt, "recordedAt"),
+    };
   }
 }
 
@@ -984,12 +1064,15 @@ export class OpenCloudBrowserClient {
     );
     this.functions = new OpenCloudFunctionsClient(this);
     this.realtime = new OpenCloudRealtimeClient(this);
-    this.telemetry = new OpenCloudTelemetryClient((path) =>
-      this.fetcher(new URL(path, this.baseUrl), {
+    this.telemetry = new OpenCloudTelemetryClient((path, init = {}) => {
+      const headers = new Headers(init.headers);
+      if (!headers.has("accept")) headers.set("accept", "application/json");
+      return this.fetcher(new URL(path, this.baseUrl), {
+        ...init,
         credentials: "same-origin",
-        headers: { accept: "application/json" },
-      }),
-    );
+        headers,
+      });
+    });
   }
 
   /** Read and cache host-bound runtime configuration. */

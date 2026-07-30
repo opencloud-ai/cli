@@ -76,6 +76,72 @@ export const completeAgentOnboardingRequestSchema = z.object({
   completionToken: z.string().min(32).max(512),
 });
 
+export const customMetricDimensionsSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+  z.string().min(1).max(40),
+);
+
+export const customMetricMeasurementSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z][a-z0-9_]*$/),
+  value: z.number().finite().min(-1e15).max(1e15),
+  dimensions: customMetricDimensionsSchema.default({}),
+  idempotencyKey: z
+    .string()
+    .min(8)
+    .max(120)
+    .regex(/^[A-Za-z0-9._:-]+$/)
+    .optional(),
+});
+
+export const ingestCustomMetricsRequestSchema = z.object({
+  measurements: z.array(customMetricMeasurementSchema).min(1).max(20),
+});
+
+export const alertRuleIdSchema = z
+  .string()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z][a-z0-9-]*$/);
+
+export const alertAggregationSchema = z.enum([
+  "sum",
+  "rate",
+  "latest",
+  "min",
+  "max",
+  "avg",
+]);
+export const alertOperatorSchema = z.enum(["gt", "gte", "lt", "lte", "eq"]);
+export const alertWindowSchema = z.enum(["5m", "15m", "1h", "24h"]);
+export const alertSeveritySchema = z.enum(["info", "warning", "critical"]);
+export const alertStateSchema = z.enum([
+  "ok",
+  "firing",
+  "resolved",
+  "unknown",
+  "invalid",
+]);
+
+export const upsertAlertRuleRequestSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  metric: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z][a-z0-9_]*$/),
+  aggregation: alertAggregationSchema,
+  operator: alertOperatorSchema,
+  threshold: z.number().finite().min(-1e15).max(1e15),
+  window: alertWindowSchema,
+  minimumSamples: z.number().int().min(1).max(100_000).default(1),
+  severity: alertSeveritySchema.default("warning"),
+  enabled: z.boolean().default(true),
+});
+
 export const deploymentSubmissionSchema = z.object({
   manifest: openCloudManifestSchema,
   artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -94,6 +160,20 @@ export type StartAgentOnboardingRequest = z.infer<
 >;
 export type CompleteAgentOnboardingRequest = z.infer<
   typeof completeAgentOnboardingRequestSchema
+>;
+export type CustomMetricMeasurement = z.infer<
+  typeof customMetricMeasurementSchema
+>;
+export type IngestCustomMetricsRequest = z.infer<
+  typeof ingestCustomMetricsRequestSchema
+>;
+export type AlertAggregation = z.infer<typeof alertAggregationSchema>;
+export type AlertOperator = z.infer<typeof alertOperatorSchema>;
+export type AlertWindow = z.infer<typeof alertWindowSchema>;
+export type AlertSeverity = z.infer<typeof alertSeveritySchema>;
+export type AlertState = z.infer<typeof alertStateSchema>;
+export type UpsertAlertRuleRequest = z.infer<
+  typeof upsertAlertRuleRequestSchema
 >;
 
 export type AgentOnboardingState =
@@ -196,4 +276,90 @@ export interface ErrorResponse {
   message: string;
   details?: unknown;
   requestId?: string;
+}
+
+export interface CustomMetricIngestResponse {
+  accepted: number;
+  duplicates: number;
+  recordedAt: string;
+}
+
+export interface AlertRuleRecord extends UpsertAlertRuleRequest {
+  id: string;
+  appId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentFeedSignal {
+  name: string;
+  type: "state" | "counter" | "gauge" | "ratio" | "duration";
+  value: string | number | null;
+  unit: string | null;
+  windowSeconds: number | null;
+  source:
+    | "control"
+    | "runtime"
+    | "usage"
+    | "browser"
+    | "authenticated"
+    | "function"
+    | "mixed"
+    | "none";
+}
+
+export interface AgentFeedAlert {
+  id: string;
+  kind: "builtin" | "custom_metric";
+  state: AlertState;
+  severity: AlertSeverity;
+  title: string;
+  observedAt: string;
+  lastTransitionAt: string | null;
+  metric?: {
+    name: string;
+    type: "counter" | "gauge";
+    value: number | null;
+    unit: string | null;
+    aggregation: AlertAggregation;
+    window: AlertWindow;
+    samples: number;
+    source: "browser" | "authenticated" | "function" | "mixed" | "none";
+  };
+}
+
+export interface AgentFeedEvent {
+  id: string;
+  type: "operation" | "cron";
+  state: string;
+  occurredAt: string;
+  message: string;
+  deploymentId: string | null;
+}
+
+export interface AgentFeedResponse {
+  contractVersion: "1";
+  app: {
+    id: string;
+    name: string;
+    slug: string;
+    state: AppState;
+    activeDeployment: {
+      id: string;
+      version: string;
+      state: DeploymentState;
+    } | null;
+  };
+  observedAt: string;
+  telemetry: {
+    status: "available" | "unavailable";
+    latestIngestedAt: string | null;
+    ingestionLagSeconds: number | null;
+    stale: boolean;
+  };
+  signals: AgentFeedSignal[];
+  alerts: AgentFeedAlert[];
+  events: AgentFeedEvent[];
+  eventsTruncated: boolean;
+  nextSince: string;
 }

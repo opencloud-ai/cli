@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  alertRuleIdSchema,
   appStateSchema,
   appVisibilitySchema,
   completeAgentOnboardingRequestSchema,
@@ -8,6 +9,7 @@ import {
   deploymentStateSchema,
   operationStateSchema,
   startAgentOnboardingRequestSchema,
+  upsertAlertRuleRequestSchema,
 } from "./api.js";
 
 const uuid = z.uuid();
@@ -196,6 +198,50 @@ const secretMetadataOutput = z
     name: secretName,
     createdAt: z.string(),
     updatedAt: z.string(),
+  })
+  .passthrough();
+
+const alertRuleOutput = upsertAlertRuleRequestSchema
+  .extend({
+    id: alertRuleIdSchema,
+    appId: uuid,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
+const agentFeedOutput = z
+  .object({
+    contractVersion: z.literal("1"),
+    app: z
+      .object({
+        id: uuid,
+        name: z.string(),
+        slug: z.string(),
+        state: appStateSchema,
+        activeDeployment: z
+          .object({
+            id: uuid,
+            version: z.string(),
+            state: deploymentStateSchema,
+          })
+          .nullable(),
+      })
+      .passthrough(),
+    observedAt: z.string(),
+    telemetry: z
+      .object({
+        status: z.enum(["available", "unavailable"]),
+        latestIngestedAt: z.string().nullable(),
+        ingestionLagSeconds: z.number().nullable(),
+        stale: z.boolean(),
+      })
+      .passthrough(),
+    signals: z.array(z.unknown()),
+    alerts: z.array(z.unknown()),
+    events: z.array(z.unknown()),
+    eventsTruncated: z.boolean(),
+    nextSince: z.string(),
   })
   .passthrough();
 
@@ -1017,6 +1063,100 @@ export const controlPlaneOperations = {
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: true,
+    },
+  }),
+  getAgentFeed: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/agent-feed",
+    summary: "Get the app Agent Feed",
+    description:
+      "Returns the stable, bounded app health, signal, alert, and recent-event contract for agents.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: z
+        .object({
+          since: z.iso.datetime({ offset: true }).optional(),
+        })
+        .optional(),
+    }),
+    output: agentFeedOutput,
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "get_agent_feed",
+      title: "Get Agent Feed",
+      description:
+        "Read bounded app state, health signals, alerts, and recent lifecycle events.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listAlertRules: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/alert-rules",
+    summary: "List custom metric alert rules",
+    description: "Lists the app's bounded fixed-threshold alert rules.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath,
+    output: z.array(alertRuleOutput),
+    idempotency: "none",
+    mcp: {
+      toolName: "list_alert_rules",
+      title: "List alert rules",
+      description: "List alert rules for declared app metrics.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  putAlertRule: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/alert-rules/{ruleId}",
+    summary: "Create or replace a custom metric alert rule",
+    description:
+      "Creates or replaces one fixed-window threshold rule for a metric declared by the active deployment.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({
+      ruleId: alertRuleIdSchema,
+      body: upsertAlertRuleRequestSchema,
+    }),
+    output: alertRuleOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "put_alert_rule",
+      title: "Put alert rule",
+      description: "Create or replace one bounded app metric alert rule.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  deleteAlertRule: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/alert-rules/{ruleId}",
+    summary: "Delete a custom metric alert rule",
+    description: "Deletes one app-scoped alert rule.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ ruleId: alertRuleIdSchema }),
+    output: z.object({ deleted: z.literal(true) }),
+    idempotency: "none",
+    mcp: {
+      toolName: "delete_alert_rule",
+      title: "Delete alert rule",
+      description: "Delete one app metric alert rule.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
     },
   }),
   queryLogs: operation({

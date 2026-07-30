@@ -28,6 +28,8 @@ describe("controlPlaneOperations", () => {
         "verify_app",
         "generate_secret",
         "create_secret_entry_link",
+        "get_agent_feed",
+        "put_alert_rule",
       ]),
     );
   });

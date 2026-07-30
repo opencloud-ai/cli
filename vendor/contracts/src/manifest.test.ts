@@ -77,6 +77,80 @@ describe("OpenCloud manifest", () => {
     ).toThrow();
   });
 
+  it("accepts a bounded deployment-pinned custom metric catalog", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        observability: {
+          metrics: [
+            {
+              name: "tasks_created",
+              type: "counter",
+              unit: "tasks",
+              dimensions: {
+                assignee_type: { values: ["parent", "child"] },
+              },
+            },
+            {
+              name: "overdue_tasks",
+              type: "gauge",
+              unit: "tasks",
+            },
+          ],
+        },
+      }).observability,
+    ).toEqual({
+      metrics: [
+        {
+          name: "tasks_created",
+          type: "counter",
+          unit: "tasks",
+          dimensions: {
+            assignee_type: { values: ["parent", "child"] },
+          },
+        },
+        {
+          name: "overdue_tasks",
+          type: "gauge",
+          unit: "tasks",
+          dimensions: {},
+        },
+      ],
+    });
+  });
+
+  it("rejects duplicate or high-cardinality custom metric definitions", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        observability: {
+          metrics: [
+            { name: "tasks_created", type: "counter" },
+            { name: "tasks_created", type: "gauge" },
+          ],
+        },
+      }),
+    ).toThrow(/must be unique/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        observability: {
+          metrics: [
+            {
+              name: "tasks-created",
+              type: "counter",
+              dimensions: {
+                user_id: {
+                  values: Array.from({ length: 21 }, (_, index) => `u${index}`),
+                },
+              },
+            },
+          ],
+        },
+      }),
+    ).toThrow();
+  });
+
   it("rejects archive traversal paths", () => {
     expect(() =>
       parseManifest({

@@ -82,7 +82,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       javascriptSdk: {
-        version: "0.2.1",
+        version: "0.2.2",
       },
     });
     expect(first.files).toEqual([
