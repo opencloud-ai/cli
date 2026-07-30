@@ -206,6 +206,7 @@ async function selectBundleFiles(
       relativeDirectory,
       label,
     );
+    assertNotLocalMetadataPath(root, absoluteDirectory, label);
     await assertNoSymlinkComponents(root, absoluteDirectory, label);
     await assertDirectory(absoluteDirectory, label);
     await walkDirectory(root, absoluteDirectory, selection, manifestFile);
@@ -220,6 +221,11 @@ async function selectBundleFiles(
     const absoluteFile = resolveBundlePath(
       root,
       migration.file,
+      `Migration file ${migration.file}`,
+    );
+    assertNotLocalMetadataPath(
+      root,
+      absoluteFile,
       `Migration file ${migration.file}`,
     );
     assertNotAuthorManifestInput(
@@ -251,6 +257,11 @@ async function selectBundleFiles(
     const entrypoint = resolveBundlePath(
       root,
       definition.entrypoint,
+      `Function entrypoint ${definition.entrypoint}`,
+    );
+    assertNotLocalMetadataPath(
+      root,
+      entrypoint,
       `Function entrypoint ${definition.entrypoint}`,
     );
     assertNotAuthorManifestInput(
@@ -286,6 +297,9 @@ async function walkDirectory(
     const target = path.join(directory, entry.name);
     const info = await lstat(target);
     const relative = bundleRelativePath(root, target);
+    if (relative === ".opencloud" || relative.startsWith(".opencloud/")) {
+      continue;
+    }
     if (info.isSymbolicLink()) {
       throw new Error(`App bundles cannot contain symlinks: ${relative}`);
     }
@@ -297,6 +311,17 @@ async function walkDirectory(
       throw new Error(`App bundles only support regular files: ${relative}`);
     }
     addSelectedFile(root, target, selection, manifestFile);
+  }
+}
+
+function assertNotLocalMetadataPath(
+  root: string,
+  target: string,
+  label: string,
+): void {
+  const relative = bundleRelativePath(root, target);
+  if (relative === ".opencloud" || relative.startsWith(".opencloud/")) {
+    throw new Error(`${label} cannot use the reserved .opencloud metadata directory`);
   }
 }
 

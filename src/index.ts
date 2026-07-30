@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Command, Option } from "commander";
 import YAML from "yaml";
@@ -25,7 +25,7 @@ import {
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.4.0", "-V, --cli-version", "print the CLI version")
+  .version("0.5.0", "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -58,8 +58,7 @@ function client(): OpenCloudClient {
     apiUrl?: string;
     token?: string;
   }>();
-  const stored =
-    options.apiUrl && options.token ? null : availableSession();
+  const stored = options.apiUrl && options.token ? null : availableSession();
   const apiUrl = options.apiUrl ?? stored?.apiUrl;
   const token =
     options.token ?? (stored?.state === "ready" ? stored.token : undefined);
@@ -69,7 +68,7 @@ function client(): OpenCloudClient {
         ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
         : stored?.state === "starting"
           ? "Onboarding has not completed. Re-run the same opencloud onboard command."
-        : "Run opencloud onboard, set OPENCLOUD_API_URL and OPENCLOUD_TOKEN, or pass --api-url and --token.",
+          : "Run opencloud onboard, set OPENCLOUD_API_URL and OPENCLOUD_TOKEN, or pass --api-url and --token.",
     );
   }
   return new OpenCloudClient({
@@ -92,6 +91,208 @@ function printBundleFiles(files: string[]): void {
       .map((file) => `  ${file}`)
       .join("\n")}\n`,
   );
+}
+
+interface LocalDevState {
+  schemaVersion: 1;
+  appId: string;
+  draftId: string;
+  sessionId: string;
+  artifactSha256: string;
+  updatedAt: string;
+}
+
+interface DevSessionWire {
+  id: string;
+  appId: string;
+  draftId: string;
+  status: string;
+  previewUrl: string;
+  activeRevision: {
+    id: string;
+    draftRevision: number;
+    artifactSha256: string;
+  } | null;
+  verification: { receiptId: string; revisionId: string } | null;
+}
+
+function devStatePath(sourceRoot: string): string {
+  return path.join(sourceRoot, ".opencloud", "dev.json");
+}
+
+async function readDevState(sourceRoot: string): Promise<LocalDevState | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(devStatePath(sourceRoot), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const value = parsed as Partial<LocalDevState>;
+  if (
+    value.schemaVersion !== 1 ||
+    !value.appId ||
+    !value.draftId ||
+    !value.sessionId ||
+    !value.artifactSha256 ||
+    !value.updatedAt
+  ) {
+    throw new Error(
+      ".opencloud/dev.json is invalid; stop the session or repair the file",
+    );
+  }
+  return value as LocalDevState;
+}
+
+async function requireDevState(sourceRoot: string): Promise<LocalDevState> {
+  const state = await readDevState(sourceRoot);
+  if (!state) {
+    throw new Error(
+      "No local development session was found. Run opencloud app dev start <directory> first.",
+    );
+  }
+  return state;
+}
+
+async function saveDevState(
+  sourceRoot: string,
+  state: LocalDevState,
+): Promise<void> {
+  const directory = path.dirname(devStatePath(sourceRoot));
+  const temporary = path.join(
+    directory,
+    `.dev-${process.pid}-${randomUUID()}.tmp`,
+  );
+  await mkdir(directory, { recursive: true });
+  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, devStatePath(sourceRoot));
+}
+
+async function synchronizeValidatedDraft(
+  control: OpenCloudClient,
+  sourceRoot: string,
+  existingDraftId?: string,
+): Promise<{
+  appId: string;
+  draftId: string;
+  artifactSha256: string;
+  validation: unknown;
+}> {
+  const bundle = await buildBundle(sourceRoot);
+  printBundleFiles(bundle.files);
+  let draft: { id: string; revision: number };
+  if (existingDraftId) {
+    const existing = await control.call("getDraft", {
+      appId: bundle.manifest.appId,
+      draftId: existingDraftId,
+    });
+    if (["deploying", "deployed", "discarded"].includes(existing.status)) {
+      throw new Error(
+        `The local dev draft is ${existing.status}; start a new dev session for the next change.`,
+      );
+    }
+    draft = { id: existing.id, revision: existing.revision };
+  } else {
+    const created = await control.call("createDraft", {
+      appId: bundle.manifest.appId,
+      body: {
+        name: `Dev ${bundle.manifest.version}`,
+        cloneActive: false,
+      },
+    });
+    draft = { id: created.id, revision: created.revision };
+  }
+
+  const remoteFiles = await control.call("listDraftFiles", {
+    appId: bundle.manifest.appId,
+    draftId: draft.id,
+  });
+  const remote = new Map(
+    remoteFiles
+      .filter((file) => !file.deleted)
+      .map((file) => [file.path, file]),
+  );
+  const local = new Map<string, { content: Buffer; sha256: string }>();
+  for (const file of bundle.files) {
+    const content =
+      file === "opencloud.json"
+        ? Buffer.from(`${JSON.stringify(bundle.manifest, null, 2)}\n`)
+        : await readFile(path.join(sourceRoot, ...file.split("/")));
+    local.set(file, {
+      content,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    });
+  }
+
+  const changes: Array<{
+    path: string;
+    baseSha256?: string | null;
+    contentBase64?: string;
+    delete?: boolean;
+  }> = [];
+  for (const [file, value] of local) {
+    const existing = remote.get(file);
+    if (existing?.sha256 === value.sha256) continue;
+    changes.push({
+      path: file,
+      ...(existing ? { baseSha256: existing.sha256 } : {}),
+      contentBase64: value.content.toString("base64"),
+    });
+  }
+  for (const [file, existing] of remote) {
+    if (!local.has(file)) {
+      changes.push({ path: file, baseSha256: existing.sha256, delete: true });
+    }
+  }
+  changes.sort((left, right) => left.path.localeCompare(right.path));
+
+  let revision = draft.revision;
+  for (let offset = 0; offset < changes.length; offset += 200) {
+    const applied = await control.call("applyDraftChanges", {
+      appId: bundle.manifest.appId,
+      draftId: draft.id,
+      body: {
+        expectedRevision: revision,
+        changes: changes.slice(offset, offset + 200),
+      },
+    });
+    revision = applied.draft.revision;
+  }
+  const validation = await control.call("validateDraft", {
+    appId: bundle.manifest.appId,
+    draftId: draft.id,
+    body: {},
+  });
+  if (!validation.passed) {
+    output({ draft, validation });
+    throw new Error("Authoritative server validation failed");
+  }
+  if (validation.artifactSha256 !== bundle.sha256) {
+    throw new Error("Local and server canonical bundle digests do not match");
+  }
+  return {
+    appId: bundle.manifest.appId,
+    draftId: draft.id,
+    artifactSha256: bundle.sha256,
+    validation,
+  };
+}
+
+async function storeDevSession(
+  sourceRoot: string,
+  artifactSha256: string,
+  session: DevSessionWire,
+): Promise<void> {
+  await saveDevState(sourceRoot, {
+    schemaVersion: 1,
+    appId: session.appId,
+    draftId: session.draftId,
+    sessionId: session.id,
+    artifactSha256,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 function onboardingApiUrl(): string {
@@ -217,9 +418,7 @@ program
     }
     const idempotencyKey =
       options.idempotencyKey ??
-      (stored?.state === "starting"
-        ? stored.idempotencyKey
-        : randomUUID());
+      (stored?.state === "starting" ? stored.idempotencyKey : randomUUID());
     await saveSession(file, {
       schemaVersion: 1,
       state: "starting",
@@ -234,13 +433,7 @@ program
         idempotencyKey,
       ),
     );
-    output(
-      await persistOnboardingResponse(
-        response,
-        apiUrl,
-        file,
-      ),
-    );
+    output(await persistOnboardingResponse(response, apiUrl, file));
   });
 
 program
@@ -275,13 +468,7 @@ program
         { completionToken: stored.completionToken },
       ),
     );
-    output(
-      await persistOnboardingResponse(
-        response,
-        stored.apiUrl,
-        file,
-      ),
-    );
+    output(await persistOnboardingResponse(response, stored.apiUrl, file));
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
@@ -290,6 +477,10 @@ app
   .command("create")
   .requiredOption("--name <name>")
   .option("--visibility <visibility>", "public or private", "private")
+  .option(
+    "--owner-user-id <uuid>",
+    "required when using the platform operator credential",
+  )
   .option("--idempotency-key <key>")
   .action(async (options) => {
     output(
@@ -297,9 +488,12 @@ app
         "createApp",
         {
           body: {
-          name: options.name,
-          visibility: options.visibility,
-        },
+            name: options.name,
+            visibility: options.visibility,
+            ...(options.ownerUserId
+              ? { ownerUserId: options.ownerUserId }
+              : {}),
+          },
         },
         {
           idempotencyKey: options.idempotencyKey ?? randomUUID(),
@@ -350,10 +544,8 @@ app
       javascriptSdk: {
         package: "@opencloud/js",
         version: deployment.javascriptSdkVersion,
-        module:
-          `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.js`,
-        types:
-          `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.d.ts`,
+        module: `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.js`,
+        types: `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.d.ts`,
       },
     });
   });
@@ -378,6 +570,214 @@ app
       authUrl: value.authUrl,
       apiUrl: value.apiUrl,
     });
+  });
+
+const dev = app
+  .command("dev")
+  .description(
+    "Develop against an isolated preview before production deployment",
+  );
+
+dev
+  .command("start")
+  .description("Validate, sync, and start or resume an isolated dev preview")
+  .argument("<directory>")
+  .action(async (directory) => {
+    const sourceRoot = callerPath(directory);
+    const control = client();
+    const previous = await readDevState(sourceRoot);
+    const synchronized = await synchronizeValidatedDraft(
+      control,
+      sourceRoot,
+      previous?.draftId,
+    );
+    if (previous && previous.appId !== synchronized.appId) {
+      throw new Error("The app manifest no longer matches .opencloud/dev.json");
+    }
+    const session = (await control.call("startDevSession", {
+      appId: synchronized.appId,
+      draftId: synchronized.draftId,
+      body: { apply: true },
+    })) as DevSessionWire;
+    await storeDevSession(sourceRoot, synchronized.artifactSha256, session);
+    output({
+      session,
+      validation: synchronized.validation,
+      localState: devStatePath(sourceRoot),
+      next: [
+        "Open session.previewUrl or use `opencloud app dev request <directory> /`.",
+        "After edits run `opencloud app dev sync <directory>`.",
+        "Functions remain dormant until `opencloud app dev invoke <directory> <name>`.",
+        "Run `opencloud app dev verify <directory>` before promotion.",
+      ],
+    });
+  });
+
+dev
+  .command("sync")
+  .description(
+    "Validate local files and atomically replace the active dev revision",
+  )
+  .argument("<directory>")
+  .action(async (directory) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const control = client();
+    const synchronized = await synchronizeValidatedDraft(
+      control,
+      sourceRoot,
+      state.draftId,
+    );
+    if (state.appId !== synchronized.appId) {
+      throw new Error("The app manifest no longer matches .opencloud/dev.json");
+    }
+    const session = (await control.call("applyDevRevision", {
+      appId: state.appId,
+      sessionId: state.sessionId,
+    })) as DevSessionWire;
+    await storeDevSession(sourceRoot, synchronized.artifactSha256, session);
+    output({ session, validation: synchronized.validation });
+  });
+
+dev
+  .command("status")
+  .description(
+    "Show the active revision, capability URL, and verification receipt",
+  )
+  .argument("[directory]", "app source directory", ".")
+  .action(async (directory) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    output(
+      await client().call("getDevSession", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+      }),
+    );
+  });
+
+dev
+  .command("request")
+  .description(
+    "Inspect a preview page or REST GET/HEAD through the trusted edge",
+  )
+  .argument("<directory>")
+  .argument("[path]", "same-origin preview path", "/")
+  .addOption(
+    new Option("--method <method>", "HTTP method")
+      .choices(["GET", "HEAD"])
+      .default("GET"),
+  )
+  .action(async (directory, requestPath, options) => {
+    const state = await requireDevState(callerPath(directory));
+    output(
+      await client().call("requestDevApp", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        body: {
+          path: String(requestPath),
+          method: options.method as "GET" | "HEAD",
+        },
+      }),
+    );
+  });
+
+dev
+  .command("invoke")
+  .description("Explicitly boot one dev Function without production secrets")
+  .argument("<directory>")
+  .argument("<function-name>")
+  .option("--body <json>", "JSON request body", "{}")
+  .action(async (directory, functionName, options) => {
+    const state = await requireDevState(callerPath(directory));
+    let body: unknown;
+    try {
+      body = JSON.parse(String(options.body));
+    } catch {
+      throw new Error("--body must be valid JSON");
+    }
+    output(
+      await client().call("invokeDevFunction", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        functionName: String(functionName),
+        body: { body },
+      }),
+    );
+  });
+
+dev
+  .command("requests")
+  .description("List correlated, redacted dev Function outcomes")
+  .argument("[directory]", "app source directory", ".")
+  .option("--limit <number>", "maximum records", "100")
+  .action(async (directory, options) => {
+    const state = await requireDevState(callerPath(directory));
+    const limit = Number(options.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new Error("--limit must be an integer between 1 and 200");
+    }
+    output(
+      await client().call("listDevInvocations", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        query: { limit },
+      }),
+    );
+  });
+
+dev
+  .command("verify")
+  .description(
+    "Run Chromium and primary-flow checks for the exact dev revision",
+  )
+  .argument("[directory]", "app source directory", ".")
+  .action(async (directory) => {
+    const state = await requireDevState(callerPath(directory));
+    const result = await client().call("verifyDevSession", {
+      appId: state.appId,
+      sessionId: state.sessionId,
+    });
+    output(result);
+    if (!result.receipt.summary.passed) process.exitCode = 1;
+  });
+
+dev
+  .command("promote")
+  .description(
+    "Deploy only the exact dev revision covered by the current receipt",
+  )
+  .argument("[directory]", "app source directory", ".")
+  .option("--idempotency-key <key>")
+  .action(async (directory, options) => {
+    const state = await requireDevState(callerPath(directory));
+    const result = await client().call(
+      "promoteDevRevision",
+      { appId: state.appId, sessionId: state.sessionId },
+      {
+        idempotencyKey: options.idempotencyKey ?? randomUUID(),
+        timeoutMs: 120_000,
+      },
+    );
+    output({
+      ...result,
+      next: "Follow the returned operation, verify production, then run `opencloud app dev stop <directory>` to remove the isolated branch.",
+    });
+  });
+
+dev
+  .command("stop")
+  .description("Destroy the preview artifacts, Function links, and dev schema")
+  .argument("[directory]", "app source directory", ".")
+  .action(async (directory) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const result = await client().call("stopDevSession", {
+      appId: state.appId,
+      sessionId: state.sessionId,
+    });
+    await rm(devStatePath(sourceRoot), { force: true });
+    output({ session: result, localStateRemoved: true });
   });
 
 app
@@ -412,10 +812,7 @@ app
   .action(async (appId) => {
     const value = await client().get(`/v1/apps/${appId}`);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    const result = await smokeApp(
-      value,
-      edgeUrl ? { edgeUrl } : {},
-    );
+    const result = await smokeApp(value, edgeUrl ? { edgeUrl } : {});
     output(result);
     if (!result.passed) process.exitCode = 1;
   });
@@ -461,9 +858,7 @@ app
 
 app
   .command("verify")
-  .description(
-    "Run the authoritative OpenCloud release verification gate",
-  )
+  .description("Run the authoritative OpenCloud release verification gate")
   .argument("<app-id>")
   .option("--idempotency-key <key>")
   .option("--follow", "follow the durable verification operation", true)
@@ -485,9 +880,7 @@ app
     if (!options.follow || !started.operation?.id) return;
     let operationValue: { state?: string } = started.operation;
     while (
-      !["succeeded", "failed", "cancelled"].includes(
-        operationValue.state ?? "",
-      )
+      !["succeeded", "failed", "cancelled"].includes(operationValue.state ?? "")
     ) {
       await new Promise((resolve) =>
         setTimeout(resolve, Number(options.interval) * 1000),
@@ -550,9 +943,7 @@ app
   .argument("<credential-id>")
   .action(async (appId, credentialId) =>
     output(
-      await client().delete(
-        `/v1/apps/${appId}/credentials/${credentialId}`,
-      ),
+      await client().delete(`/v1/apps/${appId}/credentials/${credentialId}`),
     ),
   );
 
@@ -585,12 +976,9 @@ program
   .action(async (directory, options) => {
     const stored = availableSession();
     const appId =
-      options.appId ??
-      (stored?.state === "ready" ? stored.appId : undefined);
+      options.appId ?? (stored?.state === "ready" ? stored.appId : undefined);
     if (!appId) {
-      throw new Error(
-        "Pass --app-id or complete opencloud onboard first",
-      );
+      throw new Error("Pass --app-id or complete opencloud onboard first");
     }
     const root = callerPath(directory);
     await mkdir(path.join(root, "frontend"), { recursive: true });
@@ -689,9 +1077,7 @@ program
       throw new Error("Authoritative server validation failed");
     }
     if (validation.artifactSha256 !== bundle.sha256) {
-      throw new Error(
-        "Local and server canonical bundle digests do not match",
-      );
+      throw new Error("Local and server canonical bundle digests do not match");
     }
     output(
       await control.call(
@@ -738,10 +1124,7 @@ program
   .option("--max-files <count>")
   .action(async (directory, options) => {
     const bundle = await buildBundle(callerPath(directory));
-    if (
-      options.expectAppId &&
-      bundle.manifest.appId !== options.expectAppId
-    ) {
+    if (options.expectAppId && bundle.manifest.appId !== options.expectAppId) {
       throw new Error(
         `Manifest appId ${bundle.manifest.appId} does not match ${options.expectAppId}`,
       );
@@ -782,11 +1165,14 @@ operation
   .option("--interval <seconds>", "poll interval", "2")
   .action(async (operationId, options) => {
     do {
-      const value = (await client().get(
-        `/v1/operations/${operationId}`,
-      )) as { state?: string };
+      const value = (await client().get(`/v1/operations/${operationId}`)) as {
+        state?: string;
+      };
       output(value);
-      if (!options.follow || ["succeeded", "failed", "cancelled"].includes(value.state ?? "")) {
+      if (
+        !options.follow ||
+        ["succeeded", "failed", "cancelled"].includes(value.state ?? "")
+      ) {
         break;
       }
       await new Promise((resolve) =>
@@ -811,11 +1197,7 @@ deployment
   .argument("<app-id>")
   .argument("<deployment-id>")
   .action(async (appId, deploymentId) =>
-    output(
-      await client().get(
-        `/v1/apps/${appId}/deployments/${deploymentId}`,
-      ),
-    ),
+    output(await client().get(`/v1/apps/${appId}/deployments/${deploymentId}`)),
   );
 
 deployment
@@ -844,12 +1226,7 @@ session
     const control = client();
     const value = await control.get(`/v1/apps/${appId}`);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    output(
-      await verifySessions(
-        value,
-        edgeUrl ? { edgeUrl } : {},
-      ),
-    );
+    output(await verifySessions(value, edgeUrl ? { edgeUrl } : {}));
   });
 
 const cron = program
@@ -870,11 +1247,7 @@ cron
       ...(options.state ? { state: String(options.state) } : {}),
       ...(options.after ? { after: String(options.after) } : {}),
     });
-    output(
-      await client().get(
-        `/v1/apps/${appId}/cron/invocations?${query}`,
-      ),
-    );
+    output(await client().get(`/v1/apps/${appId}/cron/invocations?${query}`));
   });
 
 cron
@@ -914,22 +1287,17 @@ program
     const spec = parseRuntimeVerificationSpec(source, bundle.manifest);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
     output(
-      await verifyRuntime(
-        control,
-        appValue,
-        spec,
-        edgeUrl ? { edgeUrl } : {},
-      ),
+      await verifyRuntime(control, appValue, spec, edgeUrl ? { edgeUrl } : {}),
     );
   });
 
-const secret = program.command("secret").description("Manage app-scoped secrets");
+const secret = program
+  .command("secret")
+  .description("Manage app-scoped secrets");
 
 secret
   .command("generate")
-  .description(
-    "Generate and store a random secret without returning its value",
-  )
+  .description("Generate and store a random secret without returning its value")
   .argument("<app-id>")
   .argument("<name>")
   .option("--bytes <number>", "random byte count", "32")
@@ -1033,7 +1401,11 @@ backup
 program
   .command("logs")
   .argument("<app-id>")
-  .option("--from <iso>", "ISO time", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+  .option(
+    "--from <iso>",
+    "ISO time",
+    new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  )
   .option("--to <iso>", "ISO time", new Date().toISOString())
   .option("--contains <text>")
   .option("--level <level>")
@@ -1054,7 +1426,11 @@ program
   .command("metrics")
   .argument("<app-id>")
   .requiredOption("--metric <name>")
-  .option("--from <iso>", "ISO time", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+  .option(
+    "--from <iso>",
+    "ISO time",
+    new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  )
   .option("--to <iso>", "ISO time", new Date().toISOString())
   .option("--aggregation <name>", "none, sum, avg, max, min, rate", "none")
   .option("--step <seconds>", "query step", "60")
@@ -1152,9 +1528,7 @@ alertRule
   .argument("<app-id>")
   .argument("<rule-id>")
   .action(async (appId, ruleId) =>
-    output(
-      await client().delete(`/v1/apps/${appId}/alert-rules/${ruleId}`),
-    ),
+    output(await client().delete(`/v1/apps/${appId}/alert-rules/${ruleId}`)),
   );
 
 program.parseAsync().catch((error: unknown) => {

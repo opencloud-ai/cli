@@ -9,12 +9,12 @@ plugin when one is available in that environment.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.4.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.5.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.4.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.4.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.5.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.5.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -93,6 +93,23 @@ Existing installations can still supply `OPENCLOUD_API_URL` and
 
 See the [OpenCloud CLI reference](https://docs.opencloud.ai/reference/cli) and
 [agent guide](https://docs.opencloud.ai/getting-started/agents).
+
+## Isolated development environments
+
+Use the stable capability preview and isolated migration-replayed database before changing production:
+
+```bash
+"$OPENCLOUD_CLI" app dev start .
+"$OPENCLOUD_CLI" app dev sync .
+"$OPENCLOUD_CLI" app dev request . /
+"$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
+"$OPENCLOUD_CLI" app dev requests .
+"$OPENCLOUD_CLI" app dev verify .
+"$OPENCLOUD_CLI" app dev promote . --idempotency-key "$IDEMPOTENCY_KEY"
+"$OPENCLOUD_CLI" app dev stop .
+```
+
+Development data is isolated from production and uses dummy records. Auth, Storage, Realtime, cron, production secrets, and implicit Function execution are unavailable. Functions imported from `@opencloud/server` remain dormant until explicitly invoked, and exact-revision verification requires every declared Function to have a successful explicit invocation.
 
 ## Agent Feed and alert rules
 

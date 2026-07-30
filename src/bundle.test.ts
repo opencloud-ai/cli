@@ -111,6 +111,27 @@ functions:
     expect(archivedFiles.sort()).toEqual(first.files);
   });
 
+  it("never archives local .opencloud development metadata", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, ".opencloud"));
+    await writeFile(path.join(root, "index.html"), "hello");
+    await writeFile(
+      path.join(root, ".opencloud", "dev.json"),
+      JSON.stringify({ sessionId: "bearer-capability" }),
+    );
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: .
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    expect(bundle.files).toContain("index.html");
+    expect(bundle.files.some((file) => file.startsWith(".opencloud/"))).toBe(false);
+  });
+
   it("preserves an explicit older SDK pin instead of replacing it with current", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));

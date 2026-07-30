@@ -4,8 +4,8 @@ import {
   appStateSchema,
   appVisibilitySchema,
   completeAgentOnboardingRequestSchema,
-  createAppRequestSchema,
   createCredentialRequestSchema,
+  operatorCreateAppRequestSchema,
   deploymentStateSchema,
   operationStateSchema,
   startAgentOnboardingRequestSchema,
@@ -166,6 +166,79 @@ const draftValidationOutput = z
   })
   .passthrough();
 
+export const devSessionOutput = z
+  .object({
+    id: uuid,
+    appId: uuid,
+    draftId: uuid,
+    status: z.enum([
+      "active",
+      "verifying",
+      "verified",
+      "stale",
+      "stopped",
+      "expired",
+    ]),
+    previewUrl: z.url(),
+    baseDeploymentId: uuid.nullable(),
+    activeRevision: z
+      .object({
+        id: uuid,
+        draftRevision: z.number().int().positive(),
+        artifactSha256: sha256,
+        migrationDigest: sha256,
+      })
+      .nullable(),
+    verification: z
+      .object({
+        receiptId: uuid,
+        revisionId: uuid,
+        expiresAt: z.string().nullable(),
+      })
+      .nullable(),
+    capabilities: z.object({
+      frontend: z.literal(true),
+      database: z.literal(true),
+      functions: z.literal(true),
+      productionSecrets: z.literal(false),
+      cron: z.literal(false),
+      storageSandbox: z.literal(false),
+      syntheticAuth: z.literal(false),
+    }),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    lastActivityAt: z.string(),
+    expiresAt: z.string(),
+  })
+  .passthrough();
+
+const devInvocationOutput = z
+  .object({
+    id: uuid,
+    requestId: z.string(),
+    correlationId: z.string(),
+    functionName: z.string(),
+    caller: z.string(),
+    status: z.number().int().nullable(),
+    durationMs: z.number().int().nonnegative(),
+    error: jsonObject.nullable(),
+    createdAt: z.string(),
+  })
+  .passthrough();
+
+const devVerificationOutput = z.object({
+  session: devSessionOutput,
+  receipt: z
+    .object({
+      id: uuid,
+      revisionId: uuid,
+      artifactSha256: sha256,
+      expiresAt: z.string(),
+      summary: jsonObject,
+    })
+    .passthrough(),
+});
+
 const verificationOutput = z
   .object({
     id: uuid,
@@ -303,6 +376,7 @@ function operation<
 const appPath = z.object({ appId: uuid });
 const draftPath = appPath.extend({ draftId: uuid });
 const deploymentPath = appPath.extend({ deploymentId: uuid });
+const devSessionPath = appPath.extend({ sessionId: uuid });
 
 export const controlPlaneOperations = {
   startAgentOnboarding: operation({
@@ -349,10 +423,10 @@ export const controlPlaneOperations = {
     path: "/v1/apps",
     summary: "Create an app",
     description:
-      "Creates an app with a server-generated unique address. The authenticated actor supplies only the title and visibility.",
+      "Creates an app with a server-generated unique address. Operators also provide the owning user identifier.",
     auth: "bearer",
     scopes: ["app:create"],
-    input: z.object({ body: createAppRequestSchema }),
+    input: z.object({ body: operatorCreateAppRequestSchema }),
     output: z.object({
       app: controlPlaneAppSchema,
       operation: controlPlaneOperationSchema,
@@ -688,6 +762,227 @@ export const controlPlaneOperations = {
       toolName: "discard_draft",
       title: "Discard source draft",
       description: "Discard an undeployed source draft.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  startDevSession: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/drafts/{draftId}/dev-sessions",
+    summary: "Start a development session",
+    description:
+      "Creates or resumes an isolated preview for a validated draft and optionally applies its exact revision.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: draftPath.extend({
+      body: z.object({ apply: z.boolean().default(true) }),
+    }),
+    output: devSessionOutput,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "start_dev_session",
+      title: "Start dev session",
+      description:
+        "Start or resume an isolated frontend and database preview for a validated draft.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  getDevSession: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
+    summary: "Get a development session",
+    description: "Returns preview state, capabilities, and verification status.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: devSessionPath,
+    output: devSessionOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_dev_session",
+      title: "Get dev session",
+      description: "Inspect an OpenCloud development session.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  applyDevRevision: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/apply",
+    summary: "Apply a draft revision to development",
+    description:
+      "Materializes the exact validated draft and replays migrations into its isolated dev schema when needed.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath,
+    output: devSessionOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "apply_dev_revision",
+      title: "Apply dev revision",
+      description:
+        "Sync the exact validated draft to its stable development preview.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  requestDevApp: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/request",
+    summary: "Request a development preview path",
+    description:
+      "Performs a bounded GET or HEAD against the capability preview and returns the response for agent inspection.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: devSessionPath.extend({
+      body: z.object({
+        path: z.string().min(1).max(2_048).default("/"),
+        method: z.enum(["GET", "HEAD"]).default("GET"),
+      }),
+    }),
+    output: z.object({
+      status: z.number().int(),
+      contentType: z.string().nullable(),
+      requestId: z.string().nullable(),
+      body: z.string().nullable(),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "request_dev_app",
+      title: "Request dev app",
+      description: "Inspect a page or REST read from the development preview.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  invokeDevFunction: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/functions/{functionName}/invoke",
+    summary: "Explicitly invoke a development Function",
+    description:
+      "Boots one isolated dev Function invocation with no production secrets, cron, or implicit browser execution.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath.extend({
+      functionName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+      body: z.object({ body: z.unknown().optional() }),
+    }),
+    output: z.object({
+      status: z.number().int(),
+      requestId: z.string().nullable(),
+      body: z.unknown(),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "invoke_dev_function",
+      title: "Invoke dev Function",
+      description:
+        "Explicitly test one development Function and capture correlated diagnostics.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  verifyDevSession: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/verify",
+    summary: "Verify a development revision",
+    description:
+      "Runs Chromium, console, HTTP, and optional primary-flow checks and issues a receipt bound to the exact revision.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath,
+    output: devVerificationOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "verify_dev_session",
+      title: "Verify dev session",
+      description:
+        "Run the development verification gate for the exact active revision.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  listDevInvocations: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/requests",
+    summary: "List development Function invocations",
+    description:
+      "Returns bounded, redacted Function outcomes correlated by request ID.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: devSessionPath.extend({
+      query: z.object({ limit: z.number().int().min(1).max(200).default(100) }),
+    }),
+    output: z.array(devInvocationOutput),
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_dev_invocations",
+      title: "List dev invocations",
+      description: "Inspect redacted development Function outcomes.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  promoteDevRevision: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/promote",
+    summary: "Promote a verified development revision",
+    description:
+      "Deploys only the exact draft revision covered by the current, unexpired verification receipt.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath,
+    output: z.object({
+      draft: draftOutput,
+      deployment: controlPlaneDeploymentSchema,
+      operation: controlPlaneOperationSchema,
+    }),
+    idempotency: "required",
+    mcp: {
+      toolName: "promote_dev_revision",
+      title: "Promote dev revision",
+      description:
+        "Deploy the exact verified development revision to production.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  stopDevSession: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
+    summary: "Stop a development session",
+    description: "Removes its preview artifacts, Function links, and dev schema.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath,
+    output: devSessionOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "stop_dev_session",
+      title: "Stop dev session",
+      description: "Destroy an app's isolated development session.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
