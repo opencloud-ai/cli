@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- Add isolated app development sessions with stable preview URLs, migration-replayed dummy databases, immutable revisions, and correlated diagnostics.
+- Add `app dev start|sync|status|request|invoke|requests|verify|promote|stop`.
+- Require successful explicit invocation of every dormant development Function before exact-revision verification.
+- Promote only the verified receipt and refuse stale source, migration, or production-base revisions.
+- Vendor the public dev-environment API contracts and bundler safeguards for the reserved `.opencloud` runtime directory.
+
 ## 0.4.0
 
 - Add `agent-feed` for the stable, bounded app health, signal, alert, and
