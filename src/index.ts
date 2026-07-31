@@ -22,10 +22,12 @@ import {
   type OpenCloudSession,
 } from "./session-store.js";
 
+const CLI_VERSION = "0.6.0";
+
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version("0.5.0", "-V, --cli-version", "print the CLI version")
+  .version(CLI_VERSION, "-V, --cli-version", "print the CLI version")
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -89,6 +91,17 @@ function printBundleFiles(files: string[]): void {
   process.stderr.write(
     `Bundle files (${files.length}):\n${files
       .map((file) => `  ${file}`)
+      .join("\n")}\n`,
+  );
+}
+
+function printBundleWarnings(
+  warnings: Array<{ code: string; path: string; message: string }>,
+): void {
+  if (!warnings.length) return;
+  process.stderr.write(
+    `Bundle warnings (${warnings.length}):\n${warnings
+      .map((warning) => `  [${warning.code}] ${warning.message}`)
       .join("\n")}\n`,
   );
 }
@@ -182,6 +195,7 @@ async function synchronizeValidatedDraft(
 }> {
   const bundle = await buildBundle(sourceRoot);
   printBundleFiles(bundle.files);
+  printBundleWarnings(bundle.warnings);
   let draft: { id: string; revision: number };
   if (existingDraftId) {
     const existing = await control.call("getDraft", {
@@ -293,6 +307,27 @@ async function storeDevSession(
     artifactSha256,
     updatedAt: new Date().toISOString(),
   });
+}
+
+async function followDurableOperation(
+  control: OpenCloudClient,
+  operationId: string,
+  intervalMs = 2_000,
+): Promise<{ id?: string; state?: string }> {
+  let operation: { id?: string; state?: string } = {
+    id: operationId,
+    state: "queued",
+  };
+  while (
+    !["succeeded", "failed", "cancelled"].includes(operation.state ?? "")
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    operation = (await control.call("getOperation", {
+      operationId,
+    })) as { id?: string; state?: string };
+    output({ operation });
+  }
+  return operation;
 }
 
 function onboardingApiUrl(): string {
@@ -471,6 +506,58 @@ program
     output(await persistOnboardingResponse(response, stored.apiUrl, file));
   });
 
+program
+  .command("doctor")
+  .description("Print redacted CLI, identity, endpoint, and platform diagnostics")
+  .action(async () => {
+    const options = program.opts<{ apiUrl?: string; token?: string }>();
+    const file = sessionFile();
+    const stored = availableSession();
+    const apiUrl = options.apiUrl ?? stored?.apiUrl ?? null;
+    let platform: unknown = null;
+    let reachable = false;
+    if (apiUrl) {
+      try {
+        const response = await fetch(`${apiUrl.replace(/\/+$/, "")}/version`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        reachable = response.ok;
+        platform = response.ok
+          ? await response.json()
+          : { status: response.status };
+      } catch (error) {
+        platform = {
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    output({
+      passed: Boolean(
+        apiUrl &&
+          reachable &&
+          (options.token || stored?.state === "ready"),
+      ),
+      cliVersion: CLI_VERSION,
+      currentDirectory: process.cwd(),
+      api: { url: apiUrl, reachable, platform },
+      identity: {
+        source: options.token
+          ? "environment-or-flag"
+          : stored
+            ? "session-file"
+            : "none",
+        sessionFile: file,
+        state: stored?.state ?? null,
+        appId: stored?.state === "ready" ? stored.appId : null,
+        credentialExpiresAt:
+          stored?.state === "ready" ? stored.credentialExpiresAt : null,
+        tokenPresent: Boolean(
+          options.token || (stored?.state === "ready" && stored.token),
+        ),
+      },
+    });
+  });
+
 const app = program.command("app").description("Manage OpenCloud apps");
 
 app
@@ -607,8 +694,8 @@ dev
       next: [
         "Open session.previewUrl or use `opencloud app dev request <directory> /`.",
         "After edits run `opencloud app dev sync <directory>`.",
-        "Functions remain dormant until `opencloud app dev invoke <directory> <name>`.",
-        "Run `opencloud app dev verify <directory>` before promotion.",
+        "Functions remain dormant until `app dev invoke` or a deliberate preview action calls them.",
+        "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
       ],
     });
   });
@@ -683,6 +770,38 @@ dev
   });
 
 dev
+  .command("data")
+  .description("Write bounded fixture data only to the isolated dev database")
+  .argument("<directory>")
+  .argument("<path>", "a /rest/v1/... path")
+  .addOption(
+    new Option("--method <method>", "HTTP method")
+      .choices(["POST", "PUT", "PATCH", "DELETE"])
+      .default("POST"),
+  )
+  .option("--body <json>", "JSON request body", "{}")
+  .action(async (directory, requestPath, options) => {
+    const state = await requireDevState(callerPath(directory));
+    let body: unknown;
+    try {
+      body = JSON.parse(String(options.body));
+    } catch {
+      throw new Error("--body must be valid JSON");
+    }
+    output(
+      await client().call("mutateDevData", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        body: {
+          path: String(requestPath),
+          method: options.method as "POST" | "PUT" | "PATCH" | "DELETE",
+          body,
+        },
+      }),
+    );
+  });
+
+dev
   .command("invoke")
   .description("Explicitly boot one dev Function without production secrets")
   .argument("<directory>")
@@ -727,6 +846,55 @@ dev
   });
 
 dev
+  .command("receipts")
+  .description("List exact-revision verification evidence, even after dev stops")
+  .argument("[directory]", "app source directory", ".")
+  .option("--limit <number>", "maximum records", "50")
+  .action(async (directory, options) => {
+    const bundle = await buildBundle(callerPath(directory));
+    const limit = Number(options.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new Error("--limit must be an integer between 1 and 200");
+    }
+    output(
+      await client().call("listDevReceipts", {
+        appId: bundle.manifest.appId,
+        query: { limit },
+      }),
+    );
+  });
+
+dev
+  .command("evidence")
+  .description("Export redacted, machine-readable dev verification evidence")
+  .argument("[directory]", "app source directory", ".")
+  .action(async (directory) => {
+    const sourceRoot = callerPath(directory);
+    const bundle = await buildBundle(sourceRoot);
+    const localState = await readDevState(sourceRoot);
+    const receipts = await client().call("listDevReceipts", {
+      appId: bundle.manifest.appId,
+      query: { limit: 50 },
+    });
+    output({
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      cliVersion: CLI_VERSION,
+      appId: bundle.manifest.appId,
+      localArtifactSha256: bundle.sha256,
+      localSession: localState
+        ? {
+            sessionId: localState.sessionId,
+            artifactSha256: localState.artifactSha256,
+            updatedAt: localState.updatedAt,
+          }
+        : null,
+      warnings: bundle.warnings,
+      receipts,
+    });
+  });
+
+dev
   .command("verify")
   .description(
     "Run Chromium and primary-flow checks for the exact dev revision",
@@ -749,9 +917,12 @@ dev
   )
   .argument("[directory]", "app source directory", ".")
   .option("--idempotency-key <key>")
+  .option("--no-follow", "return after starting the production deployment")
   .action(async (directory, options) => {
-    const state = await requireDevState(callerPath(directory));
-    const result = await client().call(
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const control = client();
+    const result = await control.call(
       "promoteDevRevision",
       { appId: state.appId, sessionId: state.sessionId },
       {
@@ -759,9 +930,61 @@ dev
         timeoutMs: 120_000,
       },
     );
+    output({ promotion: result });
+    if (options.follow === false) return;
+    if (!result.operation.id) {
+      throw new Error("Promotion did not return a durable operation");
+    }
+    const deploymentOperation = await followDurableOperation(
+      control,
+      result.operation.id,
+    );
+    if (deploymentOperation.state !== "succeeded") {
+      throw new Error(
+        `Production deployment ${deploymentOperation.state ?? "failed"}; dev remains available for repair`,
+      );
+    }
+    const verification = await control.call(
+      "verifyApp",
+      { appId: state.appId },
+      {
+        idempotencyKey: randomUUID(),
+        timeoutMs: 120_000,
+      },
+    );
+    output({ verification });
+    const verificationOperation = await followDurableOperation(
+      control,
+      verification.operation.id,
+    );
+    const finalVerification = await control.call("getVerification", {
+      appId: state.appId,
+      verificationId: verification.verification.id,
+    });
+    output({ finalVerification });
+    if (
+      verificationOperation.state !== "succeeded" ||
+      finalVerification.state !== "passed"
+    ) {
+      throw new Error(
+        "Production verification failed; dev remains available for repair",
+      );
+    }
+    const appValue = await control.call("getApp", {
+      appId: state.appId,
+    });
+    const stopped = await control.call("stopDevSession", {
+      appId: state.appId,
+      sessionId: state.sessionId,
+    });
+    await rm(devStatePath(sourceRoot), { force: true });
     output({
-      ...result,
-      next: "Follow the returned operation, verify production, then run `opencloud app dev stop <directory>` to remove the isolated branch.",
+      completed: true,
+      appId: state.appId,
+      liveUrl: appValue.appUrl ?? null,
+      productionVerificationId: finalVerification.id,
+      devStopped: stopped.status === "stopped",
+      localStateRemoved: true,
     });
   });
 
@@ -1030,6 +1253,7 @@ program
     const sourceRoot = callerPath(directory);
     const bundle = await buildBundle(sourceRoot);
     printBundleFiles(bundle.files);
+    printBundleWarnings(bundle.warnings);
     process.stderr.write(
       `Syncing ${bundle.manifest.version} (${bundle.sha256.slice(0, 12)})\n`,
     );
@@ -1096,12 +1320,19 @@ program
 
 program
   .command("validate")
-  .description("Validate and package an app without contacting OpenCloud")
+  .description("Run local artifact validation without contacting OpenCloud")
   .argument("<directory>")
-  .action(async (directory) => {
+  .option("--write-archive <path>", "write the canonical .tgz artifact")
+  .action(async (directory, options) => {
     const bundle = await buildBundle(callerPath(directory));
+    const archivePath = options.writeArchive
+      ? callerPath(String(options.writeArchive))
+      : null;
+    if (archivePath) await writeFile(archivePath, bundle.archive);
     output({
       valid: true,
+      scope: "local-artifact",
+      authoritative: false,
       appId: bundle.manifest.appId,
       version: bundle.manifest.version,
       artifactSha256: bundle.sha256,
@@ -1111,13 +1342,18 @@ program
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
       requiredSecrets: bundle.manifest.requiredSecrets,
       files: bundle.files,
+      warnings: bundle.warnings,
+      archivePath,
+      next: archivePath
+        ? "Use app dev start/sync for authoritative server validation."
+        : "Use --write-archive <path> to persist this artifact, or app dev start/sync for authoritative server validation.",
     });
   });
 
 program
   .command("artifact-check")
   .description(
-    "Validate an early agent artifact and enforce its expected app and file count",
+    "Run a fast local early-artifact check; this is not server validation",
   )
   .argument("<directory>")
   .option("--expect-app-id <uuid>")
@@ -1151,6 +1387,7 @@ program
       artifactSha256: bundle.sha256,
       artifactBytes: bundle.archive.byteLength,
       files: bundle.files,
+      warnings: bundle.warnings,
     });
   });
 

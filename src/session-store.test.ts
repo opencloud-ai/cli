@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   loadSession,
+  resolveSessionFile,
   saveSession,
   type ReadyAgentSession,
 } from "./session-store.js";
@@ -61,5 +62,24 @@ describe("OpenCloud CLI session store", () => {
       state: "starting",
       idempotencyKey: "b7e0066f-33cb-4f4a-9909-401e9c702f3e",
     });
+  });
+
+  it("discovers the nearest session file from a nested app directory", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const nested = path.join(directory, "apps", "frontend");
+    await mkdir(nested, { recursive: true });
+    const file = path.join(directory, ".opencloud", "session.json");
+    await saveSession(file, {
+      schemaVersion: 1,
+      state: "ready",
+      apiUrl: "https://api.opencloud.ai",
+      appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+      appUrl: "https://family-tasks-a1b2c3.opencloud.ai",
+      token: "oc_agent_secret",
+      credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+    });
+
+    expect(resolveSessionFile(undefined, nested)).toBe(file);
   });
 });

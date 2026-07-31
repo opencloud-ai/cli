@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Add `doctor` with redacted session, endpoint, CLI, and deployed-platform diagnostics.
+- Discover the nearest protected session file from nested source directories.
+- Add bounded isolated fixture writes with `app dev data`.
+- Add durable verification history and redacted exports with `app dev receipts` and `app dev evidence`.
+- Surface undeclared conventional migration and Function entrypoint warnings during local validation, dev sync, and deployment.
+- Make `app dev promote` follow deployment, run feature-aware production verification, report the live URL, and clean up dev only after success.
+
 ## 0.5.0
 
 - Add isolated app development sessions with stable preview URLs, migration-replayed dummy databases, immutable revisions, and correlated diagnostics.
@@ -19,9 +28,9 @@
 
 ## 0.3.0
 
-- Converge terminal deployment with MCP on the canonical control-plane
-  registry, generated OpenAPI contract, shared typed client, and shared
-  deterministic bundler.
+- Converge terminal deployment on the canonical control-plane registry,
+  generated OpenAPI contract, shared typed client, and shared deterministic
+  bundler.
 - Add server-hosted source drafts with revision and base-hash guards,
   authoritative validation, exact digest matching, and validated-draft deploy.
 - Add durable `app verify` with server-side HTTPS, SDK-pin, health, and

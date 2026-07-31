@@ -3,18 +3,18 @@
 The public, versioned command-line client for building, validating, deploying,
 and verifying applications on [OpenCloud](https://opencloud.ai).
 
-The CLI is intended for coding agents and humans with a terminal. A regular
-browser-only chat cannot execute a downloaded CLI; use an OpenCloud tool or
-plugin when one is available in that environment.
+The CLI is intended for coding agents and humans with a terminal. A
+browser-only chat that cannot run Node.js and shell commands can prepare an
+offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.5.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.6.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.5.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.5.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.6.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.6.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -35,8 +35,7 @@ OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 
 ## Passwordless project onboarding
 
-Use OpenCloud MCP when the agent supports it. For terminal-only agents, give
-the CLI the user's email and agreed title:
+Give the CLI the user's email and agreed project title:
 
 ```bash
 "$OPENCLOUD_CLI" onboard \
@@ -60,6 +59,7 @@ commit that session file. Commands use it automatically:
 ```bash
 "$OPENCLOUD_CLI" app list
 "$OPENCLOUD_CLI" app get "$APP_ID"
+"$OPENCLOUD_CLI" doctor
 "$OPENCLOUD_CLI" init /absolute/path/to/app --version 2026.07.29-1
 "$OPENCLOUD_CLI" artifact-check /absolute/path/to/app \
   --expect-app-id "$APP_ID" \
@@ -69,9 +69,10 @@ commit that session file. Commands use it automatically:
 "$OPENCLOUD_CLI" app verify "$APP_ID"
 ```
 
-`deploy` uses the same canonical server draft, file-change, validation, and
-deployment contract as OpenCloud MCP. It refuses deployment when the local and
-server bundle digests differ.
+`deploy` uses the canonical server draft, file-change, validation, and
+deployment contract. It refuses deployment when the local and server bundle
+digests differ. For normal agent work, prefer the isolated development and
+verified-promotion flow below.
 
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every
@@ -102,14 +103,27 @@ Use the stable capability preview and isolated migration-replayed database befor
 "$OPENCLOUD_CLI" app dev start .
 "$OPENCLOUD_CLI" app dev sync .
 "$OPENCLOUD_CLI" app dev request . /
+"$OPENCLOUD_CLI" app dev data . /rest/v1/items \
+  --method POST --body '[{"title":"Preview item"}]'
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
 "$OPENCLOUD_CLI" app dev verify .
 "$OPENCLOUD_CLI" app dev promote . --idempotency-key "$IDEMPOTENCY_KEY"
-"$OPENCLOUD_CLI" app dev stop .
+"$OPENCLOUD_CLI" app dev receipts .
+"$OPENCLOUD_CLI" app dev evidence .
 ```
 
-Development data is isolated from production and uses dummy records. Auth, Storage, Realtime, cron, production secrets, and implicit Function execution are unavailable. Functions imported from `@opencloud/server` remain dormant until explicitly invoked, and exact-revision verification requires every declared Function to have a successful explicit invocation.
+Development data is isolated from production and uses dummy records. Auth,
+Storage, Realtime, cron, and production secrets are unavailable. Functions
+imported from `@opencloud/server` remain dormant until `app dev invoke` or a
+deliberate preview interaction calls them. Exact-revision verification requires
+every declared Function to have a successful explicit invocation.
+
+`app dev promote` is the completion path: it deploys only the verified receipt,
+follows the durable production operation, runs feature-aware production
+verification, prints the live HTTPS URL, and removes the dev environment only
+after success. If deployment or verification fails, dev remains available for
+repair.
 
 ## Agent Feed and alert rules
 
@@ -134,7 +148,8 @@ agent; they do not authorize automatic rollback or destructive repair.
 ## Verification
 
 `app verify` is the authoritative durable release gate. OpenCloud runs health,
-SDK-pin, HTTPS, and Chromium checks on the server:
+exact runtime metadata, SDK-pin, HTTPS, Chromium diagnostics, and the
+app-declared interaction contract on the server:
 
 ```bash
 "$OPENCLOUD_CLI" app verify "$APP_ID"

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -41,10 +41,20 @@ export function defaultSessionFile(cwd = process.cwd()): string {
   return path.join(cwd, ".opencloud", "session.json");
 }
 
-export function resolveSessionFile(value?: string): string {
-  return value
-    ? path.resolve(process.env.INIT_CWD ?? process.cwd(), value)
-    : defaultSessionFile(process.env.INIT_CWD ?? process.cwd());
+export function resolveSessionFile(
+  value?: string,
+  cwd = process.env.INIT_CWD ?? process.cwd(),
+): string {
+  const start = path.resolve(cwd);
+  if (value) return path.resolve(start, value);
+  let current = start;
+  while (true) {
+    const candidate = defaultSessionFile(current);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return defaultSessionFile(start);
+    current = parent;
+  }
 }
 
 export function loadSession(file: string): OpenCloudSession | null {

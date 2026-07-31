@@ -159,6 +159,7 @@ const draftValidationOutput = z
     diagnostics: z.array(
       z.object({
         level: z.enum(["error", "warning"]),
+        code: z.string().optional(),
         message: z.string(),
       }),
     ),
@@ -239,6 +240,19 @@ const devVerificationOutput = z.object({
     .passthrough(),
 });
 
+const devReceiptOutput = z
+  .object({
+    id: uuid,
+    sessionId: uuid,
+    revisionId: uuid,
+    artifactSha256: sha256,
+    engineVersion: z.string(),
+    summary: jsonObject,
+    createdAt: z.string(),
+    expiresAt: z.string(),
+  })
+  .passthrough();
+
 const verificationOutput = z
   .object({
     id: uuid,
@@ -257,6 +271,7 @@ const verificationOutput = z
     diagnostics: z.array(
       z.object({
         level: z.enum(["error", "warning"]),
+        code: z.string().optional(),
         message: z.string(),
       }),
     ),
@@ -867,6 +882,39 @@ export const controlPlaneOperations = {
       openWorldHint: true,
     },
   }),
+  mutateDevData: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/data",
+    summary: "Write development fixture data",
+    description:
+      "Performs one bounded REST write against only the isolated development schema.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath.extend({
+      body: z.object({
+        path: z.string().min(1).max(2_048),
+        method: z.enum(["POST", "PUT", "PATCH", "DELETE"]).default("POST"),
+        body: z.unknown().optional(),
+      }),
+    }),
+    output: z.object({
+      status: z.number().int(),
+      contentType: z.string().nullable(),
+      requestId: z.string().nullable(),
+      body: z.string().nullable(),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "mutate_dev_data",
+      title: "Write dev fixture data",
+      description: "Write bounded fixture data only to a dev schema.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
   invokeDevFunction: operation({
     method: "POST",
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/functions/{functionName}/invoke",
@@ -937,6 +985,30 @@ export const controlPlaneOperations = {
       toolName: "list_dev_invocations",
       title: "List dev invocations",
       description: "Inspect redacted development Function outcomes.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listDevReceipts: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/dev-receipts",
+    summary: "List development verification receipts",
+    description:
+      "Returns durable exact-revision verification evidence, including after a dev session is stopped.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: z.object({ limit: z.number().int().min(1).max(200).default(50) }),
+    }),
+    output: z.array(devReceiptOutput),
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_dev_receipts",
+      title: "List dev verification receipts",
+      description: "Read durable development verification evidence.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -1521,7 +1593,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/credentials",
     summary: "Create an app credential",
     description:
-      "Creates a short-lived app-scoped credential. Kept for CLI compatibility and not exposed as an MCP tool.",
+      "Creates a short-lived app-scoped credential for CLI compatibility.",
     auth: "user",
     scopes: ["owner"],
     input: appPath.extend({ body: createCredentialRequestSchema }),

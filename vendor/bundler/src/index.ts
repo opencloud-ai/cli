@@ -51,6 +51,13 @@ export interface BuiltBundle {
   archive: Buffer;
   sha256: string;
   files: string[];
+  warnings: BundleWarning[];
+}
+
+export interface BundleWarning {
+  code: "UNDECLARED_MIGRATION_FILE" | "UNDECLARED_FUNCTION_ENTRYPOINT";
+  path: string;
+  message: string;
 }
 
 export interface BundleOptions {
@@ -115,6 +122,7 @@ export async function buildBundle(
   }
   const manifest = parseManifest(raw);
   const selection = await selectBundleFiles(root, manifest, manifestFile);
+  const warnings = await findUndeclaredConventionalFiles(root, manifest);
 
   const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-bundle-"));
   const staging = path.join(temporary, "root");
@@ -165,10 +173,74 @@ export async function buildBundle(
       archive,
       sha256: createHash("sha256").update(archive).digest("hex"),
       files,
+      warnings,
     };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+async function findUndeclaredConventionalFiles(
+  root: string,
+  manifest: OpenCloudManifest,
+): Promise<BundleWarning[]> {
+  const declaredMigrations = new Set(
+    manifest.migrations.map((item) => item.file),
+  );
+  const declaredFunctions = new Set(
+    manifest.functions.map((item) => item.entrypoint),
+  );
+  const warnings: BundleWarning[] = [];
+  for (const relative of await conventionalFiles(root, "migrations")) {
+    if (relative.endsWith(".sql") && !declaredMigrations.has(relative)) {
+      warnings.push({
+        code: "UNDECLARED_MIGRATION_FILE",
+        path: relative,
+        message: `${relative} exists but is not declared in opencloud.yaml migrations.`,
+      });
+    }
+  }
+  for (const relative of await conventionalFiles(root, "functions")) {
+    if (
+      /^functions\/[^/]+\/index\.(?:ts|js|mjs)$/.test(relative) &&
+      !declaredFunctions.has(relative)
+    ) {
+      warnings.push({
+        code: "UNDECLARED_FUNCTION_ENTRYPOINT",
+        path: relative,
+        message: `${relative} looks like a Function entrypoint but is not declared in opencloud.yaml functions.`,
+      });
+    }
+  }
+  return warnings.sort((left, right) => comparePaths(left.path, right.path));
+}
+
+async function conventionalFiles(
+  root: string,
+  directoryName: string,
+): Promise<string[]> {
+  const start = path.join(root, directoryName);
+  try {
+    const info = await lstat(start);
+    if (!info.isDirectory() || info.isSymbolicLink()) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const output: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => comparePaths(left.name, right.name));
+    for (const entry of entries) {
+      const target = path.join(directory, entry.name);
+      const info = await lstat(target);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) await visit(target);
+      else if (info.isFile()) output.push(bundleRelativePath(root, target));
+    }
+  };
+  await visit(start);
+  return output;
 }
 
 async function findManifest(root: string): Promise<string> {

@@ -45,6 +45,9 @@ describe("bundle builder", () => {
     await mkdir(path.join(root, "frontend", "assets"), { recursive: true });
     await mkdir(path.join(root, "migrations"));
     await mkdir(path.join(root, "functions", "process"), { recursive: true });
+    await mkdir(path.join(root, "functions", "process", "lib"), {
+      recursive: true,
+    });
     await writeFile(path.join(root, "frontend", "index.html"), "hello");
     await writeFile(path.join(root, "frontend", "assets", "app.js"), "app");
     await writeFile(
@@ -58,6 +61,10 @@ describe("bundle builder", () => {
     await writeFile(
       path.join(root, "functions", "process", "shared.ts"),
       "export const value = 1;",
+    );
+    await writeFile(
+      path.join(root, "functions", "process", "lib", "index.ts"),
+      "export const helper = true;",
     );
     await writeFile(path.join(root, "BRIEF.md"), "author instructions");
     await writeFile(path.join(root, "AGENT_REPORT.md"), "first report");
@@ -89,10 +96,12 @@ functions:
       "frontend/assets/app.js",
       "frontend/index.html",
       "functions/process/index.ts",
+      "functions/process/lib/index.ts",
       "functions/process/shared.ts",
       "migrations/0001_notes.sql",
       "opencloud.json",
     ]);
+    expect(first.warnings).toEqual([]);
 
     await writeFile(path.join(root, "AGENT_REPORT.md"), "updated report");
     const second = await buildBundle(root);
@@ -130,6 +139,47 @@ frontend:
     const bundle = await buildBundle(root);
     expect(bundle.files).toContain("index.html");
     expect(bundle.files.some((file) => file.startsWith(".opencloud/"))).toBe(false);
+  });
+
+  it("warns about conventional migrations and Functions omitted from the manifest", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "migrations"));
+    await mkdir(path.join(root, "functions", "forgotten"), {
+      recursive: true,
+    });
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "migrations", "0002_forgotten.sql"),
+      "select 1;",
+    );
+    await writeFile(
+      path.join(root, "functions", "forgotten", "index.ts"),
+      "export {};",
+    );
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+migrations: []
+functions: []
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    expect(bundle.warnings).toEqual([
+      expect.objectContaining({
+        code: "UNDECLARED_FUNCTION_ENTRYPOINT",
+        path: "functions/forgotten/index.ts",
+      }),
+      expect.objectContaining({
+        code: "UNDECLARED_MIGRATION_FILE",
+        path: "migrations/0002_forgotten.sql",
+      }),
+    ]);
+    expect(bundle.files).not.toContain("migrations/0002_forgotten.sql");
+    expect(bundle.files).not.toContain("functions/forgotten/index.ts");
   });
 
   it("preserves an explicit older SDK pin instead of replacing it with current", async () => {
