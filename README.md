@@ -9,12 +9,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.6.0` in
+OpenCloud application skills pin an exact CLI release. To install `v0.6.1` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.6.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.6.0.tgz"
+OPENCLOUD_CLI_VERSION="v0.6.1"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.6.1.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \

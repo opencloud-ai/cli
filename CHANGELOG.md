@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1
+
+- Negotiate development-session capabilities with the control plane instead
+  of requiring one hard-coded capability vector.
+- Accept boolean development capability values so a newly enabled platform
+  capability cannot turn a successful response into a client-side schema
+  failure.
+
 ## 0.6.0
 
 - Add `doctor` with redacted session, endpoint, CLI, and deployed-platform diagnostics.
