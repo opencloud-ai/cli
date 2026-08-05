@@ -22,7 +22,7 @@ import {
   type OpenCloudSession,
 } from "./session-store.js";
 
-const CLI_VERSION = "0.6.0";
+const CLI_VERSION = "0.6.1";
 
 const program = new Command()
   .name("opencloud")

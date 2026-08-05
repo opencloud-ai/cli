@@ -6,6 +6,14 @@ import {
   type ControlPlaneOperationOutput,
 } from "@opencloud/contracts";
 
+export const OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER =
+  "x-opencloud-client-capabilities";
+export const OPEN_CLOUD_DEV_SESSION_CAPABILITIES_V2 =
+  "dev-session-capabilities-v2";
+
+const OPEN_CLOUD_CLIENT_CAPABILITIES =
+  OPEN_CLOUD_DEV_SESSION_CAPABILITIES_V2;
+
 export interface ClientOptions {
   apiUrl: string;
   token?: string | undefined;
@@ -142,6 +150,8 @@ export class OpenCloudClient {
         headers: {
           authorization: `Bearer ${this.options.token}`,
           "idempotency-key": idempotencyKey,
+          [OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER]:
+            OPEN_CLOUD_CLIENT_CAPABILITIES,
         },
         body: form,
         signal: AbortSignal.timeout(120_000),
@@ -172,6 +182,8 @@ export class OpenCloudClient {
         accept: "application/json",
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+        [OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER]:
+          OPEN_CLOUD_CLIENT_CAPABILITIES,
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(timeoutMs),

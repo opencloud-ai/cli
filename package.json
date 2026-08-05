@@ -1,6 +1,6 @@
 {
   "name": "@opencloud/cli",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Versioned command-line client for building, deploying, and verifying OpenCloud applications",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src vendor/contracts/src",
+    "test": "vitest run src vendor/contracts/src vendor/control-plane-client/src",
     "lint": "npm run typecheck",
     "prepack": "npm run build"
   },
