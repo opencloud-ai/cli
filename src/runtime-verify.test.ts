@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   parseRuntimeVerificationSpec,
+  runtimeVerificationApplicability,
   verifyStorage,
 } from "./runtime-verify.js";
 
@@ -171,6 +172,48 @@ cron:
   name: reading-heartbeat
 `, manifest()),
     ).toThrow();
+  });
+
+  it("marks absent optional capabilities not applicable", () => {
+    const withoutOptionalCapabilities = {
+      ...manifest(),
+      functions: [],
+      cron: [],
+      requiredSecrets: [],
+    };
+    const spec = parseRuntimeVerificationSpec(`
+schemaVersion: 1
+data:
+  table: reading_items
+  markerColumn: title
+`, withoutOptionalCapabilities);
+
+    expect(runtimeVerificationApplicability(spec)).toMatchObject({
+      storage: { disposition: "not_applicable" },
+      realtime: { disposition: "not_applicable" },
+      function: { disposition: "not_applicable" },
+      cron: { disposition: "not_applicable" },
+    });
+  });
+
+  it("blocks completion when a declared Function or cron is not tested", () => {
+    const spec = parseRuntimeVerificationSpec(`
+schemaVersion: 1
+data:
+  table: reading_items
+  markerColumn: title
+`, manifest());
+
+    expect(runtimeVerificationApplicability(spec)).toMatchObject({
+      function: {
+        disposition: "not_tested",
+        detail: expect.stringContaining("reading-probe"),
+      },
+      cron: {
+        disposition: "not_tested",
+        detail: expect.stringContaining("reading-heartbeat"),
+      },
+    });
   });
 });
 

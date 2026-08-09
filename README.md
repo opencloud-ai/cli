@@ -3,18 +3,21 @@
 The public, versioned command-line client for building, validating, deploying,
 and verifying applications on [OpenCloud](https://opencloud.ai).
 
+This repository is the sole editable source for the application CLI. The
+platform repository consumes exact published releases.
+
 The CLI is intended for coding agents and humans with a terminal. A
 browser-only chat that cannot run Node.js and shell commands can prepare an
 offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v0.6.1` in
+OpenCloud application skills pin an exact CLI release. To install `v1.0.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v0.6.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-0.6.1.tgz"
+OPENCLOUD_CLI_VERSION="v1.0.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-1.0.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -33,7 +36,53 @@ OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 "$OPENCLOUD_CLI" --cli-version
 ```
 
-## Passwordless project onboarding
+## Account login and workspace connection
+
+Sign in to an existing account through an explicit browser approval, then
+select an app and connect its source directory:
+
+```bash
+"$OPENCLOUD_CLI" auth status
+"$OPENCLOUD_CLI" login
+"$OPENCLOUD_CLI" app list
+cd /absolute/path/to/app
+"$OPENCLOUD_CLI" app connect "$APP_ID"
+"$OPENCLOUD_CLI" doctor
+```
+
+`login` prints and opens a short-lived HTTPS approval page. The user signs in
+with a one-time email link or configured password and explicitly allows the
+CLI. It does not start a localhost callback or ask anyone to paste a code,
+email link, cookie, password, or token. Use `login --no-browser` when the
+terminal cannot open a browser, or `login --force` to replace an unusable
+stored login.
+
+The 15-minute account access token and rotating 30-day refresh token are stored
+in the operating-system credential service under `ai.opencloud.cli`. A
+headless environment without a usable keyring falls back to a mode-`0600`
+per-user credential file under the normal OpenCloud configuration directory.
+Never inspect, print, copy, upload, or commit either credential backend.
+
+The account credential can list, inspect, and create apps, but it cannot build
+or deploy them. `app connect` writes only a non-secret `.opencloud/app.json`
+binding and stores a separate renewable 24-hour app credential in the protected
+backend. This lets later terminal sessions reuse the account login and lets one
+user work safely across multiple app directories.
+
+```bash
+# Only when the requested app does not already exist:
+"$OPENCLOUD_CLI" app create \
+  --name "Family tasks" \
+  --visibility private
+
+# Revoke the login family and derived workspace credentials:
+"$OPENCLOUD_CLI" logout
+```
+
+## Legacy passwordless project onboarding
+
+The pre-1.0 email onboarding flow remains available for compatibility. New
+terminal workflows should use `login` and `app connect`.
 
 Give the CLI the user's email and agreed project title:
 

@@ -13,10 +13,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  parseManifest,
-  type OpenCloudManifest,
-} from "@opencloud/contracts";
+import { parseManifest, type OpenCloudManifest } from "@opencloud/contracts";
 import { OPEN_CLOUD_JS_VERSION } from "@opencloud/js";
 import * as tar from "tar";
 import YAML from "yaml";
@@ -51,11 +48,16 @@ export interface BuiltBundle {
   archive: Buffer;
   sha256: string;
   files: string[];
+  sourceManifest: string;
+  sourceFiles: string[];
   warnings: BundleWarning[];
 }
 
 export interface BundleWarning {
-  code: "UNDECLARED_MIGRATION_FILE" | "UNDECLARED_FUNCTION_ENTRYPOINT";
+  code:
+    | "UNDECLARED_MIGRATION_FILE"
+    | "UNDECLARED_FUNCTION_ENTRYPOINT"
+    | "FRONTEND_SDK_NOT_REFERENCED";
   path: string;
   message: string;
 }
@@ -90,10 +92,11 @@ export async function buildBundle(
   const root = path.resolve(directory);
   await assertDirectory(root, "App bundle root");
   const manifestFile = await findManifest(root);
+  const sourceManifest = bundleRelativePath(root, manifestFile);
   const source = await readFile(manifestFile, "utf8");
-  const raw = (manifestFile.endsWith(".json")
-    ? JSON.parse(source)
-    : YAML.parse(source)) as AuthorManifest;
+  const raw = (
+    manifestFile.endsWith(".json") ? JSON.parse(source) : YAML.parse(source)
+  ) as AuthorManifest;
   if (options.version) raw.version = options.version;
   raw.schemaVersion ??= 1;
   raw.runtime ??= {};
@@ -122,7 +125,13 @@ export async function buildBundle(
   }
   const manifest = parseManifest(raw);
   const selection = await selectBundleFiles(root, manifest, manifestFile);
-  const warnings = await findUndeclaredConventionalFiles(root, manifest);
+  const warnings = [
+    ...(await findUndeclaredConventionalFiles(root, manifest)),
+    ...(await findFrontendSdkWarnings(manifest, selection)),
+  ].sort((left, right) => comparePaths(left.path, right.path));
+  const sourceFiles = [sourceManifest, ...selection.files.keys()].sort(
+    comparePaths,
+  );
 
   const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-bundle-"));
   const staging = path.join(temporary, "root");
@@ -151,10 +160,9 @@ export async function buildBundle(
     const files = ["opencloud.json", ...selection.files.keys()].sort(
       comparePaths,
     );
-    const archiveEntries = [
-      ...selection.directories,
-      ...files,
-    ].sort(comparePaths);
+    const archiveEntries = [...selection.directories, ...files].sort(
+      comparePaths,
+    );
     await tar.create(
       {
         cwd: staging,
@@ -173,6 +181,8 @@ export async function buildBundle(
       archive,
       sha256: createHash("sha256").update(archive).digest("hex"),
       files,
+      sourceManifest,
+      sourceFiles,
       warnings,
     };
   } finally {
@@ -180,6 +190,34 @@ export async function buildBundle(
   }
 }
 
+async function findFrontendSdkWarnings(
+  manifest: OpenCloudManifest,
+  selection: BundleSelection,
+): Promise<BundleWarning[]> {
+  const frontendPrefix = manifest.frontend.directory + "/";
+  const candidates = [...selection.files.entries()].filter(
+    ([relative]) =>
+      relative.startsWith(frontendPrefix) &&
+      /[.](?:html|js|mjs|cjs|ts|tsx|jsx)$/.test(relative),
+  );
+  for (const [, sourceFile] of candidates) {
+    const content = await readFile(sourceFile, "utf8");
+    if (
+      content.includes("createOpenCloudClient") &&
+      content.includes("javascriptSdk.module")
+    ) {
+      return [];
+    }
+  }
+  return [
+    {
+      code: "FRONTEND_SDK_NOT_REFERENCED",
+      path: manifest.frontend.directory,
+      message:
+        "Frontend source does not reference the runtime-discovered OpenCloud JavaScript SDK. Read /_opencloud/config, import runtime.javascriptSdk.module, and create the client with createOpenCloudClient.",
+    },
+  ];
+}
 async function findUndeclaredConventionalFiles(
   root: string,
   manifest: OpenCloudManifest,
@@ -273,11 +311,7 @@ async function selectBundleFiles(
     relativeDirectory: string,
     label: string,
   ): Promise<void> => {
-    const absoluteDirectory = resolveBundlePath(
-      root,
-      relativeDirectory,
-      label,
-    );
+    const absoluteDirectory = resolveBundlePath(root, relativeDirectory, label);
     assertNotLocalMetadataPath(root, absoluteDirectory, label);
     await assertNoSymlinkComponents(root, absoluteDirectory, label);
     await assertDirectory(absoluteDirectory, label);
@@ -393,7 +427,9 @@ function assertNotLocalMetadataPath(
 ): void {
   const relative = bundleRelativePath(root, target);
   if (relative === ".opencloud" || relative.startsWith(".opencloud/")) {
-    throw new Error(`${label} cannot use the reserved .opencloud metadata directory`);
+    throw new Error(
+      `${label} cannot use the reserved .opencloud metadata directory`,
+    );
   }
 }
 
@@ -407,7 +443,8 @@ function addSelectedFile(
   if (
     file === manifestFile ||
     (path.posix.dirname(relative) === "." && isManifestName(relative))
-  ) return;
+  )
+    return;
   selection.files.set(relative, file);
   addParentDirectories(relative, selection.directories);
 }
@@ -470,10 +507,7 @@ function assertNotAuthorManifestInput(
   label: string,
 ): void {
   const relative = bundleRelativePath(root, target);
-  if (
-    path.posix.dirname(relative) === "." &&
-    isManifestName(relative)
-  ) {
+  if (path.posix.dirname(relative) === "." && isManifestName(relative)) {
     throw new Error(`${label} conflicts with the canonical opencloud.json`);
   }
 }

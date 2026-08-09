@@ -5,10 +5,25 @@ import path from "node:path";
 import { Command, Option } from "commander";
 import YAML from "yaml";
 import { OPEN_CLOUD_JS_VERSION } from "@opencloud/js";
-import type { AgentOnboardingResponse } from "@opencloud/contracts";
+import {
+  OPEN_CLOUD_FAVICON_DATA_URI,
+  OPEN_CLOUD_LOGO_DATA_URI,
+  type AgentOnboardingResponse,
+} from "@opencloud/contracts";
 import { OpenCloudClient } from "./api-client.js";
 import { requestApp, smokeApp } from "./app-edge.js";
+import {
+  beginDeviceAuthorization,
+  completeDeviceAuthorization,
+  DEFAULT_API_URL,
+  freshAccountCredential,
+  normalizeApiUrl,
+  openBrowser,
+  revokeAccountCredential,
+} from "./account-auth.js";
 import { buildBundle } from "./bundle.js";
+import { CredentialStore } from "./credential-store.js";
+import { doctorDiagnostics } from "./doctor.js";
 import {
   parseRuntimeVerificationSpec,
   verifyRuntime,
@@ -16,13 +31,22 @@ import {
 } from "./runtime-verify.js";
 import { verifyAppUi } from "./ui-verify.js";
 import {
+  deleteSession,
   loadSession,
   resolveSessionFile,
   saveSession,
   type OpenCloudSession,
 } from "./session-store.js";
+import {
+  connectWorkspace,
+  freshWorkspaceCredential,
+} from "./workspace-auth.js";
+import {
+  loadWorkspaceBinding,
+  resolveWorkspaceFile,
+} from "./workspace-store.js";
 
-const CLI_VERSION = "0.6.1";
+const CLI_VERSION = "1.0.0";
 
 const program = new Command()
   .name("opencloud")
@@ -43,7 +67,15 @@ const program = new Command()
       "--session-file <path>",
       "Secure CLI session file created by onboarding",
     ).env("OPENCLOUD_SESSION_FILE"),
+  )
+  .addOption(
+    new Option(
+      "--workspace-file <path>",
+      "Non-secret app binding file (defaults to .opencloud/app.json)",
+    ).env("OPENCLOUD_WORKSPACE_FILE"),
   );
+
+const credentialStore = new CredentialStore();
 
 function sessionFile(): string {
   return resolveSessionFile(
@@ -51,32 +83,104 @@ function sessionFile(): string {
   );
 }
 
+function workspaceFile(): string {
+  return resolveWorkspaceFile(
+    program.opts<{ workspaceFile?: string }>().workspaceFile,
+  );
+}
+
 function availableSession(): OpenCloudSession | null {
   return loadSession(sessionFile());
 }
 
+function availableWorkspace() {
+  return loadWorkspaceBinding(workspaceFile());
+}
+
+function targetApiUrl(): string {
+  return (
+    program.opts<{ apiUrl?: string }>().apiUrl ??
+    availableWorkspace()?.apiUrl ??
+    availableSession()?.apiUrl ??
+    DEFAULT_API_URL
+  );
+}
+
 function client(): OpenCloudClient {
-  const options = program.opts<{
-    apiUrl?: string;
-    token?: string;
-  }>();
-  const stored = options.apiUrl && options.token ? null : availableSession();
-  const apiUrl = options.apiUrl ?? stored?.apiUrl;
-  const token =
-    options.token ?? (stored?.state === "ready" ? stored.token : undefined);
-  if (!apiUrl || !token) {
-    throw new Error(
-      stored?.state === "awaiting_email_verification"
-        ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
-        : stored?.state === "starting"
-          ? "Onboarding has not completed. Re-run the same opencloud onboard command."
-          : "Run opencloud onboard, set OPENCLOUD_API_URL and OPENCLOUD_TOKEN, or pass --api-url and --token.",
-    );
+  const options = program.opts<{ apiUrl?: string; token?: string }>();
+  const binding = availableWorkspace();
+  const legacy = availableSession();
+  const apiUrl = options.apiUrl ?? binding?.apiUrl ?? legacy?.apiUrl;
+  if (options.token) {
+    if (!apiUrl) {
+      throw new Error("Pass --api-url with --token outside a connected workspace.");
+    }
+    return new OpenCloudClient({ apiUrl, token: options.token });
   }
-  return new OpenCloudClient({
-    apiUrl,
-    token,
-  });
+  if (binding) {
+    if (
+      options.apiUrl &&
+      normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(binding.apiUrl)
+    ) {
+      throw new Error(
+        `This workspace is connected to ${binding.apiUrl}; remove --api-url or reconnect it.`,
+      );
+    }
+    let tokenPromise: Promise<string> | null = null;
+    return new OpenCloudClient({
+      apiUrl: binding.apiUrl,
+      tokenProvider: () => {
+        tokenPromise ??= freshWorkspaceCredential({
+          store: credentialStore,
+          bindingFile: workspaceFile(),
+        }).then((stored) => stored.credential.token);
+        return tokenPromise;
+      },
+    });
+  }
+  if (legacy?.state === "ready") {
+    if (
+      options.apiUrl &&
+      normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(legacy.apiUrl)
+    ) {
+      throw new Error("The legacy session belongs to a different API URL.");
+    }
+    return new OpenCloudClient({ apiUrl: legacy.apiUrl, token: legacy.token });
+  }
+  throw new Error(
+    legacy?.state === "awaiting_email_verification"
+      ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
+      : legacy?.state === "starting"
+        ? "Onboarding has not completed. Re-run the same opencloud onboard command."
+        : "Run opencloud login, then opencloud app connect <app-id> in this directory.",
+  );
+}
+
+async function managementClient(): Promise<OpenCloudClient> {
+  const options = program.opts<{ token?: string }>();
+  if (options.token) return client();
+  const apiUrl = normalizeApiUrl(targetApiUrl());
+  const account = await credentialStore.loadAccount(apiUrl);
+  if (account) {
+    const fresh = await freshAccountCredential(credentialStore, apiUrl);
+    return new OpenCloudClient({
+      apiUrl,
+      token: fresh.credential.accessToken,
+    });
+  }
+  if (availableWorkspace()) return client();
+  const legacy = availableSession();
+  if (legacy?.state === "ready") {
+    return new OpenCloudClient({ apiUrl: legacy.apiUrl, token: legacy.token });
+  }
+  throw new Error("No OpenCloud account login was found. Run opencloud login.");
+}
+
+function requiredAccountCredential() {
+  return freshAccountCredential(
+    credentialStore,
+    normalizeApiUrl(targetApiUrl()),
+  );
 }
 
 function output(value: unknown): void {
@@ -343,6 +447,7 @@ function parseOnboardingResponse(value: unknown): AgentOnboardingResponse {
     !value ||
     typeof value !== "object" ||
     typeof (value as { onboardingId?: unknown }).onboardingId !== "string" ||
+    typeof (value as { launchUrl?: unknown }).launchUrl !== "string" ||
     typeof (value as { state?: unknown }).state !== "string"
   ) {
     throw new Error("OpenCloud returned an invalid onboarding response");
@@ -372,7 +477,7 @@ async function persistOnboardingResponse(
         expiresAt: credential.expiresAt,
         storedIn: file,
       },
-      next: "The app-scoped credential is stored locally. Continue with app list, app get, init, validate, and deploy; do not print the session file.",
+      next: "The app-scoped credential is stored locally. Continue building, give the owner launchUrl as their primary link while confirmation is pending, and do not print the session file.",
     };
   }
   if (completionToken) {
@@ -388,21 +493,178 @@ async function persistOnboardingResponse(
       ...safe,
       credential: null,
       sessionFile: file,
-      next: "Ask the user to confirm the email, then run opencloud onboard-complete. Do not print the session file.",
+      next: "Give the user launchUrl, ask them to confirm the project email, then run opencloud onboard-complete. Do not print the session file.",
     };
   }
   return {
     ...safe,
     credential: null,
     sessionFile: file,
-    next: "Email verification is still pending. Run opencloud onboard-complete after the user confirms.",
+    next: "Give the owner launchUrl. Email verification is still pending; run opencloud onboard-complete after they confirm.",
   };
 }
 
 program
+  .command("login")
+  .description("Sign in to an existing OpenCloud account in your browser")
+  .option("--force", "replace and revoke the currently stored account login")
+  .option("--no-browser", "print the approval URL without opening a browser")
+  .action(async (options) => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const existing = await credentialStore.loadAccount(apiUrl);
+    if (existing && !options.force) {
+      try {
+        const fresh = await freshAccountCredential(credentialStore, apiUrl);
+        output({
+          state: "authenticated",
+          apiUrl,
+          credential: {
+            backend: fresh.backend,
+            storedIn: fresh.location,
+            accessExpiresAt: fresh.credential.accessExpiresAt,
+            refreshExpiresAt: fresh.credential.refreshExpiresAt,
+          },
+          next: "Run opencloud app list, then opencloud app connect <app-id> in the app directory.",
+        });
+        return;
+      } catch {
+        throw new Error(
+          "The stored login could not be refreshed. Run opencloud login --force to replace it.",
+        );
+      }
+    }
+    if (existing) {
+      await revokeAccountCredential(existing.credential);
+      await credentialStore.deleteAccount(apiUrl);
+      const binding = availableWorkspace();
+      if (binding) {
+        await credentialStore.deleteWorkspace(binding.apiUrl, binding.appId);
+      }
+    }
+    const authorization = await beginDeviceAuthorization(apiUrl);
+    process.stderr.write(
+      `Open this URL to approve the CLI:\n${authorization.verificationUriComplete}\n`,
+    );
+    const browserOpened = options.browser !== false
+      ? openBrowser(authorization.verificationUriComplete)
+      : false;
+    const account = await completeDeviceAuthorization(authorization);
+    const stored = await credentialStore.saveAccount(account);
+    output({
+      state: "authenticated",
+      apiUrl,
+      browserOpened,
+      credential: {
+        backend: stored.backend,
+        storedIn: stored.location,
+        accessExpiresAt: account.accessExpiresAt,
+        refreshExpiresAt: account.refreshExpiresAt,
+      },
+      next: "Run opencloud app list, then opencloud app connect <app-id> in the app directory.",
+    });
+  });
+
+const auth = program
+  .command("auth")
+  .description("Inspect or clear the stored OpenCloud account login");
+
+auth
+  .command("status")
+  .description("Show redacted account and workspace authentication status")
+  .action(async () => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const existing = await credentialStore.loadAccount(apiUrl);
+    let account:
+      | {
+          state: "authenticated";
+          backend: string;
+          storedIn: string;
+          accessExpiresAt: string;
+          refreshExpiresAt: string;
+        }
+      | { state: "needs_login"; reason: string }
+      | null = null;
+    if (existing) {
+      try {
+        const fresh = await freshAccountCredential(credentialStore, apiUrl);
+        account = {
+          state: "authenticated",
+          backend: fresh.backend,
+          storedIn: fresh.location,
+          accessExpiresAt: fresh.credential.accessExpiresAt,
+          refreshExpiresAt: fresh.credential.refreshExpiresAt,
+        };
+      } catch (error) {
+        account = {
+          state: "needs_login",
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    const binding = availableWorkspace();
+    const workspaceCredential = binding
+      ? await credentialStore.loadWorkspace(binding.apiUrl, binding.appId)
+      : null;
+    output({
+      authenticated: account?.state === "authenticated",
+      apiUrl,
+      account,
+      workspace: binding
+        ? {
+            bindingFile: workspaceFile(),
+            appId: binding.appId,
+            appName: binding.appName,
+            appUrl: binding.appUrl,
+            credential: workspaceCredential
+              ? {
+                  present: true,
+                  active:
+                    Date.parse(workspaceCredential.credential.expiresAt) >
+                    Date.now(),
+                  expiresAt: workspaceCredential.credential.expiresAt,
+                  backend: workspaceCredential.backend,
+                  storedIn: workspaceCredential.location,
+                }
+              : { present: false },
+          }
+        : null,
+      legacyOnboardingSession: availableSession()?.state ?? null,
+    });
+  });
+
+async function logout(): Promise<void> {
+  const apiUrl = normalizeApiUrl(targetApiUrl());
+  const existing = await credentialStore.loadAccount(apiUrl);
+  if (existing) await revokeAccountCredential(existing.credential);
+  const binding = availableWorkspace();
+  if (binding) {
+    await credentialStore.deleteWorkspace(binding.apiUrl, binding.appId);
+  }
+  await credentialStore.deleteAccount(apiUrl);
+  const legacyOnboardingSession = availableSession();
+  const legacyOnboardingSessionRemoved = await deleteSession(sessionFile());
+  output({
+    state: "logged_out",
+    apiUrl,
+    remoteLoginRevoked: Boolean(existing),
+    currentWorkspaceCredentialRemoved: Boolean(binding),
+    workspaceBindingRetained: binding ? workspaceFile() : null,
+    legacyOnboardingSessionRemoved: legacyOnboardingSessionRemoved
+      ? legacyOnboardingSession?.state ?? true
+      : false,
+    next: binding
+      ? "The non-secret app binding remains. Run opencloud login to reconnect it later."
+      : "Run opencloud login to sign in again.",
+  });
+}
+
+auth.command("logout").description("Revoke and clear the CLI login").action(logout);
+program.command("logout").description("Revoke and clear the CLI login").action(logout);
+
+program
   .command("onboard")
   .description(
-    "Create a passwordless OpenCloud identity and automatically addressed project",
+    "Create an email-based OpenCloud identity and automatically addressed project",
   )
   .requiredOption("--email <email>", "user email address")
   .requiredOption("--name <name>", "project title")
@@ -513,49 +775,59 @@ program
     const options = program.opts<{ apiUrl?: string; token?: string }>();
     const file = sessionFile();
     const stored = availableSession();
-    const apiUrl = options.apiUrl ?? stored?.apiUrl ?? null;
-    let platform: unknown = null;
-    let reachable = false;
-    if (apiUrl) {
-      try {
-        const response = await fetch(`${apiUrl.replace(/\/+$/, "")}/version`, {
-          signal: AbortSignal.timeout(10_000),
-        });
-        reachable = response.ok;
-        platform = response.ok
-          ? await response.json()
-          : { status: response.status };
-      } catch (error) {
-        platform = {
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }
-    output({
-      passed: Boolean(
-        apiUrl &&
-          reachable &&
-          (options.token || stored?.state === "ready"),
+    const binding = availableWorkspace();
+    const account = await credentialStore.loadAccount(
+      normalizeApiUrl(
+        options.apiUrl ?? binding?.apiUrl ?? stored?.apiUrl ?? DEFAULT_API_URL,
       ),
-      cliVersion: CLI_VERSION,
-      currentDirectory: process.cwd(),
-      api: { url: apiUrl, reachable, platform },
-      identity: {
-        source: options.token
-          ? "environment-or-flag"
-          : stored
-            ? "session-file"
-            : "none",
+    );
+    const workspaceCredential = binding
+      ? await credentialStore.loadWorkspace(binding.apiUrl, binding.appId)
+      : null;
+    const apiUrl =
+      options.apiUrl ??
+      binding?.apiUrl ??
+      account?.credential.apiUrl ??
+      stored?.apiUrl ??
+      null;
+    const token =
+      options.token ??
+      workspaceCredential?.credential.token ??
+      account?.credential.accessToken ??
+      (stored?.state === "ready" ? stored.token : null);
+    output(
+      await doctorDiagnostics({
+        apiUrl,
+        token,
+        cliVersion: CLI_VERSION,
+        currentDirectory: process.cwd(),
         sessionFile: file,
-        state: stored?.state ?? null,
-        appId: stored?.state === "ready" ? stored.appId : null,
+        identitySource: options.token
+          ? "environment-or-flag"
+          : workspaceCredential
+            ? "workspace-credential"
+            : account
+              ? "account-login"
+              : stored
+                ? "session-file"
+                : "none",
+        sessionState: binding ? "connected" : stored?.state ?? null,
+        appId:
+          binding?.appId ?? (stored?.state === "ready" ? stored.appId : null),
         credentialExpiresAt:
-          stored?.state === "ready" ? stored.credentialExpiresAt : null,
-        tokenPresent: Boolean(
-          options.token || (stored?.state === "ready" && stored.token),
-        ),
-      },
-    });
+          workspaceCredential?.credential.expiresAt ??
+          (stored?.state === "ready" ? stored.credentialExpiresAt : null),
+        workspaceBindingFile: binding ? workspaceFile() : null,
+        accountLogin: account
+          ? {
+              backend: account.backend,
+              storedIn: account.location,
+              accessExpiresAt: account.credential.accessExpiresAt,
+              refreshExpiresAt: account.credential.refreshExpiresAt,
+            }
+          : null,
+      }),
+    );
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
@@ -571,7 +843,7 @@ app
   .option("--idempotency-key <key>")
   .action(async (options) => {
     output(
-      await client().call(
+      await (await managementClient()).call(
         "createApp",
         {
           body: {
@@ -589,12 +861,47 @@ app
     );
   });
 
-app.command("list").action(async () => output(await client().get("/v1/apps")));
+app
+  .command("list")
+  .description("List apps available to the signed-in account")
+  .action(async () =>
+    output(await (await managementClient()).get("/v1/apps")),
+  );
 
 app
   .command("get")
   .argument("<app-id>")
-  .action(async (appId) => output(await client().get(`/v1/apps/${appId}`)));
+  .action(async (appId) =>
+    output(
+      await (await managementClient()).get(`/v1/apps/${appId}`),
+    ),
+  );
+
+app
+  .command("connect")
+  .description("Connect this directory to an app with an expiring credential")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    const account = await requiredAccountCredential();
+    const connected = await connectWorkspace({
+      store: credentialStore,
+      bindingFile: workspaceFile(),
+      apiUrl: account.credential.apiUrl,
+      accessToken: account.credential.accessToken,
+      appId,
+    });
+    output({
+      state: "connected",
+      app: connected.binding,
+      workspaceFile: workspaceFile(),
+      credential: {
+        backend: connected.stored.backend,
+        storedIn: connected.stored.location,
+        expiresAt: connected.stored.credential.expiresAt,
+      },
+      next: "Codex can now build, validate, preview, and deploy this app with the OpenCloud CLI.",
+    });
+  });
 
 app
   .command("sdk-inspect")
@@ -1194,16 +1501,21 @@ program
   .command("init")
   .description("Create a minimal app bundle")
   .argument("<directory>")
-  .option("--app-id <uuid>", "defaults to the onboarded project")
+  .option("--app-id <uuid>", "defaults to the connected workspace app")
   .option("--version <version>", "initial deployment version", "v1")
   .action(async (directory, options) => {
+    const root = callerPath(directory);
+    const binding = loadWorkspaceBinding(resolveWorkspaceFile(undefined, root));
     const stored = availableSession();
     const appId =
-      options.appId ?? (stored?.state === "ready" ? stored.appId : undefined);
+      options.appId ??
+      binding?.appId ??
+      (stored?.state === "ready" ? stored.appId : undefined);
     if (!appId) {
-      throw new Error("Pass --app-id or complete opencloud onboard first");
+      throw new Error(
+        "Pass --app-id or run opencloud app connect <app-id> in the target directory.",
+      );
     }
-    const root = callerPath(directory);
     await mkdir(path.join(root, "frontend"), { recursive: true });
     await mkdir(path.join(root, "migrations"), { recursive: true });
     await writeFile(
@@ -1213,7 +1525,16 @@ program
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OpenCloud app</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="${OPEN_CLOUD_FAVICON_DATA_URI}">
+  <style>
+    body { margin: 0; padding: 3rem 1.5rem; color: #eaf4ff; background: #071019; font: 1rem/1.6 Inter, ui-sans-serif, system-ui, sans-serif; }
+    main { width: min(40rem, 100%); margin: auto; }
+    .opencloud-logo { display: block; width: 4rem; height: 4rem; object-fit: contain; }
+    h1 { margin: 1.25rem 0 .5rem; }
+    p { color: #a9bdcb; }
+  </style>
   <main>
+    <img class="opencloud-logo" src="${OPEN_CLOUD_LOGO_DATA_URI}" alt="" aria-hidden="true" width="64" height="64" decoding="async">
     <h1>Your OpenCloud app is running</h1>
     <p>Edit frontend/index.html and deploy again with a new version.</p>
   </main>
@@ -1523,9 +1844,14 @@ program
     }
     const spec = parseRuntimeVerificationSpec(source, bundle.manifest);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    output(
-      await verifyRuntime(control, appValue, spec, edgeUrl ? { edgeUrl } : {}),
+    const result = await verifyRuntime(
+      control,
+      appValue,
+      spec,
+      edgeUrl ? { edgeUrl } : {},
     );
+    output(result);
+    if (result.passed !== true) process.exitCode = 1;
   });
 
 const secret = program

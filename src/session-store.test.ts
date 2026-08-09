@@ -1,8 +1,16 @@
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteSession,
   loadSession,
   resolveSessionFile,
   saveSession,
@@ -81,5 +89,46 @@ describe("OpenCloud CLI session store", () => {
     });
 
     expect(resolveSessionFile(undefined, nested)).toBe(file);
+  });
+
+  it("removes only a regular legacy session file", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const file = path.join(directory, ".opencloud", "session.json");
+    await saveSession(file, {
+      schemaVersion: 1,
+      state: "ready",
+      apiUrl: "https://api.opencloud.ai",
+      appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+      appUrl: "https://family-tasks-a1b2c3.opencloud.ai",
+      token: "oc_agent_secret",
+      credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+    });
+
+    await expect(deleteSession(file)).resolves.toBe(true);
+    expect(loadSession(file)).toBeNull();
+    await expect(deleteSession(file)).resolves.toBe(false);
+  });
+
+  it("refuses to follow a symlink when clearing a legacy session", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const target = path.join(directory, "target.json");
+    const file = path.join(directory, "session.json");
+    await saveSession(target, {
+      schemaVersion: 1,
+      state: "ready",
+      apiUrl: "https://api.opencloud.ai",
+      appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+      appUrl: "https://family-tasks-a1b2c3.opencloud.ai",
+      token: "oc_agent_secret",
+      credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+    });
+    await symlink(target, file);
+
+    await expect(deleteSession(file)).rejects.toThrow(
+      "unsafe OpenCloud session",
+    );
+    expect(loadSession(target)).not.toBeNull();
   });
 });

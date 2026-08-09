@@ -1,10 +1,4 @@
-import {
-  mkdtemp,
-  mkdir,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,9 +9,9 @@ const temporary: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporary.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    temporary
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -49,7 +43,10 @@ describe("bundle builder", () => {
       recursive: true,
     });
     await writeFile(path.join(root, "frontend", "index.html"), "hello");
-    await writeFile(path.join(root, "frontend", "assets", "app.js"), "app");
+    await writeFile(
+      path.join(root, "frontend", "assets", "app.js"),
+      "const sdk = runtime.javascriptSdk.module; createOpenCloudClient(sdk);",
+    );
     await writeFile(
       path.join(root, "migrations", "0001_notes.sql"),
       "create table notes(id uuid primary key);",
@@ -68,7 +65,10 @@ describe("bundle builder", () => {
     );
     await writeFile(path.join(root, "BRIEF.md"), "author instructions");
     await writeFile(path.join(root, "AGENT_REPORT.md"), "first report");
-    await writeFile(path.join(root, "smoke.mjs"), "throw new Error('test only')");
+    await writeFile(
+      path.join(root, "smoke.mjs"),
+      "throw new Error('test only')",
+    );
     await writeFile(path.join(root, "unreachable.txt"), "not runtime input");
     await writeManifest(
       root,
@@ -101,6 +101,17 @@ functions:
       "migrations/0001_notes.sql",
       "opencloud.json",
     ]);
+    expect(first.sourceManifest).toBe("opencloud.yaml");
+    expect(first.sourceFiles).toEqual([
+      "frontend/assets/app.js",
+      "frontend/index.html",
+      "functions/process/index.ts",
+      "functions/process/lib/index.ts",
+      "functions/process/shared.ts",
+      "migrations/0001_notes.sql",
+      "opencloud.yaml",
+    ]);
+    expect(first.sourceFiles).not.toContain("opencloud.json");
     expect(first.warnings).toEqual([]);
 
     await writeFile(path.join(root, "AGENT_REPORT.md"), "updated report");
@@ -138,7 +149,9 @@ frontend:
 
     const bundle = await buildBundle(root);
     expect(bundle.files).toContain("index.html");
-    expect(bundle.files.some((file) => file.startsWith(".opencloud/"))).toBe(false);
+    expect(bundle.files.some((file) => file.startsWith(".opencloud/"))).toBe(
+      false,
+    );
   });
 
   it("warns about conventional migrations and Functions omitted from the manifest", async () => {
@@ -169,6 +182,10 @@ functions: []
 
     const bundle = await buildBundle(root);
     expect(bundle.warnings).toEqual([
+      expect.objectContaining({
+        code: "FRONTEND_SDK_NOT_REFERENCED",
+        path: "frontend",
+      }),
       expect.objectContaining({
         code: "UNDECLARED_FUNCTION_ENTRYPOINT",
         path: "functions/forgotten/index.ts",

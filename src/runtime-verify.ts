@@ -36,14 +36,13 @@ export const runtimeVerificationSchema = z
           .default("opencloud-verify"),
       })
       .strict()
-      .default({
-        objectPrefix: "opencloud-verify",
-      }),
+      .optional(),
     realtime: z
       .object({
         topic: logicalName,
       })
-      .strict(),
+      .strict()
+      .optional(),
     function: z
       .object({
         name: logicalName,
@@ -51,13 +50,15 @@ export const runtimeVerificationSchema = z
         digestField: responseField.default("secretDigest"),
         presentField: responseField.default("secretPresent"),
       })
-      .strict(),
+      .strict()
+      .optional(),
     cron: z
       .object({
         name: logicalName,
         timeoutSeconds: z.coerce.number().int().min(10).max(300).default(120),
       })
-      .strict(),
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -68,13 +69,68 @@ export interface RuntimeVerificationSpec
   data: RuntimeVerificationInput["data"] & {
     ownerColumn?: string;
   };
-  storage: {
+  storage?: {
     authorization: StorageAuthorization;
     objectPrefix: string;
   };
   manifest: {
     version: string;
     storageAuthorization: StorageAuthorization;
+    functionNames: string[];
+    enabledCronNames: string[];
+  };
+}
+
+export type RuntimeVerificationDisposition =
+  | "test"
+  | "not_applicable"
+  | "not_tested";
+
+export interface RuntimeVerificationApplicability {
+  storage: { disposition: RuntimeVerificationDisposition; detail: string };
+  realtime: { disposition: RuntimeVerificationDisposition; detail: string };
+  function: { disposition: RuntimeVerificationDisposition; detail: string };
+  cron: { disposition: RuntimeVerificationDisposition; detail: string };
+}
+
+export function runtimeVerificationApplicability(
+  spec: RuntimeVerificationSpec,
+): RuntimeVerificationApplicability {
+  return {
+    storage: spec.storage
+      ? { disposition: "test", detail: "The verification contract declares Storage." }
+      : {
+          disposition: "not_applicable",
+          detail: "The verification contract declares no Storage workflow.",
+        },
+    realtime: spec.realtime
+      ? { disposition: "test", detail: "The verification contract declares Realtime." }
+      : {
+          disposition: "not_applicable",
+          detail: "The verification contract declares no Realtime workflow.",
+        },
+    function: spec.function
+      ? { disposition: "test", detail: "The verification contract covers a Function." }
+      : spec.manifest.functionNames.length > 0
+        ? {
+            disposition: "not_tested",
+            detail: `The manifest declares Function(s) ${spec.manifest.functionNames.join(", ")}, but the verification contract tests none.`,
+          }
+        : {
+            disposition: "not_applicable",
+            detail: "The manifest declares no Functions.",
+          },
+    cron: spec.cron
+      ? { disposition: "test", detail: "The verification contract covers a cron job." }
+      : spec.manifest.enabledCronNames.length > 0
+        ? {
+            disposition: "not_tested",
+            detail: `The manifest declares enabled cron(s) ${spec.manifest.enabledCronNames.join(", ")}, but the verification contract tests none.`,
+          }
+        : {
+            disposition: "not_applicable",
+            detail: "The manifest declares no enabled cron jobs.",
+          },
   };
 }
 
@@ -199,11 +255,15 @@ async function login(
   app: RuntimeApp,
   user: VerificationUser,
 ): Promise<UserSession> {
-  const response = await transport.request(app.authUrl, "/v1/auth/login", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: user.email, password: user.password }),
-  });
+  const response = await transport.request(
+    app.authUrl,
+    "/v1/auth/_internal/verifier-session",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: user.email, password: user.password }),
+    },
+  );
   assert(response.ok, `Central login returned HTTP ${response.status}`);
   const rawCookies = response.headers["set-cookie"];
   const rawCookie = Array.isArray(rawCookies) ? rawCookies[0] : rawCookies;
@@ -298,7 +358,7 @@ export function parseRuntimeVerificationSpec(
   const ownerColumn =
     input.data.ownerColumn ??
     (input.data.mode === "owner" ? "owner_id" : undefined);
-  const requestedAuthorization = input.storage.authorization;
+  const requestedAuthorization = input.storage?.authorization;
   if (
     requestedAuthorization &&
     requestedAuthorization !== manifest.storage.authorization
@@ -307,49 +367,64 @@ export function parseRuntimeVerificationSpec(
       `Verification storage.authorization is ${requestedAuthorization}, but the app manifest declares ${manifest.storage.authorization}`,
     );
   }
-  const verifiedFunction = manifest.functions.find(
-    (definition) => definition.name === input.function.name,
-  );
-  if (!verifiedFunction) {
-    throw new Error(
-      `Verification function ${input.function.name} is not declared in the app manifest`,
+  if (input.function) {
+    const verifiedFunction = manifest.functions.find(
+      (definition) => definition.name === input.function?.name,
     );
+    if (!verifiedFunction) {
+      throw new Error(
+        `Verification function ${input.function.name} is not declared in the app manifest`,
+      );
+    }
+    if (!verifiedFunction.verifyJwt) {
+      throw new Error(
+        `Verification function ${input.function.name} must declare verifyJwt: true`,
+      );
+    }
+    if (!manifest.requiredSecrets.includes(input.function.secretName)) {
+      throw new Error(
+        `Verification secret ${input.function.secretName} is not declared in requiredSecrets`,
+      );
+    }
   }
-  if (!verifiedFunction.verifyJwt) {
-    throw new Error(
-      `Verification function ${input.function.name} must declare verifyJwt: true`,
+  if (input.cron) {
+    const verifiedCron = manifest.cron.find(
+      (definition) => definition.name === input.cron?.name,
     );
-  }
-  if (!manifest.requiredSecrets.includes(input.function.secretName)) {
-    throw new Error(
-      `Verification secret ${input.function.secretName} is not declared in requiredSecrets`,
-    );
-  }
-  const verifiedCron = manifest.cron.find(
-    (definition) => definition.name === input.cron.name,
-  );
-  if (!verifiedCron) {
-    throw new Error(
-      `Verification cron ${input.cron.name} is not declared in the app manifest`,
-    );
-  }
-  if (!verifiedCron.enabled) {
-    throw new Error(`Verification cron ${input.cron.name} is disabled`);
+    if (!verifiedCron) {
+      throw new Error(
+        `Verification cron ${input.cron.name} is not declared in the app manifest`,
+      );
+    }
+    if (!verifiedCron.enabled) {
+      throw new Error(`Verification cron ${input.cron.name} is disabled`);
+    }
   }
   const { ownerColumn: _inputOwnerColumn, ...data } = input.data;
   return {
-    ...input,
+    schemaVersion: input.schemaVersion,
     data: {
       ...data,
       ...(ownerColumn ? { ownerColumn } : {}),
     },
-    storage: {
-      authorization: manifest.storage.authorization,
-      objectPrefix: input.storage.objectPrefix,
-    },
+    ...(input.storage
+      ? {
+          storage: {
+            authorization: manifest.storage.authorization,
+            objectPrefix: input.storage.objectPrefix,
+          },
+        }
+      : {}),
+    ...(input.realtime ? { realtime: input.realtime } : {}),
+    ...(input.function ? { function: input.function } : {}),
+    ...(input.cron ? { cron: input.cron } : {}),
     manifest: {
       version: manifest.version,
       storageAuthorization: manifest.storage.authorization,
+      functionNames: manifest.functions.map(({ name }) => name),
+      enabledCronNames: manifest.cron
+        .filter(({ enabled }) => enabled)
+        .map(({ name }) => name),
     },
   };
 }
@@ -510,7 +585,7 @@ export async function verifyStorage(
   app: RuntimeApp,
   configValue: AppConfig,
   sessions: { first: UserSession; second: UserSession },
-  spec: RuntimeVerificationSpec["storage"],
+  spec: NonNullable<RuntimeVerificationSpec["storage"]>,
   marker: string,
 ): Promise<Record<string, unknown>> {
   const objectName =
@@ -686,7 +761,7 @@ async function verifyRealtime(
   app: RuntimeApp,
   configValue: AppConfig,
   sessions: { first: UserSession; second: UserSession },
-  spec: RuntimeVerificationSpec["realtime"],
+  spec: NonNullable<RuntimeVerificationSpec["realtime"]>,
   marker: string,
 ): Promise<Record<string, unknown>> {
   const channelName = `app:${app.id}:${spec.topic}`;
@@ -771,7 +846,7 @@ async function verifyFunction(
   app: RuntimeApp,
   configValue: AppConfig,
   session: UserSession,
-  spec: RuntimeVerificationSpec["function"],
+  spec: NonNullable<RuntimeVerificationSpec["function"]>,
 ): Promise<Record<string, unknown>> {
   const functionPath = `/functions/v1/${spec.name}`;
   const anonymous = await transport.request(app.appUrl, functionPath, {
@@ -842,7 +917,7 @@ async function verifyFunction(
 async function verifyCron(
   client: OpenCloudClient,
   app: RuntimeApp,
-  spec: RuntimeVerificationSpec["cron"],
+  spec: NonNullable<RuntimeVerificationSpec["cron"]>,
 ): Promise<Record<string, unknown>> {
   const startedAt = new Date();
   const trigger = z
@@ -904,6 +979,7 @@ export async function verifyRuntime(
     first: sessions.first,
     second: sessions.second,
   };
+  const applicability = runtimeVerificationApplicability(spec);
 
   const results: Record<string, unknown>[] = [
     {
@@ -912,9 +988,7 @@ export async function verifyRuntime(
       detail:
         "Canonical origins resolved; private redirect and two brokered user sessions passed.",
     },
-    {
-      name: "two-user RLS",
-      ...(await verifyData(
+    await verificationCheck("two-user RLS", () => verifyData(
         transport,
         app,
         sessions.config,
@@ -922,64 +996,79 @@ export async function verifyRuntime(
         spec.data,
         marker,
       )),
-    },
-    {
-      name: "authenticated Storage",
-      ...(await verifyStorage(
-        transport,
-        app,
-        sessions.config,
-        scopedSessions,
-        spec.storage,
-        marker,
-      )),
-    },
-    {
-      name: "private Realtime",
-      ...(await verifyRealtime(
-        transport,
-        app,
-        sessions.config,
-        scopedSessions,
-        spec.realtime,
-        marker,
-      )),
-    },
-    {
-      name: "function authentication and secret rotation",
-      ...(await verifyFunction(
-        transport,
-        client,
-        app,
-        sessions.config,
-        sessions.first,
-        spec.function,
-      )),
-    },
-    {
-      name: "structured cron history",
-      ...(await verifyCron(client, app, spec.cron)),
-    },
+    spec.storage
+      ? await verificationCheck("authenticated Storage", () =>
+          verifyStorage(
+            transport,
+            app,
+            sessions.config,
+            scopedSessions,
+            spec.storage!,
+            marker,
+          ),
+        )
+      : dispositionResult("authenticated Storage", applicability.storage),
+    spec.realtime
+      ? await verificationCheck("private Realtime", () =>
+          verifyRealtime(
+            transport,
+            app,
+            sessions.config,
+            scopedSessions,
+            spec.realtime!,
+            marker,
+          ),
+        )
+      : dispositionResult("private Realtime", applicability.realtime),
+    spec.function
+      ? await verificationCheck(
+          "function authentication and secret rotation",
+          () =>
+            verifyFunction(
+              transport,
+              client,
+              app,
+              sessions.config,
+              sessions.first,
+              spec.function!,
+            ),
+        )
+      : dispositionResult(
+          "function authentication and secret rotation",
+          applicability.function,
+        ),
+    spec.cron
+      ? await verificationCheck("structured cron history", () =>
+          verifyCron(client, app, spec.cron!),
+        )
+      : dispositionResult("structured cron history", applicability.cron),
   ];
 
-  const now = new Date();
-  const logs = await client.post(`/v1/apps/${app.id}/logs/query`, {
-    from: new Date(now.getTime() - 15 * 60_000).toISOString(),
-    to: now.toISOString(),
-    limit: 50,
-  });
-  const usage = await client.get(`/v1/apps/${app.id}/usage`);
-  results.push({
-    name: "scoped observability",
-    status: "passed",
-    detail: `Logs query succeeded; usage returned ${
-      Array.isArray(usage) ? usage.length : 0
-    } rollup row(s).`,
-    logsReturned: Array.isArray(logs) ? logs.length : undefined,
-  });
+  results.push(
+    await verificationCheck("scoped observability", async () => {
+      const now = new Date();
+      const logs = await client.post(`/v1/apps/${app.id}/logs/query`, {
+        from: new Date(now.getTime() - 15 * 60_000).toISOString(),
+        to: now.toISOString(),
+        limit: 50,
+      });
+      const usage = await client.get(`/v1/apps/${app.id}/usage`);
+      return {
+        status: "passed",
+        detail: `Logs query succeeded; usage returned ${
+          Array.isArray(usage) ? usage.length : 0
+        } rollup row(s).`,
+        logsReturned: Array.isArray(logs) ? logs.length : undefined,
+      };
+    }),
+  );
+
+  const passed = results.every(({ status }) =>
+    status === "passed" || status === "not_applicable",
+  );
 
   return {
-    passed: true,
+    passed,
     appId: app.id,
     deploymentId: app.activeDeploymentId,
     contract: spec.manifest,
@@ -989,4 +1078,40 @@ export async function verifyRuntime(
     adapterUsed: Boolean(options.edgeUrl),
     results,
   };
+}
+
+async function verificationCheck(
+  name: string,
+  check: () => Promise<Record<string, unknown>>,
+): Promise<Record<string, unknown>> {
+  try {
+    return { name, ...(await check()) };
+  } catch (error) {
+    return {
+      name,
+      status: "failed",
+      detail: error instanceof Error ? error.message.slice(0, 2_000) : "Verification failed",
+    };
+  }
+}
+
+function notApplicable(name: string, detail: string): Record<string, unknown> {
+  return { name, status: "not_applicable", detail };
+}
+
+function notTested(name: string, detail: string): Record<string, unknown> {
+  return { name, status: "not_tested", detail };
+}
+
+function dispositionResult(
+  name: string,
+  applicability: { disposition: RuntimeVerificationDisposition; detail: string },
+): Record<string, unknown> {
+  if (applicability.disposition === "not_applicable") {
+    return notApplicable(name, applicability.detail);
+  }
+  if (applicability.disposition === "not_tested") {
+    return notTested(name, applicability.detail);
+  }
+  throw new Error(`Verification capability ${name} was not executed`);
 }

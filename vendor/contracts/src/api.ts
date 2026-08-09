@@ -183,6 +183,8 @@ export type AgentOnboardingState =
 
 export interface AgentOnboardingResponse {
   onboardingId: string;
+  /** Non-secret owner page that waits for confirmation and deployment. */
+  launchUrl: string;
   state: AgentOnboardingState;
   existingUser: boolean;
   verification: {
@@ -209,6 +211,7 @@ export interface AppRecord {
   apiUrl: string;
   visibility: AppVisibility;
   state: AppState;
+  backupSchedule?: "none" | "daily" | "weekly";
   ownerUserId: string;
   desiredDeploymentId: string | null;
   activeDeploymentId: string | null;

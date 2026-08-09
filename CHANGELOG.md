@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.0
+
+- Add reusable account login through an explicit browser approval flow with
+  `login`, `auth status`, and `logout`; no localhost callback, pasted code, or
+  copied credential is required.
+- Store rotating account credentials in the operating-system keyring with a
+  protected per-user file fallback.
+- Add `app create` and `app connect` so one account login can select and work
+  across multiple app workspaces using renewable app-scoped credentials.
+- Keep non-secret workspace bindings separate from protected credentials and
+  retain legacy email onboarding as a compatibility path.
+- Add source/artifact checkpoint evidence, runtime-aware SDK warnings, richer
+  verification coverage, owner launch URLs, and refreshable typed API tokens.
+- Move canonical CLI ownership entirely to this public repository.
+
 ## 0.6.1
 
 - Negotiate development-session capabilities with the control plane instead
