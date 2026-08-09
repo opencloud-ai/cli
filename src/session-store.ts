@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -141,4 +141,14 @@ export async function saveSession(
   });
   await fs.rename(temporary, file);
   await fs.chmod(file, 0o600);
+}
+
+export async function deleteSession(file: string): Promise<boolean> {
+  if (!existsSync(file)) return false;
+  const metadata = lstatSync(file);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`Refusing to remove unsafe OpenCloud session path: ${file}`);
+  }
+  await fs.rm(file);
+  return true;
 }

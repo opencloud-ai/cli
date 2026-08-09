@@ -154,7 +154,7 @@ export async function verifyAppUi(
     const context = await browser.newContext({ ignoreHTTPSErrors: false });
     if (credentials) {
       const login = await context.request.post(
-        `${app.authUrl}/v1/auth/login`,
+        `${app.authUrl}/v1/auth/_internal/verifier-session`,
         {
           data: credentials,
           failOnStatusCode: false,

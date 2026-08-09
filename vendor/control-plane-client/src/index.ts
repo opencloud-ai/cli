@@ -17,6 +17,7 @@ const OPEN_CLOUD_CLIENT_CAPABILITIES =
 export interface ClientOptions {
   apiUrl: string;
   token?: string | undefined;
+  tokenProvider?: (() => Promise<string | undefined>) | undefined;
   internalMcpSecret?: string | undefined;
   fetch?: typeof fetch | undefined;
 }
@@ -131,7 +132,8 @@ export class OpenCloudClient {
     archive: Buffer,
     idempotencyKey = randomUUID(),
   ): Promise<unknown> {
-    if (!this.options.token) {
+    const token = await this.resolveToken();
+    if (!token) {
       throw new Error("An OpenCloud credential is required");
     }
     const form = new FormData();
@@ -148,7 +150,7 @@ export class OpenCloudClient {
       {
         method: "POST",
         headers: {
-          authorization: `Bearer ${this.options.token}`,
+          authorization: `Bearer ${token}`,
           "idempotency-key": idempotencyKey,
           [OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER]:
             OPEN_CLOUD_CLIENT_CAPABILITIES,
@@ -167,11 +169,12 @@ export class OpenCloudClient {
     idempotencyKey?: string,
     timeoutMs = 30_000,
   ): Promise<unknown> {
+    const token = await this.resolveToken();
     const response = await this.fetcher(`${this.apiUrl}${requestPath}`, {
       method,
       headers: {
-        ...(this.options.token
-          ? { authorization: `Bearer ${this.options.token}` }
+        ...(token
+          ? { authorization: `Bearer ${token}` }
           : {}),
         ...(this.options.internalMcpSecret
           ? {
@@ -189,6 +192,12 @@ export class OpenCloudClient {
       signal: AbortSignal.timeout(timeoutMs),
     });
     return this.parse(response);
+  }
+
+  private resolveToken(): Promise<string | undefined> {
+    return this.options.tokenProvider
+      ? this.options.tokenProvider()
+      : Promise.resolve(this.options.token);
   }
 
   private async parse(response: Response): Promise<unknown> {

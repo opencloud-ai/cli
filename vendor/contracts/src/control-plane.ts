@@ -16,8 +16,51 @@ const uuid = z.uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const secretName = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const jsonObject = z.record(z.string(), z.unknown());
-const unknownOutput = z.unknown();
 const emptyBody = z.object({});
+
+const backupOutput = z.object({
+  id: uuid,
+  appId: uuid,
+  deploymentId: uuid.nullable(),
+  kind: z.enum(["pre_deployment", "scheduled", "manual"]),
+  sha256: sha256.nullable(),
+  state: z.string(),
+  metadata: jsonObject,
+  immutableUntil: z.string().nullable(),
+  createdAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+
+const usageRollupOutput = z.object({
+  windowStart: z.string(),
+  windowEnd: z.string(),
+  calculationVersion: z.string(),
+  completeness: z.enum(["complete", "partial", "corrected"]),
+  metrics: jsonObject,
+  createdAt: z.string(),
+});
+
+const usageOutput = z.object({
+  asOf: z.string(),
+  latestRollup: usageRollupOutput.nullable(),
+  rollups: z.array(usageRollupOutput),
+  freshness: z.object({
+    latestRollupCreatedAt: z.string().nullable(),
+    latestRollupWindowEnd: z.string().nullable(),
+    rollupAgeSeconds: z.number().nullable(),
+    latestIngestedAt: z.string().nullable(),
+    ingestionLagSeconds: z.number().nullable(),
+    telemetryStatus: z.enum(["available", "unavailable"]),
+  }),
+  lastActivity: z.object({
+    page: z.string().nullable(),
+    rest: z.string().nullable(),
+    storage: z.string().nullable(),
+    realtime: z.string().nullable(),
+    function: z.string().nullable(),
+    cron: z.string().nullable(),
+  }),
+});
 
 export const controlPlaneAppSchema = z
   .object({
@@ -29,6 +72,7 @@ export const controlPlaneAppSchema = z
     apiUrl: z.url(),
     visibility: appVisibilitySchema,
     state: appStateSchema,
+    backupSchedule: z.enum(["none", "daily", "weekly"]).optional(),
     ownerUserId: uuid,
     desiredDeploymentId: uuid.nullable(),
     activeDeploymentId: uuid.nullable(),
@@ -88,6 +132,11 @@ export const controlPlaneDeploymentSchema = z
 const onboardingOutput = z
   .object({
     onboardingId: uuid,
+    launchUrl: z
+      .url()
+      .describe(
+        "Non-secret owner URL that waits for email confirmation and deployment, then opens the project.",
+      ),
     state: z.enum([
       "awaiting_email_verification",
       "provisional_ready",
@@ -120,13 +169,7 @@ const draftOutput = z
     appId: uuid,
     baseDeploymentId: uuid.nullable(),
     name: z.string(),
-    status: z.enum([
-      "open",
-      "validated",
-      "deploying",
-      "deployed",
-      "discarded",
-    ]),
+    status: z.enum(["open", "validated", "deploying", "deployed", "discarded"]),
     revision: z.number().int().positive(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -155,14 +198,24 @@ const draftValidationOutput = z
     passed: z.boolean(),
     artifactSha256: sha256.nullable(),
     manifest: z.unknown().nullable(),
+    canonicalSourceManifest: z.literal("opencloud.yaml"),
+    sourceManifest: z.string().nullable(),
+    sourceFiles: z.array(z.string()),
+    artifactFiles: z.array(z.string()),
+    // Backward-compatible alias for artifactFiles.
     files: z.array(z.string()),
     diagnostics: z.array(
-      z.object({
-        level: z.enum(["error", "warning"]),
-        code: z.string().optional(),
-        message: z.string(),
-      }),
+      z
+        .object({
+          level: z.enum(["error", "warning"]),
+          code: z.string().optional(),
+          path: z.string().optional(),
+          message: z.string(),
+          suggestedFix: z.string().optional(),
+        })
+        .passthrough(),
     ),
+    nextAction: z.string(),
     createdAt: z.string(),
   })
   .passthrough();
@@ -379,10 +432,7 @@ export interface ControlPlaneOperation<
   mcp?: McpOperationMetadata;
 }
 
-function operation<
-  TInput extends z.ZodType,
-  TOutput extends z.ZodType,
->(
+function operation<TInput extends z.ZodType, TOutput extends z.ZodType>(
   value: ControlPlaneOperation<TInput, TOutput>,
 ): ControlPlaneOperation<TInput, TOutput> {
   return value;
@@ -397,9 +447,9 @@ export const controlPlaneOperations = {
   startAgentOnboarding: operation({
     method: "POST",
     path: "/v1/onboarding/agent",
-    summary: "Start passwordless agent onboarding",
+    summary: "Start email-based agent onboarding",
     description:
-      "Creates a provisional user and first app for a new email, or requests verification for an existing identity.",
+      "Creates a provisional user and first app for a new email, or requests verification for an existing identity. Returns a non-secret owner launch URL for the pending flow.",
     auth: "none",
     scopes: [],
     input: z.object({ body: startAgentOnboardingRequestSchema }),
@@ -410,9 +460,9 @@ export const controlPlaneOperations = {
       toolName: "start_onboarding",
       title: "Start OpenCloud onboarding",
       description:
-        "Start zero-blocking onboarding for a new email or request ownership verification for an existing email.",
+        "Start onboarding, send one verification email, and return the non-secret owner launch URL for confirmation and deployment.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -455,7 +505,7 @@ export const controlPlaneOperations = {
         "Create another OpenCloud app with an automatically allocated HTTPS address.",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
   }),
@@ -499,6 +549,32 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  connectCliWorkspace: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/cli-connection",
+    summary: "Connect a CLI workspace",
+    description:
+      "Issues an expiring app-scoped credential linked to the authenticated CLI account login.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: z.object({
+      app: z
+        .object({
+          id: uuid,
+          name: z.string(),
+          appUrl: z.url(),
+        })
+        .passthrough(),
+      credential: z
+        .object({
+          token: z.string(),
+          expiresAt: z.string(),
+        })
+        .passthrough(),
+    }),
+    idempotency: "none",
+  }),
   configureApp: operation({
     method: "PATCH",
     path: "/v1/apps/{appId}",
@@ -524,9 +600,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "configure_app",
       title: "Configure app",
-      description: "Change the app title or public/private visibility.",
+      description:
+        "Replace the app title or public/private visibility, which can publish or revoke public access.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -681,7 +758,7 @@ export const controlPlaneOperations = {
       description:
         "Create, update, or delete draft files with stale-write protection.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: false,
     },
@@ -731,10 +808,10 @@ export const controlPlaneOperations = {
       toolName: "validate_draft",
       title: "Validate source draft",
       description:
-        "Run OpenCloud's authoritative validation and deterministic bundling.",
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
+        "Run authoritative validation, record its result, and replace the status for this draft revision.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: false,
     },
   }),
@@ -756,9 +833,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "deploy_draft",
       title: "Deploy source draft",
-      description: "Deploy the exact source revision that passed validation.",
+      description:
+        "Make the validated source revision active; its migrations and release replace current production state.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -812,7 +890,8 @@ export const controlPlaneOperations = {
     method: "GET",
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Get a development session",
-    description: "Returns preview state, capabilities, and verification status.",
+    description:
+      "Returns preview state, capabilities, and verification status.",
     auth: "bearer",
     scopes: ["app:read"],
     input: devSessionPath,
@@ -843,9 +922,9 @@ export const controlPlaneOperations = {
       toolName: "apply_dev_revision",
       title: "Apply dev revision",
       description:
-        "Sync the exact validated draft to its stable development preview.",
+        "Sync the validated draft to its development preview; migration changes reset isolated dev data.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -875,7 +954,8 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "request_dev_app",
       title: "Request dev app",
-      description: "Inspect a page or REST read from the development preview.",
+      description:
+        "Inspect a page or perform a GET or HEAD against the OpenCloud app runtime REST API in the isolated development preview; see https://docs.opencloud.ai/openapi.yaml.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -908,9 +988,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "mutate_dev_data",
       title: "Write dev fixture data",
-      description: "Write bounded fixture data only to a dev schema.",
+      description:
+        "Create, replace, update, or delete bounded fixture data through the OpenCloud app runtime REST API only in an isolated dev schema; see https://docs.opencloud.ai/openapi.yaml.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -938,9 +1019,9 @@ export const controlPlaneOperations = {
       toolName: "invoke_dev_function",
       title: "Invoke dev Function",
       description:
-        "Explicitly test one development Function and capture correlated diagnostics.",
+        "Run app-defined development code that may change isolated data or external systems, and capture diagnostics.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -953,8 +1034,15 @@ export const controlPlaneOperations = {
       "Runs Chromium, console, HTTP, and optional primary-flow checks and issues a receipt bound to the exact revision.",
     auth: "bearer",
     scopes: ["app:deploy"],
-    input: devSessionPath,
+    input: devSessionPath.extend({
+      body: z
+        .object({
+          requireInteractionContract: z.boolean().optional(),
+        })
+        .optional(),
+    }),
     output: devVerificationOutput,
+    bodyKey: "body",
     idempotency: "none",
     mcp: {
       toolName: "verify_dev_session",
@@ -1034,9 +1122,9 @@ export const controlPlaneOperations = {
       toolName: "promote_dev_revision",
       title: "Promote dev revision",
       description:
-        "Deploy the exact verified development revision to production.",
+        "Make the verified development revision active in production, replacing current release state.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -1045,7 +1133,8 @@ export const controlPlaneOperations = {
     method: "DELETE",
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Stop a development session",
-    description: "Removes its preview artifacts, Function links, and dev schema.",
+    description:
+      "Removes its preview artifacts, Function links, and dev schema.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: devSessionPath,
@@ -1078,11 +1167,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "verify_app",
       title: "Verify app",
-      description:
-        "Run the complete OpenCloud release verification gate.",
+      description: "Run the complete OpenCloud release verification gate.",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
   }),
@@ -1162,7 +1250,7 @@ export const controlPlaneOperations = {
       description: "Restore a previously active immutable deployment.",
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
   }),
@@ -1190,7 +1278,8 @@ export const controlPlaneOperations = {
     method: "GET",
     path: "/v1/apps/{appId}/secrets",
     summary: "List secret metadata",
-    description: "Lists secret names and timestamps; values are never returned.",
+    description:
+      "Lists secret names and timestamps; values are never returned.",
     auth: "bearer",
     scopes: ["app:configure"],
     input: appPath,
@@ -1232,9 +1321,9 @@ export const controlPlaneOperations = {
       toolName: "generate_secret",
       title: "Generate secret",
       description:
-        "Generate a strong app secret without exposing its value to the agent.",
+        "Generate a strong app secret without exposing it, replacing any value already stored under the name.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: false,
     },
@@ -1296,7 +1385,7 @@ export const controlPlaneOperations = {
     auth: "bearer",
     scopes: ["app:read"],
     input: appPath,
-    output: z.array(unknownOutput),
+    output: z.array(backupOutput),
     idempotency: "none",
     mcp: {
       toolName: "list_backups",
@@ -1324,7 +1413,7 @@ export const controlPlaneOperations = {
       description: "Create an immutable backup before a risky change.",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: false,
     },
   }),
@@ -1346,9 +1435,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "configure_backup_schedule",
       title: "Configure backups",
-      description: "Configure automatic app backups.",
+      description:
+        "Replace the automatic backup schedule, including disabling future scheduled backups.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: false,
     },
@@ -1369,7 +1459,7 @@ export const controlPlaneOperations = {
       description: "Restore an app database to a selected backup.",
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: false,
     },
   }),
@@ -1386,6 +1476,7 @@ export const controlPlaneOperations = {
           name: z.string().optional(),
           state: z.enum(["running", "succeeded", "failed"]).optional(),
           after: z.iso.datetime({ offset: true }).optional(),
+          cursor: z.string().max(512).optional(),
           limit: z.number().int().min(1).max(200).default(50),
         })
         .optional(),
@@ -1425,9 +1516,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "invoke_cron",
       title: "Invoke cron",
-      description: "Manually invoke an enabled app cron job.",
+      description:
+        "Run an enabled production cron Function that may change app data or external systems.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -1499,9 +1591,10 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "put_alert_rule",
       title: "Put alert rule",
-      description: "Create or replace one bounded app metric alert rule.",
+      description:
+        "Create an app metric alert rule or replace the complete existing rule with the same ID.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: false,
     },
@@ -1534,7 +1627,7 @@ export const controlPlaneOperations = {
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({ body: jsonObject }),
-    output: unknownOutput,
+    output: jsonObject,
     bodyKey: "body",
     idempotency: "none",
     mcp: {
@@ -1555,7 +1648,7 @@ export const controlPlaneOperations = {
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({ body: jsonObject }),
-    output: unknownOutput,
+    output: jsonObject,
     bodyKey: "body",
     idempotency: "none",
     mcp: {
@@ -1575,8 +1668,16 @@ export const controlPlaneOperations = {
     description: "Returns app-scoped usage rollups.",
     auth: "bearer",
     scopes: ["app:observe"],
-    input: appPath,
-    output: unknownOutput,
+    input: appPath.extend({
+      query: z
+        .object({
+          from: z.iso.datetime({ offset: true }).optional(),
+          to: z.iso.datetime({ offset: true }).optional(),
+        })
+        .optional(),
+    }),
+    output: usageOutput,
+    queryKey: "query",
     idempotency: "none",
     mcp: {
       toolName: "get_usage",
@@ -1613,13 +1714,10 @@ export const controlPlaneOperations = {
   }),
 } as const;
 
-export type ControlPlaneOperationId =
-  keyof typeof controlPlaneOperations;
+export type ControlPlaneOperationId = keyof typeof controlPlaneOperations;
 
-export type ControlPlaneOperationInput<
-  T extends ControlPlaneOperationId,
-> = z.infer<(typeof controlPlaneOperations)[T]["input"]>;
+export type ControlPlaneOperationInput<T extends ControlPlaneOperationId> =
+  z.infer<(typeof controlPlaneOperations)[T]["input"]>;
 
-export type ControlPlaneOperationOutput<
-  T extends ControlPlaneOperationId,
-> = z.infer<(typeof controlPlaneOperations)[T]["output"]>;
+export type ControlPlaneOperationOutput<T extends ControlPlaneOperationId> =
+  z.infer<(typeof controlPlaneOperations)[T]["output"]>;
