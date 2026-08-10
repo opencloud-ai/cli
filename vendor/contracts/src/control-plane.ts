@@ -703,7 +703,7 @@ export const controlPlaneOperations = {
     scopes: ["app:read"],
     input: draftPath.extend({
       body: z.object({
-        paths: z.array(z.string().min(1).max(512)).min(1).max(100),
+        paths: z.array(z.string().min(1).max(512)).max(100),
       }),
     }),
     output: z.array(draftFileOutput),
@@ -712,7 +712,8 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "read_files",
       title: "Read draft files",
-      description: "Read selected source files from a draft.",
+      description:
+        "Read selected source files from a draft. An empty paths array returns an empty result, so an empty draft can be inspected without a special case.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -987,7 +988,7 @@ export const controlPlaneOperations = {
       toolName: "mutate_dev_data",
       title: "Write dev fixture data",
       description:
-        "Create, replace, update, or delete bounded fixture data through the OpenCloud app runtime REST API only in an isolated dev schema; see https://docs.opencloud.ai/openapi.yaml.",
+        "Create, createMany, updateById, or deleteById synthetic-user-A fixture rows in one named table in the isolated development schema. Pass table, action, values, and id as applicable; raw REST paths are not accepted.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,

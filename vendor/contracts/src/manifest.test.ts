@@ -6,7 +6,7 @@ const valid = {
   appId: "aeea1c71-72a3-4b1d-a32e-213900735091",
   version: "2026.07.27-1",
   frontend: { directory: "frontend", spa: true },
-  runtime: { sdk: { version: "1.0.0" } },
+  runtime: { sdk: { version: "2.0.0" } },
   migrations: [
     {
       id: "0001_create_notes",
@@ -17,7 +17,7 @@ const valid = {
   functions: [],
   cron: [],
   health: { path: "/" },
-  requiredSecrets: [],
+  secrets: {},
 };
 
 describe("OpenCloud manifest", () => {
@@ -43,22 +43,22 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         runtime: {
-          sdk: { version: "1.0.0" },
+          sdk: { version: "2.0.0" },
         },
       }).runtime,
     ).toEqual({
-      sdk: { version: "1.0.0" },
+      sdk: { version: "2.0.0" },
     });
   });
 
-  it("rejects moving SDK ranges and tags", () => {
-    for (const version of ["^1.0.0", "latest", "1.0"]) {
+  it("rejects legacy versions, moving ranges, and tags", () => {
+    for (const version of ["1.0.0", "^2.0.0", "latest", "2.0"]) {
       expect(() =>
         parseManifest({
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/exact semantic version/);
+      ).toThrow(/installed SDK version 2\.0\.0/);
     }
   });
 
@@ -248,11 +248,34 @@ describe("OpenCloud manifest", () => {
     ).toBe("system");
   });
 
-  it("rejects required secrets that collide with runtime-owned names", () => {
+  it("declares generated, required, and optional secrets without values", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        secrets: {
+          SIGNING_SECRET: "generated",
+          PROVIDER_KEY: "required",
+          ORGANIZATION_LABEL: "optional",
+        },
+      }).secrets,
+    ).toEqual({
+      SIGNING_SECRET: "generated",
+      PROVIDER_KEY: "required",
+      ORGANIZATION_LABEL: "optional",
+    });
+  });
+
+  it("rejects legacy requiredSecrets with direct migration guidance", () => {
+    expect(() =>
+      parseManifest({ ...valid, requiredSecrets: ["SIGNING_SECRET"] }),
+    ).toThrow(/replaces requiredSecrets with declarative secrets/);
+  });
+
+  it("rejects secrets that collide with runtime-owned names", () => {
     for (const name of ["OPENCLOUD_FILES_GRANT", "SUPABASE_SERVICE_ROLE_KEY"]) {
       expect(() =>
-        parseManifest({ ...valid, requiredSecrets: [name] }),
-      ).toThrow(/reserved OpenCloud runtime secret prefix/);
+        parseManifest({ ...valid, secrets: { [name]: "required" } }),
+      ).toThrow(/reserved OpenCloud runtime prefix/);
     }
   });
 

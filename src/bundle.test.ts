@@ -89,7 +89,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "1.0.0",
+        version: "2.0.0",
       },
     });
     expect(first.files).toEqual([
@@ -199,7 +199,7 @@ functions: []
     expect(bundle.files).not.toContain("functions/forgotten/index.ts");
   });
 
-  it("preserves an explicit SDK pin instead of replacing it with current", async () => {
+  it("accepts the explicit installed SDK pin", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));
     await writeFile(path.join(root, "frontend", "index.html"), "hello");
@@ -210,14 +210,14 @@ frontend:
   directory: frontend
 runtime:
   sdk:
-    version: 9.8.7
+    version: 2.0.0
 `,
     );
 
     const bundle = await buildBundle(root);
     expect(bundle.manifest.runtime).toEqual({
       sdk: {
-        version: "9.8.7",
+        version: "2.0.0",
       },
     });
   });

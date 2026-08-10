@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.0.0
+
+- Vendor the hard-cut OpenCloud browser SDK 2.0.0 and final schema-2 manifest
+  contract. Legacy SDK surfaces and `requiredSecrets` are rejected instead of
+  translated.
+- Replace raw-path development fixture writes with SDK-shaped table actions:
+  `create`, `createMany`, `updateById`, and `deleteById`.
+- Make secret intent declarative through `generated`, `required`, and
+  `optional` manifest modes. Generated values are provisioned automatically;
+  the CLI exposes only explicit `secret rotate` and secure `secret configure`
+  workflows.
+- Generate new projects with the stable singleton browser SDK and an empty
+  declarative secret map.
+
 ## 2.0.0
 
 - Make manifest schema 2 the only application contract. Projects now use

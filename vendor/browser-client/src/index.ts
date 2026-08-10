@@ -6,7 +6,7 @@
  * HTTP responses deliberately stay behind this module.
  */
 
-export const OPEN_CLOUD_SDK_VERSION = "1.0.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.0.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 export type OpenCloudVisibility = "public" | "private";
@@ -97,14 +97,20 @@ export interface OpenCloudGetOptions {
   select?: string[];
 }
 
-export interface OpenCloudFile {
+export interface OpenCloudFileRef {
   id: string;
+}
+
+export interface OpenCloudFile extends OpenCloudFileRef {
   name: string;
   contentType: string;
   size: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface OpenCloudFileUploadOptions {
+export interface OpenCloudFileInput {
+  data: Blob;
   name?: string;
   contentType?: string;
   maxBytes?: number;
@@ -118,7 +124,7 @@ export interface OpenCloudFileUploadProgress {
 }
 
 export interface OpenCloudFileDownload {
-  blob: Blob;
+  data: Blob;
   name: string;
   contentType: string;
   size: number;
@@ -131,11 +137,10 @@ export interface OpenCloudFileAttachmentColumns {
   size?: string;
 }
 
-export interface OpenCloudFileAttachmentOptions {
+export interface OpenCloudFileAttachmentInput extends OpenCloudFileInput {
   table: string;
   values?: Record<string, unknown>;
   columns?: OpenCloudFileAttachmentColumns;
-  upload?: OpenCloudFileUploadOptions;
 }
 
 export interface OpenCloudRealtimeMessage {
@@ -193,7 +198,6 @@ export type OpenCloudMetricDimensions = Record<string, string>;
 
 export interface OpenCloudMetricWriteOptions {
   dimensions?: OpenCloudMetricDimensions;
-  idempotencyKey?: string;
 }
 
 export interface OpenCloudMetricWriteResult {
@@ -227,21 +231,17 @@ export interface OpenCloudDataClient {
 }
 
 export interface OpenCloudFilesClient {
-  upload(
-    source: Blob,
-    options?: OpenCloudFileUploadOptions,
-  ): Promise<OpenCloudFile>;
-  download(value: OpenCloudFile | string): Promise<OpenCloudFileDownload>;
-  save(value: OpenCloudFile | string): Promise<void>;
+  upload(input: OpenCloudFileInput): Promise<OpenCloudFile>;
+  info(value: OpenCloudFileRef | string): Promise<OpenCloudFile>;
+  download(value: OpenCloudFileRef | string): Promise<OpenCloudFileDownload>;
+  save(value: OpenCloudFileRef | string): Promise<void>;
   replace(
-    value: OpenCloudFile | string,
-    source: Blob,
-    options?: OpenCloudFileUploadOptions,
+    value: OpenCloudFileRef | string,
+    input: OpenCloudFileInput,
   ): Promise<OpenCloudFile>;
-  remove(value: OpenCloudFile | string): Promise<void>;
+  remove(value: OpenCloudFileRef | string): Promise<void>;
   attach<Row = Record<string, unknown>>(
-    source: Blob,
-    options: OpenCloudFileAttachmentOptions,
+    input: OpenCloudFileAttachmentInput,
   ): Promise<{ file: OpenCloudFile; record: Row }>;
 }
 
@@ -1237,21 +1237,28 @@ function plainArgumentObject(
   return value as Record<string, unknown>;
 }
 
-function fileUploadOptions(value: unknown): OpenCloudFileUploadOptions {
+function fileInput(
+  value: unknown,
+  extraFields: readonly string[] = [],
+  scope = "file input",
+): OpenCloudFileInput {
   const input = argumentObject(
     value,
-    ["name", "contentType", "maxBytes", "onProgress"],
-    "file upload options",
+    ["data", "name", "contentType", "maxBytes", "onProgress", ...extraFields],
+    scope,
   );
+  if (!(input.data instanceof Blob)) {
+    throw invalidArgument(`${scope}.data must be a File or Blob`, "files");
+  }
   if (input.name !== undefined && typeof input.name !== "string") {
-    throw invalidArgument("file upload options.name must be a string", "files");
+    throw invalidArgument(`${scope}.name must be a string`, "files");
   }
   if (
     input.contentType !== undefined &&
     typeof input.contentType !== "string"
   ) {
     throw invalidArgument(
-      "file upload options.contentType must be a string",
+      `${scope}.contentType must be a string`,
       "files",
     );
   }
@@ -1260,11 +1267,11 @@ function fileUploadOptions(value: unknown): OpenCloudFileUploadOptions {
     typeof input.onProgress !== "function"
   ) {
     throw invalidArgument(
-      "file upload options.onProgress must be a function",
+      `${scope}.onProgress must be a function`,
       "files",
     );
   }
-  return input as OpenCloudFileUploadOptions;
+  return input as unknown as OpenCloudFileInput;
 }
 
 function fileName(source: Blob, explicit?: string): string {
@@ -1277,17 +1284,17 @@ function fileName(source: Blob, explicit?: string): string {
   return safe || "file";
 }
 
-function operationUuid(surface: OpenCloudErrorSurface): string {
+function operationUuid(capability: "files" | "telemetry"): string {
   const value = globalThis.crypto?.randomUUID?.();
   if (!value || !UUID.test(value)) {
-    throw capabilityUnavailable(surface === "files" ? "files" : "data", surface);
+    throw capabilityUnavailable(capability, capability);
   }
   return value;
 }
 
-function fileReference(value: OpenCloudFile | string): OpenCloudFile {
+function fileReference(value: OpenCloudFileRef | string): OpenCloudFileRef {
   const reference = typeof value === "string"
-    ? { id: value, name: value, contentType: "application/octet-stream", size: 0 }
+    ? { id: value }
     : value;
   if (!UUID.test(reference.id)) {
     throw invalidArgument("OpenCloud file id is invalid", "files");
@@ -1310,6 +1317,8 @@ function parseFile(value: unknown): OpenCloudFile {
     name: string(input.name, "file.name", true),
     contentType: string(input.contentType, "file.contentType"),
     size,
+    createdAt: iso(input.createdAt, "file.createdAt"),
+    updatedAt: iso(input.updatedAt, "file.updatedAt"),
   };
 }
 
@@ -1319,12 +1328,10 @@ class FilesClient {
     private readonly data: DataClient,
   ) {}
 
-  async upload(
-    source: Blob,
-    options: OpenCloudFileUploadOptions = {},
-  ): Promise<OpenCloudFile> {
-    const checkedOptions = fileUploadOptions(options);
-    const metadata = await this.uploadMetadata(source, checkedOptions);
+  async upload(input: OpenCloudFileInput): Promise<OpenCloudFile> {
+    const checkedInput = fileInput(input);
+    const source = checkedInput.data;
+    const metadata = await this.uploadMetadata(source, checkedInput);
     await this.runtime.requireUser();
     const idempotencyKey = operationUuid("files");
     const response = await this.uploadRequest(
@@ -1337,13 +1344,25 @@ class FilesClient {
         "x-opencloud-file-name": encodeURIComponent(metadata.name),
         "idempotency-key": idempotencyKey,
       },
-      checkedOptions.onProgress,
+      checkedInput.onProgress,
     );
     await requireOk(response, "files");
     return parseFile(await response.json());
   }
 
-  async download(value: OpenCloudFile | string): Promise<OpenCloudFileDownload> {
+  async info(value: OpenCloudFileRef | string): Promise<OpenCloudFile> {
+    const file = fileReference(value);
+    await this.assertAvailable();
+    const response = await this.runtime.hostRequest(
+      `/_opencloud/files/${encodeURIComponent(file.id)}/metadata`,
+      { headers: { accept: "application/json" } },
+      "files",
+    );
+    await requireOk(response, "files");
+    return parseFile(await response.json());
+  }
+
+  async download(value: OpenCloudFileRef | string): Promise<OpenCloudFileDownload> {
     const file = fileReference(value);
     await this.assertAvailable();
     const response = await this.runtime.hostRequest(
@@ -1363,14 +1382,14 @@ class FilesClient {
       }
     }
     return {
-      blob,
-      name: responseName ?? file.name,
-      contentType: response.headers.get("content-type") || file.contentType || blob.type,
+      data: blob,
+      name: responseName ?? "file",
+      contentType: response.headers.get("content-type") || blob.type || "application/octet-stream",
       size: blob.size,
     };
   }
 
-  async save(value: OpenCloudFile | string): Promise<void> {
+  async save(value: OpenCloudFileRef | string): Promise<void> {
     if (
       typeof document !== "object" ||
       typeof URL.createObjectURL !== "function" ||
@@ -1379,7 +1398,7 @@ class FilesClient {
       throw capabilityUnavailable("files", "files");
     }
     const result = await this.download(value);
-    const url = URL.createObjectURL(result.blob);
+    const url = URL.createObjectURL(result.data);
     try {
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1394,17 +1413,13 @@ class FilesClient {
   }
 
   async replace(
-    value: OpenCloudFile | string,
-    source: Blob,
-    options: OpenCloudFileUploadOptions = {},
+    value: OpenCloudFileRef | string,
+    input: OpenCloudFileInput,
   ): Promise<OpenCloudFile> {
     const current = fileReference(value);
-    const checkedOptions = fileUploadOptions(options);
-    const metadata = await this.uploadMetadata(source, {
-      ...checkedOptions,
-      name: checkedOptions.name ?? current.name,
-      contentType: checkedOptions.contentType ?? current.contentType,
-    });
+    const checkedInput = fileInput(input);
+    const source = checkedInput.data;
+    const metadata = await this.uploadMetadata(source, checkedInput);
     await this.runtime.requireUser();
     const idempotencyKey = operationUuid("files");
     const response = await this.uploadRequest(
@@ -1417,13 +1432,13 @@ class FilesClient {
         "x-opencloud-file-name": encodeURIComponent(metadata.name),
         "idempotency-key": idempotencyKey,
       },
-      checkedOptions.onProgress,
+      checkedInput.onProgress,
     );
     await requireOk(response, "files");
     return parseFile(await response.json());
   }
 
-  async remove(value: OpenCloudFile | string): Promise<void> {
+  async remove(value: OpenCloudFileRef | string): Promise<void> {
     const file = fileReference(value);
     await this.assertAvailable();
     await this.runtime.requireUser();
@@ -1436,46 +1451,53 @@ class FilesClient {
   }
 
   async attach<Row = Record<string, unknown>>(
-    source: Blob,
-    options: OpenCloudFileAttachmentOptions,
+    input: OpenCloudFileAttachmentInput,
   ): Promise<{ file: OpenCloudFile; record: Row }> {
-    argumentObject(
-      options,
-      ["table", "values", "columns", "upload"],
-      "file attachment options",
-    );
-    if (typeof options.table !== "string") {
+    const checkedInput = fileInput(
+      input,
+      ["table", "values", "columns"],
+      "file attachment input",
+    ) as OpenCloudFileAttachmentInput;
+    if (typeof checkedInput.table !== "string") {
       throw invalidArgument(
-        "file attachment options.table must be a string",
+        "file attachment input.table must be a string",
         "files",
       );
     }
-    if (options.values !== undefined) {
-      plainArgumentObject(options.values, "file attachment options.values");
+    if (checkedInput.values !== undefined) {
+      plainArgumentObject(checkedInput.values, "file attachment input.values");
     }
-    if (options.columns) {
+    if (checkedInput.columns) {
       argumentObject(
-        options.columns,
+        checkedInput.columns,
         ["id", "name", "contentType", "size"],
-        "file attachment options.columns",
+        "file attachment input.columns",
       );
     }
     const columns = {
-      id: options.columns?.id ?? "file_id",
-      name: options.columns?.name ?? "file_name",
-      contentType: options.columns?.contentType ?? "file_type",
-      size: options.columns?.size ?? "file_size",
+      id: checkedInput.columns?.id ?? "file_id",
+      name: checkedInput.columns?.name ?? "file_name",
+      contentType: checkedInput.columns?.contentType ?? "file_type",
+      size: checkedInput.columns?.size ?? "file_size",
     };
     for (const column of Object.values(columns)) assertIdentifier(column, "attachment column");
-    const file = await this.upload(source, options.upload);
+    const file = await this.upload({
+      data: checkedInput.data,
+      ...(checkedInput.name ? { name: checkedInput.name } : {}),
+      ...(checkedInput.contentType ? { contentType: checkedInput.contentType } : {}),
+      ...(checkedInput.maxBytes !== undefined
+        ? { maxBytes: checkedInput.maxBytes }
+        : {}),
+      ...(checkedInput.onProgress ? { onProgress: checkedInput.onProgress } : {}),
+    });
     const values = {
-      ...(options.values ?? {}),
+      ...(checkedInput.values ?? {}),
       [columns.id]: file.id,
       [columns.name]: file.name,
       [columns.contentType]: file.contentType,
       [columns.size]: file.size,
     };
-    const table = this.data.table<Row>(options.table);
+    const table = this.data.table<Row>(checkedInput.table);
     try {
       const record = await table.create(values);
       return { file, record };
@@ -1559,8 +1581,8 @@ class FilesClient {
 
   private async uploadMetadata(
     source: Blob,
-    options: OpenCloudFileUploadOptions,
-  ): Promise<Omit<OpenCloudFile, "id">> {
+    input: OpenCloudFileInput,
+  ): Promise<Pick<OpenCloudFile, "name" | "contentType" | "size">> {
     const config = await this.runtime.config();
     if (!config.capabilities.files) throw capabilityUnavailable("files", "files");
     if (
@@ -1572,7 +1594,7 @@ class FilesClient {
       throw invalidArgument("OpenCloud file source must be a Blob or File", "files");
     }
     if (!config.files) throw capabilityUnavailable("files", "files");
-    const requestedLimit = options.maxBytes ?? config.files.maxUploadBytes;
+    const requestedLimit = input.maxBytes ?? config.files.maxUploadBytes;
     if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
       throw invalidArgument("OpenCloud file maxBytes must be a positive integer", "files");
     }
@@ -1585,8 +1607,8 @@ class FilesClient {
       });
     }
     return {
-      name: fileName(source, options.name),
-      contentType: options.contentType || source.type || "application/octet-stream",
+      name: fileName(source, input.name),
+      contentType: input.contentType || source.type || "application/octet-stream",
       size: source.size,
     };
   }
@@ -2082,29 +2104,44 @@ class TelemetryClient {
     if (!config.capabilities.telemetry) {
       throw capabilityUnavailable("telemetry", "telemetry");
     }
-    const response = await this.runtime.hostRequest(
-      "/_opencloud/telemetry/metrics",
-      {
-        method: "POST",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({
-          measurements: [{
-            name,
-            value,
-            dimensions: options.dimensions ?? {},
-            ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-          }],
-        }),
-      },
-      "telemetry",
-    );
-    await requireOk(response, "telemetry");
-    const result = object(await response.json(), "metric result");
-    return {
-      accepted: integer(result.accepted, "accepted"),
-      duplicates: integer(result.duplicates, "duplicates"),
-      recordedAt: iso(result.recordedAt, "recordedAt"),
-    };
+    const idempotencyKey = operationUuid("telemetry");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await this.runtime.hostRequest(
+          "/_opencloud/telemetry/metrics",
+          {
+            method: "POST",
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: JSON.stringify({
+              measurements: [{
+                name,
+                value,
+                dimensions: options.dimensions ?? {},
+                idempotencyKey,
+              }],
+            }),
+          },
+          "telemetry",
+        );
+        await requireOk(response, "telemetry");
+        const result = object(await response.json(), "metric result");
+        return {
+          accepted: integer(result.accepted, "accepted"),
+          duplicates: integer(result.duplicates, "duplicates"),
+          recordedAt: iso(result.recordedAt, "recordedAt"),
+        };
+      } catch (error) {
+        if (
+          attempt === 0 &&
+          error instanceof OpenCloudError &&
+          error.retryable
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw invalidResponse("OpenCloud telemetry retry ended unexpectedly", "telemetry");
   }
 }
 

@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v2.0.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.0.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v2.0.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-2.0.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.0.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.0.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -128,15 +128,26 @@ If the email remains unverified when that window ends, OpenCloud pauses every
 linked app, function, and cron schedule while preserving data and releases.
 Email verification resumes them.
 
-Secrets never need to cross the terminal transcript:
+Declare secret intent in `opencloud.yaml`; values never cross the terminal
+transcript:
 
-```bash
-"$OPENCLOUD_CLI" secret generate "$APP_ID" SESSION_KEY
-"$OPENCLOUD_CLI" secret entry-link "$APP_ID" PAYMENT_API_KEY
+```yaml
+secrets:
+  SESSION_KEY: generated
+  PAYMENT_API_KEY: required
+  ORGANIZATION_LABEL: optional
 ```
 
-The first command creates a server-generated value. The second returns a
-one-time browser URL where the user enters a value directly into OpenCloud.
+Generated values are provisioned automatically. Use these commands only to
+rotate a generated value or securely configure a required/optional value:
+
+```bash
+"$OPENCLOUD_CLI" secret rotate "$APP_ID" SESSION_KEY
+"$OPENCLOUD_CLI" secret configure "$APP_ID" PAYMENT_API_KEY
+```
+
+Rotation never returns the generated value. Configuration returns a one-time
+browser URL where the owner enters a value directly into OpenCloud.
 
 Existing installations can still supply `OPENCLOUD_API_URL` and
 `OPENCLOUD_TOKEN` explicitly.
@@ -152,8 +163,10 @@ Use the stable capability preview and isolated migration-replayed database befor
 "$OPENCLOUD_CLI" app dev start .
 "$OPENCLOUD_CLI" app dev sync .
 "$OPENCLOUD_CLI" app dev request . /
-"$OPENCLOUD_CLI" app dev data . /rest/v1/items \
-  --method POST --body '[{"title":"Preview item"}]'
+"$OPENCLOUD_CLI" app dev data . items create \
+  --values '{"title":"Preview item"}'
+"$OPENCLOUD_CLI" app dev data . items updateById \
+  --id "$ITEM_ID" --values '{"title":"Updated preview item"}'
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
 "$OPENCLOUD_CLI" app dev verify .
@@ -163,8 +176,10 @@ Use the stable capability preview and isolated migration-replayed database befor
 ```
 
 Development data is isolated from production and uses dummy records. Auth,
-Files, and Functions are available; Realtime, cron, and production secrets are
-not. Functions
+Files, and Functions are available; Realtime and cron are not. Manifest-
+generated secrets receive isolated synthetic development values, while owner-
+configured required values remain unavailable and optional values may be
+absent. Functions
 imported from `@opencloud/server` remain dormant until `app dev invoke` or a
 deliberate preview interaction calls them. Exact-revision verification requires
 every declared Function to have a successful explicit invocation.
@@ -205,7 +220,7 @@ app-declared interaction contract on the server:
 "$OPENCLOUD_CLI" app verify "$APP_ID"
 ```
 
-CLI v2 has one release-verification command. The former local smoke, Chromium,
+CLI v3 has one release-verification command. The former local smoke, Chromium,
 session, and verification-contract commands were removed so agents cannot
 mistake a partial diagnostic for the authoritative gate.
 

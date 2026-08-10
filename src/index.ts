@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { Command, Option } from "commander";
+import { Argument, Command, Option } from "commander";
 import YAML from "yaml";
 import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import {
@@ -24,6 +24,7 @@ import {
 import { buildBundle } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
 import { doctorDiagnostics } from "./doctor.js";
+import { devDataRequest, type DevDataAction } from "./dev-data.js";
 import {
   deleteSession,
   loadSession,
@@ -40,7 +41,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "2.0.0";
+const CLI_VERSION = "3.0.0";
 
 const program = new Command()
   .name("opencloud")
@@ -1072,32 +1073,33 @@ dev
 
 dev
   .command("data")
-  .description("Write bounded fixture data only to the isolated dev database")
-  .argument("<directory>")
-  .argument("<path>", "a /rest/v1/... path")
-  .addOption(
-    new Option("--method <method>", "HTTP method")
-      .choices(["POST", "PUT", "PATCH", "DELETE"])
-      .default("POST"),
+  .description(
+    "Create, update, or delete typed fixtures in the isolated dev database",
   )
-  .option("--body <json>", "JSON request body", "{}")
-  .action(async (directory, requestPath, options) => {
+  .argument("<directory>")
+  .argument("<table>", "lowercase table name")
+  .addArgument(
+    new Argument("<action>", "SDK-shaped fixture action").choices([
+      "create",
+      "createMany",
+      "updateById",
+      "deleteById",
+    ]),
+  )
+  .option("--values <json>", "row object or row array, as JSON")
+  .option("--id <id>", "row id for updateById or deleteById")
+  .action(async (directory, table, action, options) => {
     const state = await requireDevState(callerPath(directory));
-    let body: unknown;
-    try {
-      body = JSON.parse(String(options.body));
-    } catch {
-      throw new Error("--body must be valid JSON");
-    }
+    const body = devDataRequest(String(table), action as DevDataAction, {
+      id: options.id === undefined ? undefined : String(options.id),
+      values:
+        options.values === undefined ? undefined : String(options.values),
+    });
     output(
       await client().call("mutateDevData", {
         appId: state.appId,
         sessionId: state.sessionId,
-        body: {
-          path: String(requestPath),
-          method: options.method as "POST" | "PUT" | "PATCH" | "DELETE",
-          body,
-        },
+        body,
       }),
     );
   });
@@ -1508,7 +1510,7 @@ program
         functions: [],
         cron: [],
         health: { path: "/" },
-        requiredSecrets: [],
+        secrets: {},
       }),
       { flag: "wx" },
     );
@@ -1610,7 +1612,7 @@ program
       migrations: bundle.manifest.migrations.length,
       functions: bundle.manifest.functions.length,
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
-      requiredSecrets: bundle.manifest.requiredSecrets,
+      secrets: bundle.manifest.secrets,
       files: bundle.files,
       warnings: bundle.warnings,
       archivePath,
@@ -1764,8 +1766,10 @@ const secret = program
   .description("Manage app-scoped secrets");
 
 secret
-  .command("generate")
-  .description("Generate and store a random secret without returning its value")
+  .command("rotate")
+  .description(
+    "Rotate a manifest-generated secret without returning its value",
+  )
   .argument("<app-id>")
   .argument("<name>")
   .option("--bytes <number>", "random byte count", "32")
@@ -1784,9 +1788,9 @@ secret
   );
 
 secret
-  .command("entry-link")
+  .command("configure")
   .description(
-    "Create a one-time browser link for entering a secret outside the agent conversation",
+    "Create a one-time browser link for configuring a required or optional secret",
   )
   .argument("<app-id>")
   .argument("<name>")
