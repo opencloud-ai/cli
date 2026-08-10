@@ -13,7 +13,11 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { parseManifest, type OpenCloudManifest } from "@opencloud/contracts";
+import {
+  parseManifest,
+  validateMigrationIdConvention,
+  type OpenCloudManifest,
+} from "@opencloud/contracts";
 import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import * as tar from "tar";
 import YAML from "yaml";
@@ -40,7 +44,7 @@ interface AuthorManifest {
   functions?: unknown[];
   cron?: unknown[];
   health?: unknown;
-  requiredSecrets?: unknown[];
+  secrets?: Record<string, unknown>;
 }
 
 export interface BuiltBundle {
@@ -121,6 +125,13 @@ export async function buildBundle(
       `Migration file ${migration.file}`,
     );
     await assertFile(migrationFile, `Migration file ${migration.file}`);
+    try {
+      validateMigrationIdConvention(await readFile(migrationFile, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `Migration file ${migration.file}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     migration.sha256 = await sha256File(migrationFile);
   }
   const manifest = parseManifest(raw);

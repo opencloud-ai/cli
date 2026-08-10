@@ -12,6 +12,19 @@ const origin = "https://tasks.opencloud.test";
 const appId = "11111111-1111-4111-8111-111111111111";
 const userId = "22222222-2222-4222-8222-222222222222";
 const fileId = "33333333-3333-4333-8333-333333333333";
+const fileCreatedAt = "2026-08-10T00:00:00.000Z";
+
+function managedFile(overrides: Record<string, unknown> = {}) {
+  return {
+    id: fileId,
+    name: "proof.txt",
+    contentType: "text/plain",
+    size: 5,
+    createdAt: fileCreatedAt,
+    updatedAt: fileCreatedAt,
+    ...overrides,
+  };
+}
 
 const runtimeConfig = {
   appId,
@@ -20,7 +33,7 @@ const runtimeConfig = {
   environment: "production",
   sdk: {
     package: "@opencloud/js",
-    version: "1.0.0",
+    version: "2.0.0",
     module: "/_opencloud/sdk.js",
     types: "/_opencloud/sdk.d.ts",
     docs: "https://docs.opencloud.ai/sdk/javascript/",
@@ -163,9 +176,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("@opencloud/js v1", () => {
+describe("@opencloud/js v2", () => {
   it("exports one stable singleton contract without legacy factories or raw namespaces", () => {
-    expect(OPEN_CLOUD_SDK_VERSION).toBe("1.0.0");
+    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.0.0");
     expect("OPEN_CLOUD_JS_VERSION" in sdk).toBe(false);
     expect(opencloud).toMatchObject({
       app: { info: expect.any(Function) },
@@ -177,6 +190,7 @@ describe("@opencloud/js v1", () => {
       data: { table: expect.any(Function) },
       files: {
         upload: expect.any(Function),
+        info: expect.any(Function),
         download: expect.any(Function),
         save: expect.any(Function),
         replace: expect.any(Function),
@@ -243,7 +257,7 @@ describe("@opencloud/js v1", () => {
     expect(JSON.stringify(user)).not.toContain("private-access-token");
   });
 
-  it("rejects non-v1 runtime config shapes instead of interpreting compatibility aliases", async () => {
+  it("rejects non-v2 runtime config shapes instead of interpreting compatibility aliases", async () => {
     const incompatibleConfigs = [
       { ...runtimeConfig, sdk: undefined, javascriptSdk: runtimeConfig.sdk },
       { ...runtimeConfig, environment: "prod" },
@@ -363,12 +377,18 @@ describe("@opencloud/js v1", () => {
     standardFetch((url, init) => {
       calls.push({ url, init });
       if (url.pathname === "/_opencloud/files" && init.method === "POST") {
-        return json({
-          id: fileId,
+        return json(managedFile({
           name: "résumé.pdf",
           contentType: "application/pdf",
           size: 7,
-        }, { status: 201 });
+        }), { status: 201 });
+      }
+      if (url.pathname === `/_opencloud/files/${fileId}/metadata`) {
+        return json(managedFile({
+          name: "résumé.pdf",
+          contentType: "application/pdf",
+          size: 7,
+        }));
       }
       if (url.pathname === `/_opencloud/files/${fileId}` && !init.method) {
         return new Response("content", {
@@ -379,12 +399,11 @@ describe("@opencloud/js v1", () => {
         });
       }
       if (url.pathname === `/_opencloud/files/${fileId}` && init.method === "PUT") {
-        return json({
-          id: fileId,
+        return json(managedFile({
           name: "new.pdf",
           contentType: "application/pdf",
           size: 3,
-        });
+        }));
       }
       if (url.pathname === `/_opencloud/files/${fileId}` && init.method === "DELETE") {
         return new Response(null, { status: 204 });
@@ -392,24 +411,26 @@ describe("@opencloud/js v1", () => {
       return undefined;
     });
 
-    const file = await opencloud.files.upload(
-      new Blob(["content"], { type: "application/pdf" }),
-      { name: "résumé.pdf" },
-    );
-    const downloaded = await opencloud.files.download(file.id);
-    const replaced = await opencloud.files.replace(
-      file,
-      new Blob(["new"], { type: "application/pdf" }),
-      { name: "new.pdf" },
-    );
+    const file = await opencloud.files.upload({
+      data: new Blob(["content"], { type: "application/pdf" }),
+      name: "résumé.pdf",
+    });
+    const info = await opencloud.files.info({ id: file.id });
+    const downloaded = await opencloud.files.download(file);
+    const replaced = await opencloud.files.replace(file, {
+      data: new Blob(["new"], { type: "application/pdf" }),
+      name: "new.pdf",
+    });
     await opencloud.files.remove(file.id);
 
     expect(file.id).toBe(fileId);
-    expect(await downloaded.blob.text()).toBe("content");
+    expect(info).toMatchObject({ id: fileId, name: "résumé.pdf" });
+    expect(await downloaded.data.text()).toBe("content");
     expect(downloaded.name).toBe("résumé.pdf");
     expect(replaced).toMatchObject({ id: fileId, name: "new.pdf", size: 3 });
     expect(calls.map((call) => call.url.pathname)).toEqual([
       "/_opencloud/files",
+      `/_opencloud/files/${fileId}/metadata`,
       `/_opencloud/files/${fileId}`,
       `/_opencloud/files/${fileId}`,
       `/_opencloud/files/${fileId}`,
@@ -420,7 +441,7 @@ describe("@opencloud/js v1", () => {
     expect(new Headers(calls[0]?.init.headers).get("idempotency-key")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
-    expect(new Headers(calls[2]?.init.headers).get("idempotency-key")).toMatch(
+    expect(new Headers(calls[3]?.init.headers).get("idempotency-key")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
     );
     for (const call of calls) {
@@ -442,16 +463,16 @@ describe("@opencloud/js v1", () => {
         new Headers(init.headers).get("idempotency-key") ?? "",
       );
       if (attempts === 1) throw new TypeError("connection reset after commit");
-      return json({
-        id: fileId,
+      return json(managedFile({
         name: "proof.txt",
         contentType: "text/plain",
         size: 5,
-      });
+      }));
     });
 
     await expect(
-      opencloud.files.upload(new Blob(["proof"], { type: "text/plain" }), {
+      opencloud.files.upload({
+        data: new Blob(["proof"], { type: "text/plain" }),
         name: "proof.txt",
         onProgress: ({ percent }) => progress.push(percent),
       }),
@@ -469,7 +490,7 @@ describe("@opencloud/js v1", () => {
   it("rejects oversized files before contacting the managed gateway", async () => {
     const fetchMock = standardFetch();
     await expect(
-      opencloud.files.upload(new Blob(["123456"]), { maxBytes: 5 }),
+      opencloud.files.upload({ data: new Blob(["123456"]), maxBytes: 5 }),
     ).rejects.toMatchObject({ code: "FILE_TOO_LARGE", surface: "files" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -478,7 +499,8 @@ describe("@opencloud/js v1", () => {
     const fetchMock = standardFetch();
 
     await expect(
-      opencloud.files.upload(new Blob(["proof"]), {
+      opencloud.files.upload({
+        data: new Blob(["proof"]),
         clientKey: "guessed-retry-key",
       } as never),
     ).rejects.toMatchObject({
@@ -486,7 +508,8 @@ describe("@opencloud/js v1", () => {
       surface: "files",
     });
     await expect(
-      opencloud.files.attach(new Blob(["proof"]), {
+      opencloud.files.attach({
+        data: new Blob(["proof"]),
         table: "evidence",
         row: { case_id: "claim-1" },
       } as never),
@@ -501,7 +524,7 @@ describe("@opencloud/js v1", () => {
     const writes: Record<string, unknown>[] = [];
     standardFetch((url, init) => {
       if (url.pathname === "/_opencloud/files") {
-        return json({ id: fileId, name: "proof.txt", contentType: "text/plain", size: 5 });
+        return json(managedFile());
       }
       if (url.pathname === "/rest/v1/evidence" && init.method === "POST") {
         const value = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -511,14 +534,12 @@ describe("@opencloud/js v1", () => {
       return undefined;
     });
 
-    const result = await opencloud.files.attach<{ id: string }>(
-      new Blob(["proof"], { type: "text/plain" }),
-      {
-        table: "evidence",
-        values: { claim_id: "claim-1" },
-        upload: { name: "proof.txt" },
-      },
-    );
+    const result = await opencloud.files.attach<{ id: string }>({
+      data: new Blob(["proof"], { type: "text/plain" }),
+      table: "evidence",
+      values: { claim_id: "claim-1" },
+      name: "proof.txt",
+    });
 
     expect(result.record.id).toBe("evidence-1");
     expect(writes).toEqual([{
@@ -535,7 +556,7 @@ describe("@opencloud/js v1", () => {
     let deletes = 0;
     standardFetch((url, init) => {
       if (url.pathname === "/_opencloud/files") {
-        return json({ id: fileId, name: "proof.txt", contentType: "text/plain", size: 5 });
+        return json(managedFile());
       }
       if (url.pathname === "/rest/v1/evidence" && init.method === "POST") {
         metadataWrites += 1;
@@ -552,10 +573,11 @@ describe("@opencloud/js v1", () => {
       return undefined;
     });
 
-    await expect(opencloud.files.attach(
-      new Blob(["proof"], { type: "text/plain" }),
-      { table: "evidence", upload: { name: "proof.txt" } },
-    )).resolves.toMatchObject({ record: { id: "evidence-1" } });
+    await expect(opencloud.files.attach({
+      data: new Blob(["proof"], { type: "text/plain" }),
+      table: "evidence",
+      name: "proof.txt",
+    })).resolves.toMatchObject({ record: { id: "evidence-1" } });
     expect(metadataWrites).toBe(1);
     expect(deletes).toBe(0);
   });
@@ -563,7 +585,7 @@ describe("@opencloud/js v1", () => {
   it("cleans up a definite attachment failure and reports unconfirmed cleanup", async () => {
     standardFetch((url, init) => {
       if (url.pathname === "/_opencloud/files") {
-        return json({ id: fileId, name: "proof.txt", contentType: "text/plain", size: 5 });
+        return json(managedFile());
       }
       if (url.pathname === "/rest/v1/evidence") {
         return json({ message: "claim does not exist" }, { status: 400 });
@@ -574,10 +596,11 @@ describe("@opencloud/js v1", () => {
       return undefined;
     });
 
-    const promise = opencloud.files.attach(
-      new Blob(["proof"], { type: "text/plain" }),
-      { table: "evidence", upload: { name: "proof.txt" } },
-    );
+    const promise = opencloud.files.attach({
+      data: new Blob(["proof"], { type: "text/plain" }),
+      table: "evidence",
+      name: "proof.txt",
+    });
     await expect(promise).rejects.toMatchObject({
       code: "FILE_ATTACHMENT_INCOMPLETE",
       surface: "files",
@@ -724,7 +747,7 @@ describe("@opencloud/js v1", () => {
       throw new Error(`Unexpected request ${url}`);
     });
 
-    await expect(opencloud.files.upload(new Blob(["x"]))).rejects.toMatchObject({
+    await expect(opencloud.files.upload({ data: new Blob(["x"]) })).rejects.toMatchObject({
       code: "CAPABILITY_UNAVAILABLE",
       surface: "files",
     });
@@ -772,7 +795,6 @@ describe("@opencloud/js v1", () => {
     await expect(opencloud.telemetry.summary()).resolves.toMatchObject({ appId });
     await opencloud.telemetry.increment("tasks_created", 1, {
       dimensions: { actor: "member" },
-      idempotencyKey: "task:1",
     });
     await opencloud.telemetry.gauge("tasks_open", 7);
     expect(calls.map((call) => call.path)).toEqual([
@@ -781,5 +803,13 @@ describe("@opencloud/js v1", () => {
       "/_opencloud/telemetry/metrics",
     ]);
     expect(calls.every((call) => call.init.credentials === "same-origin")).toBe(true);
+    const writes = calls.slice(1).map((call) =>
+      JSON.parse(String(call.init.body)).measurements[0],
+    );
+    expect(writes.map(({ idempotencyKey }) => idempotencyKey)).toEqual([
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    ]);
+    expect(writes[0].idempotencyKey).not.toBe(writes[1].idempotencyKey);
   });
 });

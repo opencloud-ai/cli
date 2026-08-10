@@ -14,9 +14,10 @@ const relativePath = z
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
-export const sdkVersionSchema = z
-  .string()
-  .regex(/^\d+\.\d+\.\d+$/, "expected an exact semantic version");
+/** The pre-production hard cutover deliberately installs one SDK contract. */
+export const sdkVersionSchema = z.literal("2.0.0", {
+  error: "expected the installed SDK version 2.0.0",
+});
 
 export const migrationSchema = z
   .object({
@@ -46,6 +47,16 @@ export const cronSchema = z
   .strict();
 
 export const filesAccessSchema = z.enum(["user", "app"]);
+
+export const secretModeSchema = z.enum(["generated", "required", "optional"]);
+
+const secretNameSchema = z
+  .string()
+  .regex(/^[A-Z][A-Z0-9_]{0,127}$/)
+  .refine(
+    (name) => !name.startsWith("OPENCLOUD_") && !name.startsWith("SUPABASE_"),
+    "secret uses a reserved OpenCloud runtime prefix",
+  );
 
 export const customMetricNameSchema = z
   .string()
@@ -141,10 +152,12 @@ export const openCloudManifestSchema = z
       .object({ path: z.string().startsWith("/").max(200).default("/") })
       .strict()
       .default({ path: "/" }),
-    requiredSecrets: z
-      .array(z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/))
-      .max(100)
-      .default([]),
+    secrets: z
+      .record(secretNameSchema, secretModeSchema)
+      .refine((secrets) => Object.keys(secrets).length <= 100, {
+        message: "apps may declare at most 100 secrets",
+      })
+      .default({}),
     observability: z
       .object({
         metrics: z.array(customMetricDefinitionSchema).max(20).default([]),
@@ -160,7 +173,6 @@ export const openCloudManifestSchema = z
         | "migrations"
         | "functions"
         | "cron"
-        | "requiredSecrets"
         | "observability",
     ) => {
       const seen = new Set<string>();
@@ -184,7 +196,6 @@ export const openCloudManifestSchema = z
       "functions",
     );
     assertUnique(manifest.cron.map((cron) => cron.name), "cron");
-    assertUnique(manifest.requiredSecrets, "requiredSecrets");
     assertUnique(
       (manifest.observability?.metrics ?? []).map((metric) => metric.name),
       "observability",
@@ -233,22 +244,13 @@ export const openCloudManifestSchema = z
         });
       }
     });
-    manifest.requiredSecrets.forEach((name, index) => {
-      if (name.startsWith("OPENCLOUD_") || name.startsWith("SUPABASE_")) {
-        context.addIssue({
-          code: "custom",
-          path: ["requiredSecrets", index],
-          message:
-            `${name} uses a reserved OpenCloud runtime secret prefix`,
-        });
-      }
-    });
   });
 
 export type OpenCloudManifest = z.infer<typeof openCloudManifestSchema>;
 export type OpenCloudMigration = z.infer<typeof migrationSchema>;
 export type FilesAccess = z.infer<typeof filesAccessSchema>;
 export type FunctionAccess = z.infer<typeof functionAccessSchema>;
+export type SecretMode = z.infer<typeof secretModeSchema>;
 export type SdkVersion = z.infer<typeof sdkVersionSchema>;
 export type CustomMetricDefinition = z.infer<
   typeof customMetricDefinitionSchema
@@ -260,6 +262,11 @@ export function parseManifest(value: unknown): OpenCloudManifest {
     if ("storage" in manifest) {
       throw new Error(
         "Manifest schema 2 replaces storage with files; use files.access: user or app",
+      );
+    }
+    if ("requiredSecrets" in manifest) {
+      throw new Error(
+        "Manifest schema 2 replaces requiredSecrets with declarative secrets: NAME: generated, required, or optional",
       );
     }
     const runtime = manifest.runtime;

@@ -122,11 +122,12 @@ describe("controlPlaneOperations", () => {
     for (const [name, annotations] of Object.entries(expected)) {
       expect(tools.get(name), `${name} annotations`).toMatchObject(annotations);
     }
-    for (const name of ["request_dev_app", "mutate_dev_data"]) {
-      expect(tools.get(name)?.description, `${name} API reference`).toContain(
-        "https://docs.opencloud.ai/openapi.yaml",
-      );
-    }
+    expect(tools.get("request_dev_app")?.description).toContain(
+      "https://docs.opencloud.ai/openapi.yaml",
+    );
+    expect(tools.get("mutate_dev_data")?.description).toContain(
+      "raw REST paths are not accepted",
+    );
     for (const operation of Object.values(controlPlaneOperations)) {
       if (operation.method === "DELETE" && operation.mcp) {
         expect(
@@ -187,6 +188,22 @@ describe("controlPlaneOperations", () => {
       ...path,
       body: { requireInteractionContract: true },
     });
+  });
+
+  it("allows an empty draft-file selection and documents normalized dev data paths", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const draftId = "11111111-1111-4111-8111-111111111111";
+
+    expect(
+      controlPlaneOperations.readDraftFiles.input.parse({
+        appId,
+        draftId,
+        body: { paths: [] },
+      }),
+    ).toEqual({ appId, draftId, body: { paths: [] } });
+    expect(controlPlaneOperations.mutateDevData.mcp?.description).toContain(
+      "synthetic-user-A fixture rows",
+    );
   });
 
   it("requires the exact development capability vector", () => {
