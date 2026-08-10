@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v1.0.0` in
+OpenCloud application skills pin an exact CLI release. To install `v2.0.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v1.0.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-1.0.0.tgz"
+OPENCLOUD_CLI_VERSION="v2.0.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-2.0.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -79,10 +79,10 @@ user work safely across multiple app directories.
 "$OPENCLOUD_CLI" logout
 ```
 
-## Legacy passwordless project onboarding
+## Passwordless project onboarding
 
-The pre-1.0 email onboarding flow remains available for compatibility. New
-terminal workflows should use `login` and `app connect`.
+For a new project, agents can request passwordless onboarding directly. For an
+existing account, use `login` and `app connect`.
 
 Give the CLI the user's email and agreed project title:
 
@@ -163,7 +163,8 @@ Use the stable capability preview and isolated migration-replayed database befor
 ```
 
 Development data is isolated from production and uses dummy records. Auth,
-Storage, Realtime, cron, and production secrets are unavailable. Functions
+Files, and Functions are available; Realtime, cron, and production secrets are
+not. Functions
 imported from `@opencloud/server` remain dormant until `app dev invoke` or a
 deliberate preview interaction calls them. Exact-revision verification requires
 every declared Function to have a successful explicit invocation.
@@ -204,8 +205,9 @@ app-declared interaction contract on the server:
 "$OPENCLOUD_CLI" app verify "$APP_ID"
 ```
 
-The lower-level `app smoke` and `app verify-ui` commands remain diagnostic
-helpers for platform development; they are not substitutes for `app verify`.
+CLI v2 has one release-verification command. The former local smoke, Chromium,
+session, and verification-contract commands were removed so agents cannot
+mistake a partial diagnostic for the authoritative gate.
 
 ## Develop
 

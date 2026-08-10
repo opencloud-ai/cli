@@ -4,14 +4,14 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Command, Option } from "commander";
 import YAML from "yaml";
-import { OPEN_CLOUD_JS_VERSION } from "@opencloud/js";
+import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import {
   OPEN_CLOUD_FAVICON_DATA_URI,
   OPEN_CLOUD_LOGO_DATA_URI,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
 import { OpenCloudClient } from "./api-client.js";
-import { requestApp, smokeApp } from "./app-edge.js";
+import { requestApp } from "./app-edge.js";
 import {
   beginDeviceAuthorization,
   completeDeviceAuthorization,
@@ -24,12 +24,6 @@ import {
 import { buildBundle } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
 import { doctorDiagnostics } from "./doctor.js";
-import {
-  parseRuntimeVerificationSpec,
-  verifyRuntime,
-  verifySessions,
-} from "./runtime-verify.js";
-import { verifyAppUi } from "./ui-verify.js";
 import {
   deleteSession,
   loadSession,
@@ -46,7 +40,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "1.0.0";
+const CLI_VERSION = "2.0.0";
 
 const program = new Command()
   .name("opencloud")
@@ -920,26 +914,26 @@ app
     )) as {
       id?: string;
       version?: string;
-      javascriptSdkVersion?: string;
+      sdkVersion?: string;
     };
     if (
       !deployment.id ||
       !deployment.version ||
-      !deployment.javascriptSdkVersion
+      !deployment.sdkVersion
     ) {
       throw new Error(
-        "The active deployment does not expose a JavaScript SDK pin",
+        "The active deployment does not expose an OpenCloud SDK pin",
       );
     }
     output({
       appId,
       deploymentId: deployment.id,
       deploymentVersion: deployment.version,
-      javascriptSdk: {
+      sdk: {
         package: "@opencloud/js",
-        version: deployment.javascriptSdkVersion,
-        module: `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.js`,
-        types: `/_opencloud/sdk/js/v${deployment.javascriptSdkVersion}/index.d.ts`,
+        version: deployment.sdkVersion,
+        module: "/_opencloud/sdk.js",
+        types: "/_opencloud/sdk.d.ts",
       },
     });
   });
@@ -1334,59 +1328,6 @@ app
   });
 
 app
-  .command("smoke")
-  .description(
-    "Legacy local edge check; use `app verify` for the authoritative gate",
-  )
-  .argument("<app-id>")
-  .action(async (appId) => {
-    const value = await client().get(`/v1/apps/${appId}`);
-    const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    const result = await smokeApp(value, edgeUrl ? { edgeUrl } : {});
-    output(result);
-    if (!result.passed) process.exitCode = 1;
-  });
-
-app
-  .command("verify-ui")
-  .description(
-    "Legacy local Chromium check; use `app verify` for the authoritative gate",
-  )
-  .argument("<app-id>")
-  .option("--timeout-seconds <seconds>", "navigation timeout", "30")
-  .option(
-    "--require-interaction",
-    "require view-transition and state-assertion UI coverage",
-  )
-  .option(
-    "--chromium-path <path>",
-    "Chromium executable; defaults to Playwright's installed browser",
-  )
-  .action(async (appId, options) => {
-    const timeoutSeconds = Number(options.timeoutSeconds);
-    if (
-      !Number.isFinite(timeoutSeconds) ||
-      timeoutSeconds < 5 ||
-      timeoutSeconds > 120
-    ) {
-      throw new Error("--timeout-seconds must be between 5 and 120");
-    }
-    const value = await client().get(`/v1/apps/${appId}`);
-    output(
-      await verifyAppUi(value, {
-        timeoutMs: timeoutSeconds * 1_000,
-        requireInteraction: options.requireInteraction === true,
-        ...((options.chromiumPath ?? process.env.OPENCLOUD_CHROMIUM_PATH)
-          ? {
-              chromiumPath:
-                options.chromiumPath ?? process.env.OPENCLOUD_CHROMIUM_PATH,
-            }
-          : {}),
-      }),
-    );
-  });
-
-app
   .command("verify")
   .description("Run the authoritative OpenCloud release verification gate")
   .argument("<app-id>")
@@ -1536,8 +1477,16 @@ program
   <main>
     <img class="opencloud-logo" src="${OPEN_CLOUD_LOGO_DATA_URI}" alt="" aria-hidden="true" width="64" height="64" decoding="async">
     <h1>Your OpenCloud app is running</h1>
+    <p id="runtime-status" role="status">Connecting to the OpenCloud runtime…</p>
     <p>Edit frontend/index.html and deploy again with a new version.</p>
   </main>
+  <script type="module">
+    import { opencloud, OPEN_CLOUD_SDK_VERSION } from "/_opencloud/sdk.js";
+
+    const app = await opencloud.app.info();
+    document.querySelector("#runtime-status").textContent =
+      "Connected to " + app.id + " with SDK " + OPEN_CLOUD_SDK_VERSION + ".";
+  </script>
 </html>
 `,
       { flag: "wx" },
@@ -1545,16 +1494,16 @@ program
     await writeFile(
       path.join(root, "opencloud.yaml"),
       YAML.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         appId,
         version: options.version,
         frontend: { directory: "frontend", spa: true },
         runtime: {
-          javascriptSdk: {
-            version: OPEN_CLOUD_JS_VERSION,
+          sdk: {
+            version: OPEN_CLOUD_SDK_VERSION,
           },
         },
-        storage: { authorization: "app" },
+        files: { access: "user", maxUploadBytes: 50 * 1024 * 1024 },
         migrations: [],
         functions: [],
         cron: [],
@@ -1773,20 +1722,6 @@ deployment
     ),
   );
 
-const session = program
-  .command("session")
-  .description("Verify brokered app sessions without printing credentials");
-
-session
-  .command("verify")
-  .argument("<app-id>")
-  .action(async (appId) => {
-    const control = client();
-    const value = await control.get(`/v1/apps/${appId}`);
-    const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    output(await verifySessions(value, edgeUrl ? { edgeUrl } : {}));
-  });
-
 const cron = program
   .command("cron")
   .description("Inspect durable cron invocation history");
@@ -1822,36 +1757,6 @@ cron
         {},
       ),
     );
-  });
-
-program
-  .command("verify")
-  .description(
-    "Run two-user runtime verification from an opencloud.verify.yaml contract",
-  )
-  .argument("<app-id>")
-  .argument("<verification-file>")
-  .action(async (appId, verificationFile) => {
-    const control = client();
-    const appValue = await control.get(`/v1/apps/${appId}`);
-    const verificationPath = callerPath(verificationFile);
-    const source = await readFile(verificationPath, "utf8");
-    const bundle = await buildBundle(path.dirname(verificationPath));
-    if (bundle.manifest.appId !== appId) {
-      throw new Error(
-        `Verification manifest appId ${bundle.manifest.appId} does not match ${appId}`,
-      );
-    }
-    const spec = parseRuntimeVerificationSpec(source, bundle.manifest);
-    const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
-    const result = await verifyRuntime(
-      control,
-      appValue,
-      spec,
-      edgeUrl ? { edgeUrl } : {},
-    );
-    output(result);
-    if (result.passed !== true) process.exitCode = 1;
   });
 
 const secret = program
