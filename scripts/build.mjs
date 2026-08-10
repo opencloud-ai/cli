@@ -17,7 +17,7 @@ await build({
   target: "node22",
   sourcemap: false,
   legalComments: "none",
-  external: ["@napi-rs/keyring", "playwright"],
+  external: ["@napi-rs/keyring"],
   alias: {
     "@opencloud/contracts": path.join(
       root,

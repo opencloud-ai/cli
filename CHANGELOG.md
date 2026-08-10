@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.0
+
+- Make manifest schema 2 the only application contract. Projects now use
+  `runtime.sdk`, `files.access`, and Function `access`; schema-1 fields fail
+  with focused migration errors instead of being preserved or translated.
+- Vendor OpenCloud SDK 1.0.0 and generate apps that import the stable
+  `opencloud` singleton from `/_opencloud/sdk.js`.
+- Replace deployment and draft response aliases with the canonical
+  `sdkVersion` and `artifactFiles` fields, and expose the exact development
+  capability contract.
+- Generate a working SDK-connected starter with Files enabled and make
+  `app sdk-inspect` report only the stable SDK module and declarations paths.
+- Remove the partial local smoke, Chromium, session, and runtime-contract
+  verification commands. `app verify` is now the single authoritative release
+  gate.
+
 ## 1.0.0
 
 - Add reusable account login through an explicit browser approval flow with

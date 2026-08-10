@@ -25,7 +25,7 @@ async function writeManifest(root: string, body: string): Promise<void> {
   await writeFile(
     path.join(root, "opencloud.yaml"),
     `
-schemaVersion: 1
+schemaVersion: 2
 appId: aeea1c71-72a3-4b1d-a32e-213900735091
 version: test-1
 ${body.trim()}
@@ -45,7 +45,7 @@ describe("bundle builder", () => {
     await writeFile(path.join(root, "frontend", "index.html"), "hello");
     await writeFile(
       path.join(root, "frontend", "assets", "app.js"),
-      "const sdk = runtime.javascriptSdk.module; createOpenCloudClient(sdk);",
+      'import { opencloud } from "/_opencloud/sdk.js"; void opencloud.app.info();',
     );
     await writeFile(
       path.join(root, "migrations", "0001_notes.sql"),
@@ -88,8 +88,8 @@ functions:
     const first = await buildBundle(root);
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
-      javascriptSdk: {
-        version: "0.2.2",
+      sdk: {
+        version: "1.0.0",
       },
     });
     expect(first.files).toEqual([
@@ -199,7 +199,7 @@ functions: []
     expect(bundle.files).not.toContain("functions/forgotten/index.ts");
   });
 
-  it("preserves an explicit older SDK pin instead of replacing it with current", async () => {
+  it("preserves an explicit SDK pin instead of replacing it with current", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));
     await writeFile(path.join(root, "frontend", "index.html"), "hello");
@@ -209,15 +209,15 @@ functions: []
 frontend:
   directory: frontend
 runtime:
-  javascriptSdk:
-    version: 0.2.0
+  sdk:
+    version: 9.8.7
 `,
     );
 
     const bundle = await buildBundle(root);
     expect(bundle.manifest.runtime).toEqual({
-      javascriptSdk: {
-        version: "0.2.0",
+      sdk: {
+        version: "9.8.7",
       },
     });
   });

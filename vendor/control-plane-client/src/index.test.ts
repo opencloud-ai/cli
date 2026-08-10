@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER,
-  OPEN_CLOUD_DEV_SESSION_CAPABILITIES_V2,
-  OpenCloudClient,
-} from "./index.js";
+import { OpenCloudClient } from "./index.js";
 
 describe("OpenCloudClient", () => {
-  it("advertises support for negotiated development capabilities", async () => {
+  it("sends only request headers required by the operation", async () => {
     const requests: RequestInit[] = [];
     const fetcher = async (
       _input: string | URL | Request,
@@ -27,7 +23,7 @@ describe("OpenCloudClient", () => {
     await client.get("/v1/apps");
 
     const init = requests[0];
-    expect(new Headers(init?.headers).get(OPEN_CLOUD_CLIENT_CAPABILITIES_HEADER))
-      .toBe(OPEN_CLOUD_DEV_SESSION_CAPABILITIES_V2);
+    expect(new Headers(init?.headers).has("x-opencloud-client-capabilities"))
+      .toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { parseManifest, type OpenCloudManifest } from "@opencloud/contracts";
-import { OPEN_CLOUD_JS_VERSION } from "@opencloud/js";
+import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import * as tar from "tar";
 import YAML from "yaml";
 
@@ -27,11 +27,11 @@ interface AuthorManifest {
     spa?: boolean;
   };
   runtime?: {
-    javascriptSdk?: {
+    sdk?: {
       version?: string;
     };
   };
-  storage?: unknown;
+  files?: unknown;
   migrations?: Array<{
     id?: string;
     file?: string;
@@ -98,10 +98,10 @@ export async function buildBundle(
     manifestFile.endsWith(".json") ? JSON.parse(source) : YAML.parse(source)
   ) as AuthorManifest;
   if (options.version) raw.version = options.version;
-  raw.schemaVersion ??= 1;
+  raw.schemaVersion ??= 2;
   raw.runtime ??= {};
-  raw.runtime.javascriptSdk ??= {};
-  raw.runtime.javascriptSdk.version ??= OPEN_CLOUD_JS_VERSION;
+  raw.runtime.sdk ??= {};
+  raw.runtime.sdk.version ??= OPEN_CLOUD_SDK_VERSION;
   raw.migrations ??= [];
   for (const migration of raw.migrations) {
     if (!migration.file) throw new Error("Every migration needs a file");
@@ -203,8 +203,8 @@ async function findFrontendSdkWarnings(
   for (const [, sourceFile] of candidates) {
     const content = await readFile(sourceFile, "utf8");
     if (
-      content.includes("createOpenCloudClient") &&
-      content.includes("javascriptSdk.module")
+      content.includes("/_opencloud/sdk.js") &&
+      /\bopencloud\b/.test(content)
     ) {
       return [];
     }
@@ -214,7 +214,7 @@ async function findFrontendSdkWarnings(
       code: "FRONTEND_SDK_NOT_REFERENCED",
       path: manifest.frontend.directory,
       message:
-        "Frontend source does not reference the runtime-discovered OpenCloud JavaScript SDK. Read /_opencloud/config, import runtime.javascriptSdk.module, and create the client with createOpenCloudClient.",
+        'Frontend source does not import the deployment-pinned OpenCloud SDK. Import { opencloud } from "/_opencloud/sdk.js".',
     },
   ];
 }

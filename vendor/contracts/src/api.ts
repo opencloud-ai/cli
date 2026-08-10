@@ -238,7 +238,7 @@ export interface DeploymentRecord {
   appId: string;
   version: string;
   artifactSha256: string;
-  javascriptSdkVersion: string;
+  sdkVersion: string;
   manifest: unknown;
   state: DeploymentState;
   rollbackOfDeploymentId: string | null;

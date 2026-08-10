@@ -119,7 +119,7 @@ export const controlPlaneDeploymentSchema = z
     appId: uuid,
     version: z.string(),
     artifactSha256: sha256,
-    javascriptSdkVersion: z.string(),
+    sdkVersion: z.string(),
     manifest: z.unknown(),
     state: deploymentStateSchema,
     rollbackOfDeploymentId: uuid.nullable(),
@@ -202,8 +202,6 @@ const draftValidationOutput = z
     sourceManifest: z.string().nullable(),
     sourceFiles: z.array(z.string()),
     artifactFiles: z.array(z.string()),
-    // Backward-compatible alias for artifactFiles.
-    files: z.array(z.string()),
     diagnostics: z.array(
       z
         .object({
@@ -251,13 +249,13 @@ export const devSessionOutput = z
       })
       .nullable(),
     capabilities: z.object({
-      frontend: z.boolean(),
-      database: z.boolean(),
-      functions: z.boolean(),
-      productionSecrets: z.boolean(),
-      cron: z.boolean(),
-      storageSandbox: z.boolean(),
-      syntheticAuth: z.boolean(),
+      frontend: z.literal(true),
+      database: z.literal(true),
+      functions: z.literal(true),
+      files: z.literal(true),
+      productionSecrets: z.literal(false),
+      cron: z.literal(false),
+      syntheticAuth: z.literal(true),
     }),
     createdAt: z.string(),
     updatedAt: z.string(),

@@ -189,7 +189,7 @@ describe("controlPlaneOperations", () => {
     });
   });
 
-  it("treats development capabilities as negotiated booleans", () => {
+  it("requires the exact development capability vector", () => {
     const session = {
       id: "11111111-1111-4111-8111-111111111111",
       appId: "22222222-2222-4222-8222-222222222222",
@@ -203,10 +203,10 @@ describe("controlPlaneOperations", () => {
         frontend: true,
         database: true,
         functions: true,
+        files: true,
         productionSecrets: false,
         cron: false,
-        storageSandbox: false,
-        syntheticAuth: false,
+        syntheticAuth: true,
       },
       createdAt: "2026-08-05T00:00:00.000Z",
       updatedAt: "2026-08-05T00:00:00.000Z",
@@ -214,15 +214,14 @@ describe("controlPlaneOperations", () => {
       expiresAt: "2026-08-06T00:00:00.000Z",
     };
 
-    for (const [name, enabled] of Object.entries(session.capabilities)) {
-      const parsed = controlPlaneOperations.getDevSession.output.parse({
+    expect(
+      controlPlaneOperations.getDevSession.output.parse(session).capabilities,
+    ).toEqual(session.capabilities);
+    expect(() =>
+      controlPlaneOperations.getDevSession.output.parse({
         ...session,
-        capabilities: {
-          ...session.capabilities,
-          [name]: !enabled,
-        },
-      });
-      expect(parsed.capabilities).toMatchObject({ [name]: !enabled });
-    }
+        capabilities: { ...session.capabilities, files: false },
+      }),
+    ).toThrow();
   });
 });
