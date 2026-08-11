@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.0.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.0.1` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.0.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.0.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.0.1"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.0.1.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -169,7 +169,7 @@ Use the stable capability preview and isolated migration-replayed database befor
   --id "$ITEM_ID" --values '{"title":"Updated preview item"}'
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
-"$OPENCLOUD_CLI" app dev verify .
+"$OPENCLOUD_CLI" app dev verify . --parallelism 5
 "$OPENCLOUD_CLI" app dev promote . --idempotency-key "$IDEMPOTENCY_KEY"
 "$OPENCLOUD_CLI" app dev receipts .
 "$OPENCLOUD_CLI" app dev evidence .
@@ -182,7 +182,10 @@ configured required values remain unavailable and optional values may be
 absent. Functions
 imported from `@opencloud/server` remain dormant until `app dev invoke` or a
 deliberate preview interaction calls them. Exact-revision verification requires
-every declared Function to have a successful explicit invocation.
+every declared Function to have a successful explicit invocation and runs the
+immutable `tests/opencloud.e2e.js` specification. The conventional test source
+stays outside `frontend.directory`, is included in the deterministic artifact,
+and must use only the bounded `@opencloud/test` UI fixtures.
 
 `app dev promote` is the completion path: it deploys only the verified receipt,
 follows the durable production operation, runs feature-aware production

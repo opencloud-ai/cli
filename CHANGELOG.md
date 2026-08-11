@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.0.1
+
+- Include the conventional `tests/opencloud.e2e.js` source in deterministic
+  bundles, validate its bounded test contract locally, and expose its immutable
+  SHA-256 metadata.
+- Require exact-revision external E2E evidence during `app dev verify`, with an
+  optional bounded parallelism override, so a missing specification fails
+  closed instead of producing a legacy receipt.
+- Generate new projects with a deliberately failing external E2E starter that
+  agents must replace with the app's primary outcomes before promotion.
+
 ## 3.0.0
 
 - Vendor the hard-cut OpenCloud browser SDK 2.0.0 and final schema-2 manifest
