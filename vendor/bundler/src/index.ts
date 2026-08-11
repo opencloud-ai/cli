@@ -43,6 +43,7 @@ interface AuthorManifest {
   }>;
   functions?: unknown[];
   cron?: unknown[];
+  email?: unknown;
   health?: unknown;
   secrets?: Record<string, unknown>;
 }
@@ -150,9 +151,14 @@ export async function buildBundle(
   if (e2eTest) {
     assertE2eTestOutsideFrontend(manifest.frontend.directory);
   }
+  const functionWarnings = await inspectFunctionEntrypoints(
+    manifest,
+    selection,
+  );
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
     ...(await findFrontendSdkWarnings(manifest, selection)),
+    ...functionWarnings,
   ].sort((left, right) => comparePaths(left.path, right.path));
   const sourceFiles = [sourceManifest, ...selection.files.keys()].sort(
     comparePaths,
@@ -428,6 +434,37 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
   return output;
 }
 
+async function inspectFunctionEntrypoints(
+  manifest: OpenCloudManifest,
+  selection: BundleSelection,
+): Promise<BundleWarning[]> {
+  const warnings: BundleWarning[] = [];
+  for (const definition of manifest.functions) {
+    const sourceFile = selection.files.get(definition.entrypoint);
+    if (!sourceFile) continue;
+    const content = await readFile(sourceFile, "utf8");
+    if (
+      /\bDeno[.]env[.]get\s*\(\s*["'](?:SUPABASE_|OPEN_CLOUD_API_URL)/.test(
+        content,
+      ) ||
+      /["'`]\/rest\/v1\//.test(content)
+    ) {
+      throw new Error(
+        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
+      );
+    }
+    const usesServerBoundary =
+      /\bfrom\s*["']@opencloud\/server["']/.test(content) &&
+      /\bdefineFunction\s*\(/.test(content);
+    if (!usesServerBoundary) {
+      throw new Error(
+        `Function entrypoint ${definition.entrypoint} uses the removed legacy Function boundary. Export default defineFunction({ input: schema.*, handler }) from @opencloud/server.`,
+      );
+    }
+  }
+  return warnings;
+}
+
 async function findFrontendSdkWarnings(
   manifest: OpenCloudManifest,
   selection: BundleSelection,
@@ -438,15 +475,27 @@ async function findFrontendSdkWarnings(
       relative.startsWith(frontendPrefix) &&
       /[.](?:html|js|mjs|cjs|ts|tsx|jsx)$/.test(relative),
   );
-  for (const [, sourceFile] of candidates) {
+  let sdkReferenced = false;
+  for (const [relative, sourceFile] of candidates) {
     const content = await readFile(sourceFile, "utf8");
+    if (
+      /\bcreateOpenCloudClient\b/.test(content) ||
+      /\bjavascriptSdk[.]module\b/.test(content) ||
+      /[.]\s*(?:rest|storage)\s*[.]\s*request\s*\(/.test(content) ||
+      /fetch\s*\(\s*["'`]\/(?:rest|storage)\/v1(?:\/|["'`])/.test(content)
+    ) {
+      throw new Error(
+        `Frontend source ${relative} uses a removed or raw OpenCloud interface. Import { opencloud } from "/_opencloud/sdk.js" and use opencloud.data, opencloud.files, opencloud.functions, and opencloud.realtime instead of client construction, raw REST or Storage requests, buckets, or object paths.`,
+      );
+    }
     if (
       content.includes("/_opencloud/sdk.js") &&
       /\bopencloud\b/.test(content)
     ) {
-      return [];
+      sdkReferenced = true;
     }
   }
+  if (sdkReferenced) return [];
   return [
     {
       code: "FRONTEND_SDK_NOT_REFERENCED",

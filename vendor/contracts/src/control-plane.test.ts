@@ -26,6 +26,8 @@ describe("controlPlaneOperations", () => {
         "validate_draft",
         "deploy_draft",
         "verify_app",
+        "list_app_email_messages",
+        "get_app_email_message",
         "generate_secret",
         "create_secret_entry_link",
         "get_agent_feed",
@@ -83,6 +85,131 @@ describe("controlPlaneOperations", () => {
     expect(controlPlaneOperations.verifyApp.idempotency).toBe("required");
   });
 
+  it("supports bounded cursor pages for retained app email history", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const operation = controlPlaneOperations.getAppEmail;
+
+    expect(operation.mcp).toMatchObject({
+      toolName: "list_app_email_messages",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    expect(operation.queryKey).toBe("query");
+    expect(operation.input.parse({ appId })).toEqual({ appId });
+    expect(
+      operation.input.parse({
+        appId,
+        query: {
+          cursor: "cursor-page-2",
+          limit: 26,
+          alias: "support",
+          direction: "inbound",
+          from: "2026-08-01T00:00:00.000Z",
+          to: "2026-08-10T23:59:59.999Z",
+        },
+      }),
+    ).toMatchObject({
+      appId,
+      query: { alias: "support", direction: "inbound", limit: 26 },
+    });
+    expect(() =>
+      operation.input.parse({ appId, query: { limit: 201 } }),
+    ).toThrow();
+    expect(() =>
+      operation.input.parse({
+        appId,
+        query: {
+          from: "2026-08-11T00:00:00.000Z",
+          to: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    ).toThrow(/after from/);
+    expect(() =>
+      operation.input.parse({
+        appId,
+        query: {
+          from: "2025-01-01T00:00:00.000Z",
+          to: "2026-08-10T00:00:00.000Z",
+        },
+      }),
+    ).toThrow(/366 days/);
+  });
+
+  it("types retained email content details without attachment bytes", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const messageId = "33333333-3333-4333-8333-333333333333";
+    const operation = controlPlaneOperations.getAppEmailMessage;
+
+    expect(operation.mcp).toMatchObject({
+      toolName: "get_app_email_message",
+      readOnlyHint: true,
+      destructiveHint: false,
+    });
+    expect(operation).toMatchObject({
+      method: "GET",
+      path: "/v1/apps/{appId}/email/messages/{messageId}",
+      scopes: ["app:read"],
+    });
+    expect(operation.input.parse({ appId, messageId })).toEqual({
+      appId,
+      messageId,
+    });
+    expect(
+      operation.output.parse({
+        schemaVersion: 1,
+        id: messageId,
+        appId,
+        deploymentId: null,
+        devSessionId: null,
+        devRevisionId: null,
+        direction: "inbound",
+        environment: "production",
+        address: "support",
+        sender: "sender@example.com",
+        recipient: "support@example.com",
+        subject: "Need help",
+        handlerFunction: "receive-support",
+        providerId: null,
+        providerMessageId: "<message@example.com>",
+        idempotencyKey: null,
+        recipientCount: 1,
+        status: "processed",
+        error: null,
+        content: {
+          schemaVersion: 1,
+          displayFrom: "Sender <sender@example.com>",
+          to: ["support@example.com"],
+          cc: [],
+          bcc: [],
+          text: "Need help",
+          html: "<p>Need help</p>",
+          textTruncated: false,
+          htmlTruncated: false,
+          replyTo: "sender@example.com",
+          inReplyTo: null,
+          references: [],
+          listUnsubscribe: null,
+          tags: [],
+          headers: ["From: sender@example.com"],
+          headersTruncated: false,
+          attachments: [
+            {
+              name: "request.txt",
+              contentType: "text/plain",
+              cid: null,
+              sizeBytes: 9,
+              sha256: "a".repeat(64),
+            },
+          ],
+        },
+        createdAt: "2026-08-10T12:00:00.000Z",
+        updatedAt: "2026-08-10T12:00:01.000Z",
+        processedAt: "2026-08-10T12:00:01.000Z",
+      }),
+    ).toMatchObject({ id: messageId, content: { text: "Need help" } });
+  });
+
   it("keeps MCP approval hints aligned with high-risk behavior", () => {
     const tools = new Map(
       Object.values(controlPlaneOperations).flatMap((operation) =>
@@ -117,13 +244,33 @@ describe("controlPlaneOperations", () => {
       restore_backup: { idempotentHint: false },
       invoke_cron: { destructiveHint: true },
       put_alert_rule: { destructiveHint: true },
+      request_dev_app: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      get_agent_feed: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     } as const;
 
     for (const [name, annotations] of Object.entries(expected)) {
       expect(tools.get(name), `${name} annotations`).toMatchObject(annotations);
     }
+    for (const name of ["request_dev_app", "mutate_dev_data"]) {
+      expect(tools.get(name)?.description, `${name} API reference`).toContain(
+        "https://docs.opencloud.ai/openapi.yaml",
+      );
+    }
     expect(tools.get("request_dev_app")?.description).toContain(
-      "https://docs.opencloud.ai/openapi.yaml",
+      "does not create, deploy, or modify an app",
+    );
+    expect(tools.get("get_agent_feed")?.description).toContain(
+      "without persisting alert state",
     );
     expect(tools.get("mutate_dev_data")?.description).toContain(
       "raw REST paths are not accepted",
@@ -182,19 +329,11 @@ describe("controlPlaneOperations", () => {
     expect(
       controlPlaneOperations.verifyDevSession.input.parse({
         ...path,
-        body: {
-          requireInteractionContract: true,
-          requireExternalE2eSpec: true,
-          parallelism: 5,
-        },
+        body: { requireInteractionContract: true, parallelism: 5 },
       }),
     ).toEqual({
       ...path,
-      body: {
-        requireInteractionContract: true,
-        requireExternalE2eSpec: true,
-        parallelism: 5,
-      },
+      body: { requireInteractionContract: true, parallelism: 5 },
     });
     expect(() =>
       controlPlaneOperations.verifyDevSession.input.parse({
@@ -238,6 +377,8 @@ describe("controlPlaneOperations", () => {
         productionSecrets: false,
         cron: false,
         syntheticAuth: true,
+        emailCapture: true,
+        emailInboundInjection: true,
       },
       createdAt: "2026-08-05T00:00:00.000Z",
       updatedAt: "2026-08-05T00:00:00.000Z",

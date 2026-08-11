@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.1.0
+
+- Add `app email list|get` for filtered, cursor-paginated production message
+  diagnostics and authorized retained content inspection.
+- Add `app dev email list|get|inject` for provider-free capture and synthetic
+  inbound testing, including file-backed text/HTML and bounded attachments.
+- Vendor the application-email manifest, control-plane, and bundler contracts
+  so aliases, system-only inbound handlers, and email-capable bundles validate
+  locally before a development session or deployment.
+
 ## 3.0.1
 
 - Include the conventional `tests/opencloud.e2e.js` source in deterministic

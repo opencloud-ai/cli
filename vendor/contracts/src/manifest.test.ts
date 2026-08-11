@@ -16,6 +16,7 @@ const valid = {
   ],
   functions: [],
   cron: [],
+  email: { addresses: [] },
   health: { path: "/" },
   secrets: {},
 };
@@ -277,6 +278,65 @@ describe("OpenCloud manifest", () => {
         parseManifest({ ...valid, secrets: { [name]: "required" } }),
       ).toThrow(/reserved OpenCloud runtime prefix/);
     }
+  });
+
+  it("accepts multiple email aliases and validates inbound handlers", () => {
+    const manifest = parseManifest({
+      ...valid,
+      functions: [
+        {
+          name: "receive-support",
+          entrypoint: "functions/receive-support/index.ts",
+          access: "system",
+        },
+      ],
+      email: {
+        addresses: [
+          {
+            name: "support",
+            displayName: "Support",
+            function: "receive-support",
+          },
+          { name: "notifications", displayName: "Notifications" },
+        ],
+      },
+    });
+    expect(manifest.email.addresses).toHaveLength(2);
+    expect(manifest.email.addresses[0]?.function).toBe("receive-support");
+  });
+
+  it("rejects duplicate email aliases and unknown inbound handlers", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        email: {
+          addresses: [
+            { name: "support", function: "missing" },
+            { name: "support" },
+          ],
+        },
+      }),
+    ).toThrow(/email/);
+  });
+
+  it("requires inbound email handlers to be system Functions", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions: [
+          {
+            name: "receive-support",
+            entrypoint: "functions/receive-support/index.ts",
+            access: "user",
+          },
+        ],
+        email: {
+          addresses: [
+            { name: "support", function: "receive-support" },
+          ],
+        },
+      }),
+    ).toThrow(/must declare access: system/);
   });
 
   it("rejects reordered migration history", () => {

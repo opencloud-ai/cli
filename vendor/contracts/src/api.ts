@@ -314,7 +314,7 @@ export interface AgentFeedSignal {
 export interface AgentFeedAlert {
   id: string;
   kind: "builtin" | "custom_metric";
-  state: AlertState;
+  state: Exclude<AlertState, "resolved">;
   severity: AlertSeverity;
   title: string;
   observedAt: string;
@@ -325,6 +325,29 @@ export interface AgentFeedAlert {
     value: number | null;
     unit: string | null;
     aggregation: AlertAggregation;
+    window: AlertWindow;
+    samples: number;
+    source: "browser" | "authenticated" | "function" | "mixed" | "none";
+  };
+}
+
+export interface AgentFeedBreach {
+  id: string;
+  ruleId: string;
+  severity: AlertSeverity;
+  title: string;
+  startedAt: string;
+  startedBeforeSince: boolean;
+  endedAt: string | null;
+  endState: "ok" | "unknown" | "invalid" | null;
+  metric: {
+    name: string;
+    type: "counter" | "gauge";
+    triggerValue: number;
+    unit: string | null;
+    aggregation: AlertAggregation;
+    operator: AlertOperator;
+    threshold: number;
     window: AlertWindow;
     samples: number;
     source: "browser" | "authenticated" | "function" | "mixed" | "none";
@@ -362,6 +385,8 @@ export interface AgentFeedResponse {
   };
   signals: AgentFeedSignal[];
   alerts: AgentFeedAlert[];
+  recentBreaches: AgentFeedBreach[];
+  breachesTruncated: boolean;
   events: AgentFeedEvent[];
   eventsTruncated: boolean;
   nextSince: string;
