@@ -21,7 +21,7 @@ import {
   openBrowser,
   revokeAccountCredential,
 } from "./account-auth.js";
-import { buildBundle } from "./bundle.js";
+import { buildBundle, OPEN_CLOUD_E2E_TEST_PATH } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
 import { doctorDiagnostics } from "./doctor.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
@@ -41,7 +41,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "3.0.0";
+const CLI_VERSION = "3.0.1";
 
 const program = new Command()
   .name("opencloud")
@@ -1185,6 +1185,9 @@ dev
       cliVersion: CLI_VERSION,
       appId: bundle.manifest.appId,
       localArtifactSha256: bundle.sha256,
+      e2eTest: bundle.e2eTest
+        ? { path: bundle.e2eTest.path, sha256: bundle.e2eTest.sha256 }
+        : null,
       localSession: localState
         ? {
             sessionId: localState.sessionId,
@@ -1203,11 +1206,30 @@ dev
     "Run Chromium and primary-flow checks for the exact dev revision",
   )
   .argument("[directory]", "app source directory", ".")
-  .action(async (directory) => {
+  .option(
+    "--parallelism <number>",
+    "number of isolated external E2E tests to run concurrently (1-10)",
+  )
+  .action(async (directory, options) => {
     const state = await requireDevState(callerPath(directory));
+    const parallelism =
+      options.parallelism === undefined
+        ? undefined
+        : Number(options.parallelism);
+    if (
+      parallelism !== undefined &&
+      (!Number.isInteger(parallelism) || parallelism < 1 || parallelism > 10)
+    ) {
+      throw new Error("--parallelism must be an integer between 1 and 10");
+    }
     const result = await client().call("verifyDevSession", {
       appId: state.appId,
       sessionId: state.sessionId,
+      body: {
+        requireInteractionContract: true,
+        requireExternalE2eSpec: true,
+        ...(parallelism === undefined ? {} : { parallelism }),
+      },
     });
     output(result);
     if (!result.receipt.summary.passed) process.exitCode = 1;
@@ -1224,6 +1246,17 @@ dev
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);
+    const bundle = await buildBundle(sourceRoot);
+    if (!bundle.e2eTest) {
+      throw new Error(
+        `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, invoke every Function, and verify the exact revision.`,
+      );
+    }
+    if (bundle.sha256 !== state.artifactSha256) {
+      throw new Error(
+        "Local source differs from the active development revision. Run app dev sync, invoke every Function, and verify again before promotion.",
+      );
+    }
     const control = client();
     const result = await control.call(
       "promoteDevRevision",
@@ -1461,6 +1494,7 @@ program
     }
     await mkdir(path.join(root, "frontend"), { recursive: true });
     await mkdir(path.join(root, "migrations"), { recursive: true });
+    await mkdir(path.join(root, "tests"), { recursive: true });
     await writeFile(
       path.join(root, "frontend", "index.html"),
       `<!doctype html>
@@ -1512,6 +1546,31 @@ program
         health: { path: "/" },
         secrets: {},
       }),
+      { flag: "wx" },
+    );
+    await writeFile(
+      path.join(root, ...OPEN_CLOUD_E2E_TEST_PATH.split("/")),
+      `import { test, expect } from "@opencloud/test";
+
+test("REQ-001 replace this with the app's primary outcome", async ({
+  page,
+  uniqueValue,
+  clickIfVisible,
+}) => {
+  const value = uniqueValue("Primary outcome", 60);
+  const scope = page.getByRole("main");
+  try {
+    await scope
+      .getByRole("button", { name: "Replace this test", exact: true })
+      .click();
+    await expect(scope.getByText(value, { exact: true })).toBeVisible();
+  } finally {
+    await clickIfVisible(
+      page.getByRole("button", { name: "Cancel", exact: true }),
+    );
+  }
+});
+`,
       { flag: "wx" },
     );
     output({ directory: root, manifest: path.join(root, "opencloud.yaml") });
@@ -1614,6 +1673,9 @@ program
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
       secrets: bundle.manifest.secrets,
       files: bundle.files,
+      e2eTest: bundle.e2eTest
+        ? { path: bundle.e2eTest.path, sha256: bundle.e2eTest.sha256 }
+        : null,
       warnings: bundle.warnings,
       archivePath,
       next: archivePath
@@ -1659,6 +1721,9 @@ program
       artifactSha256: bundle.sha256,
       artifactBytes: bundle.archive.byteLength,
       files: bundle.files,
+      e2eTest: bundle.e2eTest
+        ? { path: bundle.e2eTest.path, sha256: bundle.e2eTest.sha256 }
+        : null,
       warnings: bundle.warnings,
     });
   });

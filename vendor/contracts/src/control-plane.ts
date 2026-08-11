@@ -1030,13 +1030,15 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/verify",
     summary: "Verify a development revision",
     description:
-      "Runs Chromium, console, HTTP, and optional primary-flow checks and issues a receipt bound to the exact revision.",
+      "Runs Chromium, console, HTTP, and exact-revision external browser checks and issues a receipt bound to the exact revision.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: devSessionPath.extend({
       body: z
         .object({
           requireInteractionContract: z.boolean().optional(),
+          requireExternalE2eSpec: z.boolean().optional(),
+          parallelism: z.number().int().min(1).max(10).optional(),
         })
         .optional(),
     }),

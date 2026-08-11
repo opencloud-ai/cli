@@ -54,7 +54,14 @@ export interface BuiltBundle {
   files: string[];
   sourceManifest: string;
   sourceFiles: string[];
+  e2eTest?: BuiltE2eTest;
   warnings: BundleWarning[];
+}
+
+export interface BuiltE2eTest {
+  path: typeof OPEN_CLOUD_E2E_TEST_PATH;
+  source: string;
+  sha256: string;
 }
 
 export interface BundleWarning {
@@ -80,6 +87,9 @@ const manifestNames = [
   "opencloud.yml",
   "opencloud.json",
 ] as const;
+
+export const OPEN_CLOUD_E2E_TEST_PATH = "tests/opencloud.e2e.js" as const;
+export const OPEN_CLOUD_E2E_TEST_MAX_BYTES = 64 * 1024;
 
 function comparePaths(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -136,6 +146,10 @@ export async function buildBundle(
   }
   const manifest = parseManifest(raw);
   const selection = await selectBundleFiles(root, manifest, manifestFile);
+  const e2eTest = await selectE2eTest(root, selection, manifestFile);
+  if (e2eTest) {
+    assertE2eTestOutsideFrontend(manifest.frontend.directory);
+  }
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
     ...(await findFrontendSdkWarnings(manifest, selection)),
@@ -194,11 +208,224 @@ export async function buildBundle(
       files,
       sourceManifest,
       sourceFiles,
+      ...(e2eTest ? { e2eTest } : {}),
       warnings,
     };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+export function assertE2eTestOutsideFrontend(
+  frontendDirectory: string,
+): void {
+  const relative = path.posix.relative(
+    frontendDirectory,
+    OPEN_CLOUD_E2E_TEST_PATH,
+  );
+  const overlaps =
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith("../") &&
+      !path.posix.isAbsolute(relative));
+  if (overlaps) {
+    throw new Error(
+      `${OPEN_CLOUD_E2E_TEST_PATH} must stay outside frontend.directory so verification source is never served publicly`,
+    );
+  }
+}
+
+async function selectE2eTest(
+  root: string,
+  selection: BundleSelection,
+  manifestFile: string,
+): Promise<BuiltE2eTest | undefined> {
+  const absoluteFile = resolveBundlePath(
+    root,
+    OPEN_CLOUD_E2E_TEST_PATH,
+    "OpenCloud E2E test",
+  );
+  let info;
+  try {
+    info = await lstat(absoluteFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  await assertNoSymlinkComponents(root, absoluteFile, "OpenCloud E2E test");
+  if (info.isSymbolicLink()) {
+    throw new Error("OpenCloud E2E test cannot be a symlink");
+  }
+  if (!info.isFile()) {
+    throw new Error("OpenCloud E2E test is not a regular file");
+  }
+  if (info.size > OPEN_CLOUD_E2E_TEST_MAX_BYTES) {
+    throw new Error(
+      `OpenCloud E2E test exceeds ${OPEN_CLOUD_E2E_TEST_MAX_BYTES} bytes: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+
+  const bytes = await readFile(absoluteFile);
+  const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  validateE2eTestSource(source);
+  addSelectedFile(root, absoluteFile, selection, manifestFile);
+  return {
+    path: OPEN_CLOUD_E2E_TEST_PATH,
+    source,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+function validateE2eTestSource(source: string): void {
+  const code = maskJavaScriptCommentsAndLiterals(source);
+  const imports = [
+    ...source.matchAll(
+      /\bimport\s*\{([\s\S]*?)\}\s*from\s*(["'])([^"']+)\2\s*;?/g,
+    ),
+  ].filter((match) => {
+    const index = match.index ?? -1;
+    return index >= 0 && code.slice(index, index + 6) === "import";
+  });
+  const importTokenCount = code.match(/\bimport\b/g)?.length ?? 0;
+  if (
+    imports.length !== 1 ||
+    importTokenCount !== 1 ||
+    imports[0]?.[3] !== "@opencloud/test"
+  ) {
+    throw new Error(
+      `OpenCloud E2E test must have exactly one named import from "@opencloud/test": ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+  const importedNames = (imports[0]?.[1] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (
+    importedNames.length !== 2 ||
+    !importedNames.includes("test") ||
+    !importedNames.includes("expect")
+  ) {
+    throw new Error(
+      `OpenCloud E2E test must import exactly test and expect from "@opencloud/test": ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+  if (!/\btest\s*\(/.test(code)) {
+    throw new Error(
+      `OpenCloud E2E test must declare at least one test(...): ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+  if (
+    /\b(?:test|describe)(?:\s*[.]\s*[A-Za-z_$][\w$]*)*\s*[.]\s*(?:skip|only)\s*\(/.test(
+      code,
+    )
+  ) {
+    throw new Error(
+      `OpenCloud E2E test cannot use skip or only: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+  if (/\bimport\s*\(/.test(code)) {
+    throw new Error(
+      `OpenCloud E2E test cannot use dynamic imports: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+
+  const forbiddenPatterns: Array<[RegExp, string]> = [
+    [/\bfetch\s*\(/, "fetch"],
+    [/\b(?:XMLHttpRequest|WebSocket|EventSource)\b/, "direct network APIs"],
+    [/\bnavigator\s*[.]\s*sendBeacon\s*\(/, "sendBeacon"],
+    [
+      /[.]\s*(?:evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/,
+      "browser evaluation",
+    ],
+    [/[.]\s*(?:route|unroute|routeFromHAR)\s*\(/, "network routing"],
+    [
+      /[.]\s*(?:goto|setContent|addInitScript|addScriptTag|exposeBinding|exposeFunction)\s*\(/,
+      "direct page or script injection",
+    ],
+    [
+      /\brequest\s*[.]\s*(?:delete|fetch|get|head|patch|post|put)\s*\(/,
+      "direct request access",
+    ],
+  ];
+  for (const [pattern, label] of forbiddenPatterns) {
+    if (pattern.test(code)) {
+      throw new Error(
+        `OpenCloud E2E test cannot use ${label}; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+      );
+    }
+  }
+  if (/\/(?:rest|storage|functions)\/v1(?:\/|\b)/.test(source)) {
+    throw new Error(
+      `OpenCloud E2E test cannot access platform backend routes directly; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
+  }
+}
+
+function maskJavaScriptCommentsAndLiterals(source: string): string {
+  let output = "";
+  let index = 0;
+  let state:
+    | "code"
+    | "line-comment"
+    | "block-comment"
+    | "single-quote"
+    | "double-quote"
+    | "template" = "code";
+  while (index < source.length) {
+    const character = source[index] ?? "";
+    const next = source[index + 1] ?? "";
+    if (state === "code") {
+      if (character === "/" && next === "/") {
+        output += "  ";
+        index += 2;
+        state = "line-comment";
+        continue;
+      }
+      if (character === "/" && next === "*") {
+        output += "  ";
+        index += 2;
+        state = "block-comment";
+        continue;
+      }
+      if (character === "'") state = "single-quote";
+      else if (character === '"') state = "double-quote";
+      else if (character === "`") state = "template";
+      output += state === "code" ? character : " ";
+      index += 1;
+      continue;
+    }
+    if (state === "line-comment") {
+      if (character === "\n") {
+        output += "\n";
+        state = "code";
+      } else output += " ";
+      index += 1;
+      continue;
+    }
+    if (state === "block-comment") {
+      if (character === "*" && next === "/") {
+        output += "  ";
+        index += 2;
+        state = "code";
+      } else {
+        output += character === "\n" ? "\n" : " ";
+        index += 1;
+      }
+      continue;
+    }
+    const terminator =
+      state === "single-quote" ? "'" : state === "double-quote" ? '"' : "`";
+    if (character === "\\") {
+      output += " ";
+      if (index + 1 < source.length) output += next === "\n" ? "\n" : " ";
+      index += 2;
+      continue;
+    }
+    output += character === "\n" ? "\n" : " ";
+    index += 1;
+    if (character === terminator) state = "code";
+  }
+  return output;
 }
 
 async function findFrontendSdkWarnings(

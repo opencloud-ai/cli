@@ -182,12 +182,26 @@ describe("controlPlaneOperations", () => {
     expect(
       controlPlaneOperations.verifyDevSession.input.parse({
         ...path,
-        body: { requireInteractionContract: true },
+        body: {
+          requireInteractionContract: true,
+          requireExternalE2eSpec: true,
+          parallelism: 5,
+        },
       }),
     ).toEqual({
       ...path,
-      body: { requireInteractionContract: true },
+      body: {
+        requireInteractionContract: true,
+        requireExternalE2eSpec: true,
+        parallelism: 5,
+      },
     });
+    expect(() =>
+      controlPlaneOperations.verifyDevSession.input.parse({
+        ...path,
+        body: { parallelism: 11 },
+      }),
+    ).toThrow();
   });
 
   it("allows an empty draft-file selection and documents normalized dev data paths", () => {

@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as tar from "tar";
-import { buildBundle } from "./bundle.js";
+import {
+  buildBundle,
+  OPEN_CLOUD_E2E_TEST_MAX_BYTES,
+  OPEN_CLOUD_E2E_TEST_PATH,
+} from "./bundle.js";
 
 const temporary: string[] = [];
 
@@ -330,3 +335,181 @@ functions:
     );
   });
 });
+
+describe("conventional OpenCloud E2E tests", () => {
+  const validE2eSource = `import { expect, test } from "@opencloud/test";
+
+test("creates a record through the UI", async ({ ownerPage }) => {
+  await ownerPage.getByRole("button", { name: "Add item" }).click();
+  await expect(ownerPage.getByRole("status")).toHaveText("Item added");
+});
+`;
+
+  it("keeps legacy bundles unchanged when the conventional spec is absent", async () => {
+    const directory = await e2eFixture();
+
+    const bundle = await buildBundle(directory);
+
+    expect(bundle.e2eTest).toBeUndefined();
+    expect(bundle.files).not.toContain(OPEN_CLOUD_E2E_TEST_PATH);
+    expect(bundle.sourceFiles).not.toContain(OPEN_CLOUD_E2E_TEST_PATH);
+  });
+
+  it("includes a valid conventional spec and exposes bounded immutable metadata", async () => {
+    const directory = await e2eFixture(validE2eSource);
+
+    const first = await buildBundle(directory);
+    const second = await buildBundle(directory);
+
+    expect(first.files).toContain(OPEN_CLOUD_E2E_TEST_PATH);
+    expect(first.sourceFiles).toContain(OPEN_CLOUD_E2E_TEST_PATH);
+    expect(first.e2eTest).toEqual({
+      path: OPEN_CLOUD_E2E_TEST_PATH,
+      source: validE2eSource,
+      sha256: createHash("sha256").update(validE2eSource).digest("hex"),
+    });
+    expect(second.sha256).toBe(first.sha256);
+    expect(second.archive).toEqual(first.archive);
+    expect(second.e2eTest).toEqual(first.e2eTest);
+  });
+
+  it.each([".", "tests"])(
+    "rejects an E2E spec inside public frontend directory %s",
+    async (frontendDirectory) => {
+      const directory = await e2eFixture(validE2eSource);
+      await writeManifest(
+        directory,
+        `
+frontend:
+  directory: ${frontendDirectory}
+  spa: true
+runtime:
+  sdk:
+    version: 2.0.0
+`,
+      );
+
+      await expect(buildBundle(directory)).rejects.toThrow(
+        /must stay outside frontend\.directory/,
+      );
+    },
+  );
+
+  it("rejects a spec over the bounded source size", async () => {
+    const oversized = `${validE2eSource}\n/*${"x".repeat(OPEN_CLOUD_E2E_TEST_MAX_BYTES)}*/`;
+    const directory = await e2eFixture(oversized);
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      new RegExp(`exceeds ${OPEN_CLOUD_E2E_TEST_MAX_BYTES} bytes`),
+    );
+  });
+
+  it.each([
+    [
+      "a package subpath",
+      'import { test } from "@opencloud/test/fixtures";\ntest("flow", async () => {});\n',
+    ],
+    [
+      "an unrelated package",
+      'import { test } from "@playwright/test";\ntest("flow", async () => {});\n',
+    ],
+    [
+      "a default import",
+      'import test from "@opencloud/test";\ntest("flow", async () => {});\n',
+    ],
+    [
+      "a second import",
+      'import { test, expect } from "@opencloud/test";\nimport value from "./helper.js";\ntest("flow", async () => expect(value));\n',
+    ],
+  ])("rejects %s instead of the exact test import", async (_label, source) => {
+    const directory = await e2eFixture(source);
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /exactly one named import from "@opencloud\/test"/,
+    );
+  });
+
+  it("requires the named test import", async () => {
+    const directory = await e2eFixture(
+      'import { expect } from "@opencloud/test";\nexpect(true).toBe(true);\n',
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /must import exactly test and expect from "@opencloud\/test"/,
+    );
+  });
+
+  it("requires at least one test declaration", async () => {
+    const directory = await e2eFixture(
+      'import { test, expect } from "@opencloud/test";\ntest.describe("items", () => expect(items));\n',
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /must declare at least one test/,
+    );
+  });
+
+  it.each([
+    ["test.skip", "test.skip"],
+    ["test.only", "test.only"],
+    ["test.describe.skip", "test.describe.skip"],
+    ["test.describe.only", "test.describe.only"],
+  ])("rejects %s", async (_label, call) => {
+    const directory = await e2eFixture(
+      `import { test, expect } from "@opencloud/test";\n${call}("flow", async () => expect(true));\ntest("required", async () => expect(true));\n`,
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /cannot use skip or only/,
+    );
+  });
+
+  it.each([
+    ["fetch", "await fetch('/items')"],
+    ["XMLHttpRequest", "new XMLHttpRequest()"],
+    ["browser evaluation", "await ownerPage.evaluate(() => true)"],
+    [
+      "locator evaluation",
+      "await ownerPage.locator('main').evaluateAll(() => [])",
+    ],
+    ["network routing", "await ownerPage.route('**/*', () => {})"],
+    ["direct navigation", "await ownerPage.goto('https://example.test')"],
+    ["request context", "await request.get('/items')"],
+    ["backend route", 'const backend = "/rest/v1/items"'],
+  ])("rejects direct %s access", async (_label, expression) => {
+    const directory = await e2eFixture(
+      `import { test, expect } from "@opencloud/test";\ntest("flow", async ({ ownerPage, request }) => { ${expression}; expect(ownerPage); });\n`,
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /cannot (?:use|access)/,
+    );
+  });
+});
+
+async function e2eFixture(source?: string): Promise<string> {
+  const directory = await temporaryDirectory();
+  await mkdir(path.join(directory, "frontend"), { recursive: true });
+  await Promise.all([
+    writeManifest(
+      directory,
+      `
+frontend:
+  directory: frontend
+  spa: true
+runtime:
+  sdk:
+    version: 2.0.0
+`,
+    ),
+    writeFile(
+      path.join(directory, "frontend/index.html"),
+      "<!doctype html><title>Test</title>",
+    ),
+  ]);
+  if (source !== undefined) {
+    await mkdir(path.join(directory, "tests"), { recursive: true });
+    await writeFile(path.join(directory, OPEN_CLOUD_E2E_TEST_PATH), source);
+  }
+  return directory;
+}
