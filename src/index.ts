@@ -26,6 +26,12 @@ import { CredentialStore } from "./credential-store.js";
 import { doctorDiagnostics } from "./doctor.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
 import {
+  collectOption,
+  devEmailCaptureLimit,
+  devEmailInjectionRequest,
+  emailHistoryQuery,
+} from "./email.js";
+import {
   deleteSession,
   loadSession,
   resolveSessionFile,
@@ -41,7 +47,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "3.0.1";
+const CLI_VERSION = "3.1.0";
 
 const program = new Command()
   .name("opencloud")
@@ -961,6 +967,48 @@ app
     });
   });
 
+const email = app
+  .command("email")
+  .description("Inspect retained application email");
+
+email
+  .command("list")
+  .description("List declared addresses and retained email message metadata")
+  .argument("<app-id>")
+  .option("--cursor <cursor>", "opaque cursor from the previous page")
+  .option("--limit <number>", "maximum records", "100")
+  .option("--alias <alias>", "filter by a manifest-declared alias")
+  .addOption(
+    new Option("--direction <direction>", "filter by message direction").choices([
+      "inbound",
+      "outbound",
+    ]),
+  )
+  .option("--from <iso>", "messages created at or after this ISO timestamp")
+  .option("--to <iso>", "messages created at or before this ISO timestamp")
+  .action(async (appId, options) => {
+    output(
+      await (await managementClient()).call("getAppEmail", {
+        appId: String(appId),
+        query: emailHistoryQuery(options),
+      }),
+    );
+  });
+
+email
+  .command("get")
+  .description("Get one retained email message, including available content")
+  .argument("<app-id>")
+  .argument("<message-id>")
+  .action(async (appId, messageId) => {
+    output(
+      await (await managementClient()).call("getAppEmailMessage", {
+        appId: String(appId),
+        messageId: String(messageId),
+      }),
+    );
+  });
+
 const dev = app
   .command("dev")
   .description(
@@ -1097,6 +1145,107 @@ dev
     });
     output(
       await client().call("mutateDevData", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        body,
+      }),
+    );
+  });
+
+const devEmail = dev
+  .command("email")
+  .description("Inspect captured mail or inject synthetic inbound dev email");
+
+devEmail
+  .command("list")
+  .description("List outbound email captured from the active dev session")
+  .argument("[directory]", "app source directory", ".")
+  .option("--limit <number>", "maximum records", "100")
+  .action(async (directory, options) => {
+    const state = await requireDevState(callerPath(directory));
+    output(
+      await client().call("listDevEmailCaptures", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        query: { limit: devEmailCaptureLimit(options.limit) },
+      }),
+    );
+  });
+
+devEmail
+  .command("get")
+  .description("Get one captured dev email body and attachment metadata")
+  .argument("<directory>", "app source directory")
+  .argument("<message-id>")
+  .action(async (directory, messageId) => {
+    const state = await requireDevState(callerPath(directory));
+    output(
+      await client().call("getDevEmailCapture", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        messageId: String(messageId),
+      }),
+    );
+  });
+
+devEmail
+  .command("inject")
+  .description(
+    "Inject a synthetic .test message into a receive-capable dev alias",
+  )
+  .argument("<directory>", "app source directory")
+  .requiredOption("--to <alias>", "receive-capable manifest alias")
+  .requiredOption("--from <address>", "reserved .test sender address")
+  .option("--from-name <name>", "synthetic sender display name")
+  .option("--subject <subject>")
+  .addOption(
+    new Option("--text <text>", "plain-text body").conflicts("textFile"),
+  )
+  .addOption(
+    new Option("--text-file <path>", "read the plain-text body from a file").conflicts(
+      "text",
+    ),
+  )
+  .addOption(new Option("--html <html>", "HTML body").conflicts("htmlFile"))
+  .addOption(
+    new Option("--html-file <path>", "read the HTML body from a file").conflicts(
+      "html",
+    ),
+  )
+  .option("--reply-to <address>", "reserved .test reply-to address")
+  .option(
+    "--header <header>",
+    "repeatable raw test header without line breaks",
+    collectOption,
+    [],
+  )
+  .option(
+    "--attachment <path>",
+    "repeatable attachment path relative to the app directory",
+    collectOption,
+    [],
+  )
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const body = await devEmailInjectionRequest(
+      {
+        to: String(options.to),
+        from: String(options.from),
+        fromName: options.fromName,
+        subject: options.subject,
+        text: options.text,
+        textFile: options.textFile,
+        html: options.html,
+        htmlFile: options.htmlFile,
+        replyTo: options.replyTo,
+        headers: options.header,
+        attachments: options.attachment,
+      },
+      (value) => path.resolve(sourceRoot, value),
+    );
+    output(
+      await client().call("injectDevEmail", {
         appId: state.appId,
         sessionId: state.sessionId,
         body,

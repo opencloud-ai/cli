@@ -58,6 +58,18 @@ const secretNameSchema = z
     "secret uses a reserved OpenCloud runtime prefix",
   );
 
+export const emailAddressSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(30)
+      .regex(/^[a-z][a-z0-9-]*$/, "email address names must be lowercase aliases"),
+    displayName: z.string().trim().min(1).max(120).optional(),
+    function: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/).optional(),
+  })
+  .strict();
+
 export const customMetricNameSchema = z
   .string()
   .min(1)
@@ -148,6 +160,12 @@ export const openCloudManifestSchema = z
     migrations: z.array(migrationSchema).max(500).default([]),
     functions: z.array(functionSchema).max(100).default([]),
     cron: z.array(cronSchema).max(100).default([]),
+    email: z
+      .object({
+        addresses: z.array(emailAddressSchema).max(25).default([]),
+      })
+      .strict()
+      .default({ addresses: [] }),
     health: z
       .object({ path: z.string().startsWith("/").max(200).default("/") })
       .strict()
@@ -173,6 +191,7 @@ export const openCloudManifestSchema = z
         | "migrations"
         | "functions"
         | "cron"
+        | "email"
         | "observability",
     ) => {
       const seen = new Set<string>();
@@ -196,6 +215,10 @@ export const openCloudManifestSchema = z
       "functions",
     );
     assertUnique(manifest.cron.map((cron) => cron.name), "cron");
+    assertUnique(
+      manifest.email.addresses.map((address) => address.name),
+      "email",
+    );
     assertUnique(
       (manifest.observability?.metrics ?? []).map((metric) => metric.name),
       "observability",
@@ -244,6 +267,26 @@ export const openCloudManifestSchema = z
         });
       }
     });
+    manifest.email.addresses.forEach((address, index) => {
+      if (!address.function) return;
+      const target = manifest.functions.find(
+        (definition) => definition.name === address.function,
+      );
+      if (!target) {
+        context.addIssue({
+          code: "custom",
+          path: ["email", "addresses", index, "function"],
+          message: `email address references unknown function: ${address.function}`,
+        });
+      } else if (target.access !== "system") {
+        context.addIssue({
+          code: "custom",
+          path: ["email", "addresses", index, "function"],
+          message:
+            `email function ${address.function} must declare access: system`,
+        });
+      }
+    });
   });
 
 export type OpenCloudManifest = z.infer<typeof openCloudManifestSchema>;
@@ -252,6 +295,7 @@ export type FilesAccess = z.infer<typeof filesAccessSchema>;
 export type FunctionAccess = z.infer<typeof functionAccessSchema>;
 export type SecretMode = z.infer<typeof secretModeSchema>;
 export type SdkVersion = z.infer<typeof sdkVersionSchema>;
+export type OpenCloudEmailAddress = z.infer<typeof emailAddressSchema>;
 export type CustomMetricDefinition = z.infer<
   typeof customMetricDefinitionSchema
 >;

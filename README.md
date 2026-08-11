@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.0.1` in
+OpenCloud application skills pin an exact CLI release. To install `v3.1.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.0.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.0.1.tgz"
+OPENCLOUD_CLI_VERSION="v3.1.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.1.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -167,6 +167,11 @@ Use the stable capability preview and isolated migration-replayed database befor
   --values '{"title":"Preview item"}'
 "$OPENCLOUD_CLI" app dev data . items updateById \
   --id "$ITEM_ID" --values '{"title":"Updated preview item"}'
+"$OPENCLOUD_CLI" app dev email inject . \
+  --to support --from customer@example.test \
+  --subject "Test request" --text "Please acknowledge this message."
+"$OPENCLOUD_CLI" app dev email list .
+"$OPENCLOUD_CLI" app dev email get . "$MESSAGE_ID"
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
 "$OPENCLOUD_CLI" app dev verify . --parallelism 5
@@ -192,6 +197,24 @@ follows the durable production operation, runs feature-aware production
 verification, prints the live HTTPS URL, and removes the dev environment only
 after success. If deployment or verification fails, dev remains available for
 repair.
+
+## Application email
+
+Inspect retained production message metadata with cursor, alias, direction,
+and date filters, then fetch one authorized message's normalized text/HTML,
+safe headers, and attachment metadata:
+
+```bash
+"$OPENCLOUD_CLI" app email list "$APP_ID" \
+  --alias support --direction inbound --limit 25
+"$OPENCLOUD_CLI" app email get "$APP_ID" "$MESSAGE_ID"
+```
+
+Pass the returned `nextCursor` back through `--cursor` for the next page. Raw
+MIME and attachment bytes are never returned. Development Function sends are
+captured instead of delivered; `app dev email inject` accepts only reserved
+`.test` sender and Reply-To addresses, and body/attachment file paths resolve
+relative to the app directory.
 
 ## Agent Feed and alert rules
 

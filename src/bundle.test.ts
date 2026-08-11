@@ -58,7 +58,7 @@ describe("bundle builder", () => {
     );
     await writeFile(
       path.join(root, "functions", "process", "index.ts"),
-      "import './shared.ts';",
+      'import { defineFunction, schema } from "@opencloud/server"; import "./shared.ts"; export default defineFunction({ input: schema.object({}), handler: () => ({ ok: true }) });',
     );
     await writeFile(
       path.join(root, "functions", "process", "shared.ts"),
