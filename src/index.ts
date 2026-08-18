@@ -21,7 +21,11 @@ import {
   openBrowser,
   revokeAccountCredential,
 } from "./account-auth.js";
-import { buildBundle, OPEN_CLOUD_E2E_TEST_PATH } from "./bundle.js";
+import {
+  buildBundle,
+  OPEN_CLOUD_E2E_TEST_PATH,
+  serializeBundleManifest,
+} from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
 import { doctorDiagnostics } from "./doctor.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
@@ -115,7 +119,9 @@ function client(): OpenCloudClient {
   const apiUrl = options.apiUrl ?? binding?.apiUrl ?? legacy?.apiUrl;
   if (options.token) {
     if (!apiUrl) {
-      throw new Error("Pass --api-url with --token outside a connected workspace.");
+      throw new Error(
+        "Pass --api-url with --token outside a connected workspace.",
+      );
     }
     return new OpenCloudClient({ apiUrl, token: options.token });
   }
@@ -338,7 +344,7 @@ async function synchronizeValidatedDraft(
   for (const file of bundle.files) {
     const content =
       file === "opencloud.json"
-        ? Buffer.from(`${JSON.stringify(bundle.manifest, null, 2)}\n`)
+        ? Buffer.from(serializeBundleManifest(bundle.manifest))
         : await readFile(path.join(sourceRoot, ...file.split("/")));
     local.set(file, {
       content,
@@ -547,9 +553,10 @@ program
     process.stderr.write(
       `Open this URL to approve the CLI:\n${authorization.verificationUriComplete}\n`,
     );
-    const browserOpened = options.browser !== false
-      ? openBrowser(authorization.verificationUriComplete)
-      : false;
+    const browserOpened =
+      options.browser !== false
+        ? openBrowser(authorization.verificationUriComplete)
+        : false;
     const account = await completeDeviceAuthorization(authorization);
     const stored = await credentialStore.saveAccount(account);
     output({
@@ -652,7 +659,7 @@ async function logout(): Promise<void> {
     currentWorkspaceCredentialRemoved: Boolean(binding),
     workspaceBindingRetained: binding ? workspaceFile() : null,
     legacyOnboardingSessionRemoved: legacyOnboardingSessionRemoved
-      ? legacyOnboardingSession?.state ?? true
+      ? (legacyOnboardingSession?.state ?? true)
       : false,
     next: binding
       ? "The non-secret app binding remains. Run opencloud login to reconnect it later."
@@ -660,8 +667,14 @@ async function logout(): Promise<void> {
   });
 }
 
-auth.command("logout").description("Revoke and clear the CLI login").action(logout);
-program.command("logout").description("Revoke and clear the CLI login").action(logout);
+auth
+  .command("logout")
+  .description("Revoke and clear the CLI login")
+  .action(logout);
+program
+  .command("logout")
+  .description("Revoke and clear the CLI login")
+  .action(logout);
 
 program
   .command("onboard")
@@ -772,7 +785,9 @@ program
 
 program
   .command("doctor")
-  .description("Print redacted CLI, identity, endpoint, and platform diagnostics")
+  .description(
+    "Print redacted CLI, identity, endpoint, and platform diagnostics",
+  )
   .action(async () => {
     const options = program.opts<{ apiUrl?: string; token?: string }>();
     const file = sessionFile();
@@ -813,7 +828,7 @@ program
               : stored
                 ? "session-file"
                 : "none",
-        sessionState: binding ? "connected" : stored?.state ?? null,
+        sessionState: binding ? "connected" : (stored?.state ?? null),
         appId:
           binding?.appId ?? (stored?.state === "ready" ? stored.appId : null),
         credentialExpiresAt:
@@ -845,7 +860,9 @@ app
   .option("--idempotency-key <key>")
   .action(async (options) => {
     output(
-      await (await managementClient()).call(
+      await (
+        await managementClient()
+      ).call(
         "createApp",
         {
           body: {
@@ -866,17 +883,13 @@ app
 app
   .command("list")
   .description("List apps available to the signed-in account")
-  .action(async () =>
-    output(await (await managementClient()).get("/v1/apps")),
-  );
+  .action(async () => output(await (await managementClient()).get("/v1/apps")));
 
 app
   .command("get")
   .argument("<app-id>")
   .action(async (appId) =>
-    output(
-      await (await managementClient()).get(`/v1/apps/${appId}`),
-    ),
+    output(await (await managementClient()).get(`/v1/apps/${appId}`)),
   );
 
 app
@@ -924,11 +937,7 @@ app
       version?: string;
       sdkVersion?: string;
     };
-    if (
-      !deployment.id ||
-      !deployment.version ||
-      !deployment.sdkVersion
-    ) {
+    if (!deployment.id || !deployment.version || !deployment.sdkVersion) {
       throw new Error(
         "The active deployment does not expose an OpenCloud SDK pin",
       );
@@ -980,16 +989,18 @@ email
   .option("--limit <number>", "maximum records", "100")
   .option("--alias <alias>", "filter by a manifest-declared alias")
   .addOption(
-    new Option("--direction <direction>", "filter by message direction").choices([
-      "inbound",
-      "outbound",
-    ]),
+    new Option(
+      "--direction <direction>",
+      "filter by message direction",
+    ).choices(["inbound", "outbound"]),
   )
   .option("--from <iso>", "messages created at or after this ISO timestamp")
   .option("--to <iso>", "messages created at or before this ISO timestamp")
   .action(async (appId, options) => {
     output(
-      await (await managementClient()).call("getAppEmail", {
+      await (
+        await managementClient()
+      ).call("getAppEmail", {
         appId: String(appId),
         query: emailHistoryQuery(options),
       }),
@@ -1003,7 +1014,9 @@ email
   .argument("<message-id>")
   .action(async (appId, messageId) => {
     output(
-      await (await managementClient()).call("getAppEmailMessage", {
+      await (
+        await managementClient()
+      ).call("getAppEmailMessage", {
         appId: String(appId),
         messageId: String(messageId),
       }),
@@ -1141,8 +1154,7 @@ dev
     const state = await requireDevState(callerPath(directory));
     const body = devDataRequest(String(table), action as DevDataAction, {
       id: options.id === undefined ? undefined : String(options.id),
-      values:
-        options.values === undefined ? undefined : String(options.values),
+      values: options.values === undefined ? undefined : String(options.values),
     });
     output(
       await client().call("mutateDevData", {
@@ -1203,15 +1215,17 @@ devEmail
     new Option("--text <text>", "plain-text body").conflicts("textFile"),
   )
   .addOption(
-    new Option("--text-file <path>", "read the plain-text body from a file").conflicts(
-      "text",
-    ),
+    new Option(
+      "--text-file <path>",
+      "read the plain-text body from a file",
+    ).conflicts("text"),
   )
   .addOption(new Option("--html <html>", "HTML body").conflicts("htmlFile"))
   .addOption(
-    new Option("--html-file <path>", "read the HTML body from a file").conflicts(
-      "html",
-    ),
+    new Option(
+      "--html-file <path>",
+      "read the HTML body from a file",
+    ).conflicts("html"),
   )
   .option("--reply-to <address>", "reserved .test reply-to address")
   .option(
@@ -1300,7 +1314,9 @@ dev
 
 dev
   .command("receipts")
-  .description("List exact-revision verification evidence, even after dev stops")
+  .description(
+    "List exact-revision verification evidence, even after dev stops",
+  )
   .argument("[directory]", "app source directory", ".")
   .option("--limit <number>", "maximum records", "50")
   .action(async (directory, options) => {
@@ -1754,7 +1770,7 @@ program
     for (const file of bundle.files) {
       const content =
         file === "opencloud.json"
-          ? Buffer.from(`${JSON.stringify(bundle.manifest, null, 2)}\n`)
+          ? Buffer.from(serializeBundleManifest(bundle.manifest))
           : await readFile(path.join(sourceRoot, ...file.split("/")));
       changes.push({
         path: file,
@@ -1997,9 +2013,7 @@ jobs
   .action(async (appId, options) => {
     const query = backgroundJobsQuery(options);
     output(
-      await client().get(
-        `/v1/apps/${encodeURIComponent(appId)}/jobs?${query}`,
-      ),
+      await client().get(`/v1/apps/${encodeURIComponent(appId)}/jobs?${query}`),
     );
   });
 
@@ -2017,9 +2031,7 @@ const secret = program
 
 secret
   .command("rotate")
-  .description(
-    "Rotate a manifest-generated secret without returning its value",
-  )
+  .description("Rotate a manifest-generated secret without returning its value")
   .argument("<app-id>")
   .argument("<name>")
   .option("--bytes <number>", "random byte count", "32")

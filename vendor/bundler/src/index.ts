@@ -47,6 +47,7 @@ interface AuthorManifest {
   email?: unknown;
   health?: unknown;
   secrets?: Record<string, unknown>;
+  integrations?: Record<string, unknown>;
 }
 
 export interface BuiltBundle {
@@ -77,6 +78,19 @@ export interface BundleWarning {
 
 export interface BundleOptions {
   version?: string;
+}
+
+export function serializeBundleManifest(manifest: OpenCloudManifest): string {
+  const archiveManifest: Partial<OpenCloudManifest> = { ...manifest };
+  // Queue-free schema-2 apps keep the archive shape accepted by older
+  // platform releases while declared queues remain canonical bundle input.
+  if (manifest.queues.length === 0) delete archiveManifest.queues;
+  // Integration-free apps likewise retain the archive shape accepted by
+  // platform releases that predate declarative provider bindings.
+  if (Object.keys(manifest.integrations).length === 0) {
+    delete archiveManifest.integrations;
+  }
+  return `${JSON.stringify(archiveManifest, null, 2)}\n`;
 }
 
 interface BundleSelection {
@@ -183,13 +197,9 @@ export async function buildBundle(
       await copyFile(sourceFile, destination);
       await chmod(destination, 0o644);
     }
-    const archiveManifest: Partial<OpenCloudManifest> = { ...manifest };
-    // Queue-free schema-2 apps keep the archive shape accepted by older
-    // platform releases while declared queues remain canonical bundle input.
-    if (manifest.queues.length === 0) delete archiveManifest.queues;
     await writeFile(
       path.join(staging, "opencloud.json"),
-      `${JSON.stringify(archiveManifest, null, 2)}\n`,
+      serializeBundleManifest(manifest),
       { flag: "wx", mode: 0o644 },
     );
 
@@ -227,9 +237,7 @@ export async function buildBundle(
   }
 }
 
-export function assertE2eTestOutsideFrontend(
-  frontendDirectory: string,
-): void {
+export function assertE2eTestOutsideFrontend(frontendDirectory: string): void {
   const relative = path.posix.relative(
     frontendDirectory,
     OPEN_CLOUD_E2E_TEST_PATH,

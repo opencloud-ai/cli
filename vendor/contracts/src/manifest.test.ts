@@ -28,6 +28,12 @@ describe("OpenCloud manifest", () => {
     expect(parseManifest(valid)).not.toHaveProperty("files");
   });
 
+  it("preserves the canonical shape when email is not declared", () => {
+    const { email, ...withoutEmail } = valid;
+    expect(email).toEqual({ addresses: [] });
+    expect(parseManifest(withoutEmail)).not.toHaveProperty("email");
+  });
+
   it("enables files only when declared and defaults to user isolation", () => {
     expect(
       parseManifest({
@@ -87,7 +93,11 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         functions: [
-          { name: "old", entrypoint: "functions/old/index.ts", verifyJwt: true },
+          {
+            name: "old",
+            entrypoint: "functions/old/index.ts",
+            verifyJwt: true,
+          },
         ],
       }),
     ).toThrow(/verifyJwt with access/);
@@ -101,7 +111,11 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         functions: [
-          { name: "tick", entrypoint: "functions/tick/index.ts", acess: "user" },
+          {
+            name: "tick",
+            entrypoint: "functions/tick/index.ts",
+            acess: "user",
+          },
         ],
       }),
     ).toThrow(/Unrecognized key/);
@@ -220,7 +234,11 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         functions: [
-          { name: "tick", entrypoint: "functions/tick/index.ts", access: "user" },
+          {
+            name: "tick",
+            entrypoint: "functions/tick/index.ts",
+            access: "user",
+          },
         ],
         cron: [
           {
@@ -236,7 +254,11 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         functions: [
-          { name: "tick", entrypoint: "functions/tick/index.ts", access: "system" },
+          {
+            name: "tick",
+            entrypoint: "functions/tick/index.ts",
+            access: "system",
+          },
         ],
         cron: [
           {
@@ -351,6 +373,524 @@ describe("OpenCloud manifest", () => {
     });
   });
 
+  it("declares Google Calendar integration slots with one or many bindings", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        integrations: {
+          calendar: {
+            provider: "google-calendar",
+            account: "app",
+            capabilities: ["calendar.events.create"],
+          },
+          team_calendars: {
+            provider: "google-calendar",
+            account: "calling_user",
+            cardinality: "many",
+            capabilities: ["calendar.events.read"],
+          },
+        },
+      }).integrations,
+    ).toEqual({
+      calendar: {
+        provider: "google-calendar",
+        account: "app",
+        cardinality: "one",
+        capabilities: ["calendar.events.create"],
+      },
+      team_calendars: {
+        provider: "google-calendar",
+        account: "calling_user",
+        cardinality: "many",
+        capabilities: ["calendar.events.read"],
+      },
+    });
+  });
+
+  it("declares provider-scoped Google Workspace integrations", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        integrations: {
+          drive: {
+            provider: "google-drive",
+            account: "app",
+            capabilities: ["drive.files.read", "drive.files.write"],
+          },
+          sheets: {
+            provider: "google-sheets",
+            account: "calling_user",
+            cardinality: "many",
+            capabilities: [
+              "sheets.spreadsheets.read",
+              "sheets.spreadsheets.write",
+            ],
+          },
+          docs: {
+            provider: "google-docs",
+            account: "calling_user",
+            capabilities: ["docs.documents.read", "docs.documents.write"],
+          },
+          slides: {
+            provider: "google-slides",
+            account: "calling_user",
+            capabilities: [
+              "slides.presentations.read",
+              "slides.presentations.write",
+            ],
+          },
+        },
+      }).integrations,
+    ).toMatchObject({
+      drive: { provider: "google-drive", cardinality: "one" },
+      sheets: { provider: "google-sheets", cardinality: "many" },
+      docs: { provider: "google-docs", cardinality: "one" },
+      slides: { provider: "google-slides", cardinality: "one" },
+    });
+  });
+
+  it("rejects capabilities declared under the wrong Google provider", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          drive: {
+            provider: "google-drive",
+            account: "app",
+            capabilities: ["docs.documents.read"],
+          },
+        },
+      }),
+    ).toThrow(/not supported by google-drive/);
+  });
+
+  it("declares app-owned HubSpot CRM access and bounds associations", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        integrations: {
+          crm: {
+            provider: "hubspot-crm",
+            account: "app",
+            capabilities: [
+              "crm.contacts.read",
+              "crm.contacts.write",
+              "crm.notes.write",
+              "crm.associations.write",
+            ],
+          },
+        },
+      }).integrations.crm,
+    ).toEqual({
+      provider: "hubspot-crm",
+      account: "app",
+      cardinality: "one",
+      capabilities: [
+        "crm.contacts.read",
+        "crm.contacts.write",
+        "crm.notes.write",
+        "crm.associations.write",
+      ],
+    });
+
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          crm: {
+            provider: "hubspot-crm",
+            account: "calling_user",
+            capabilities: ["crm.contacts.read"],
+          },
+        },
+      }),
+    ).toThrow(/hubspot-crm integrations must use the app account/);
+
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          crm: {
+            provider: "hubspot-crm",
+            account: "app",
+            capabilities: ["crm.associations.write"],
+          },
+        },
+      }),
+    ).toThrow(/requires at least one CRM record write capability/);
+  });
+
+  it("declares provider-scoped GoCardless Bank Account Data access", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        integrations: {
+          bank: {
+            provider: "gocardless-bank-account-data",
+            account: "calling_user",
+            cardinality: "many",
+            capabilities: [
+              "bank.accounts.read",
+              "bank.balances.read",
+              "bank.transactions.read",
+            ],
+          },
+        },
+      }).integrations.bank,
+    ).toEqual({
+      provider: "gocardless-bank-account-data",
+      account: "calling_user",
+      cardinality: "many",
+      capabilities: [
+        "bank.accounts.read",
+        "bank.balances.read",
+        "bank.transactions.read",
+      ],
+    });
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          bank: {
+            provider: "gocardless-bank-account-data",
+            account: "calling_user",
+            capabilities: ["calendar.events.read"],
+          },
+        },
+      }),
+    ).toThrow(/not supported by gocardless-bank-account-data/);
+  });
+
+  it("declares app-owned Wise payment reconciliation", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        integrations: {
+          payments: {
+            provider: "wise-balance-webhook",
+            account: "app",
+            capabilities: ["payments.received.reconcile"],
+          },
+        },
+      }).integrations.payments,
+    ).toEqual({
+      provider: "wise-balance-webhook",
+      account: "app",
+      cardinality: "one",
+      capabilities: ["payments.received.reconcile"],
+    });
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          payments: {
+            provider: "wise-balance-webhook",
+            account: "calling_user",
+            capabilities: ["payments.received.reconcile"],
+          },
+        },
+      }),
+    ).toThrow(/must use the app account/);
+  });
+
+  it("declares app-owned Slack messaging with an exact system handler", () => {
+    const parsed = parseManifest({
+      ...valid,
+      functions: [
+        {
+          name: "receive-slack-message",
+          entrypoint: "functions/receive-slack-message/index.ts",
+          access: "system",
+        },
+      ],
+      integrations: {
+        team_chat: {
+          provider: "slack",
+          account: "app",
+          cardinality: "many",
+          capabilities: ["slack.messages.send", "slack.messages.receive"],
+          events: {
+            message: { function: "receive-slack-message" },
+          },
+        },
+      },
+    });
+
+    expect(parsed.integrations.team_chat).toEqual({
+      provider: "slack",
+      account: "app",
+      cardinality: "many",
+      capabilities: ["slack.messages.send", "slack.messages.receive"],
+      events: {
+        message: { function: "receive-slack-message" },
+      },
+    });
+  });
+
+  it("rejects ambiguous or non-system Slack message handlers", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          chat: {
+            provider: "slack",
+            account: "app",
+            capabilities: ["slack.messages.receive"],
+          },
+        },
+      }),
+    ).toThrow(/requires an events.message system Function/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions: [
+          {
+            name: "receive-chat",
+            entrypoint: "functions/receive-chat/index.ts",
+            access: "user",
+          },
+        ],
+        integrations: {
+          chat: {
+            provider: "slack",
+            account: "calling_user",
+            capabilities: ["slack.messages.receive"],
+            events: { message: { function: "receive-chat" } },
+          },
+        },
+      }),
+    ).toThrow(/must use the app account|must declare access: system/);
+  });
+
+  it("declares app-owned Telegram messaging with an exact system handler", () => {
+    const parsed = parseManifest({
+      ...valid,
+      functions: [
+        {
+          name: "receive-telegram-message",
+          entrypoint: "functions/receive-telegram-message/index.ts",
+          access: "system",
+        },
+      ],
+      integrations: {
+        team_chat: {
+          provider: "telegram",
+          account: "app",
+          capabilities: ["telegram.messages.send", "telegram.messages.receive"],
+          events: {
+            message: { function: "receive-telegram-message" },
+          },
+        },
+      },
+    });
+
+    expect(parsed.integrations.team_chat).toEqual({
+      provider: "telegram",
+      account: "app",
+      cardinality: "one",
+      capabilities: ["telegram.messages.send", "telegram.messages.receive"],
+      events: {
+        message: { function: "receive-telegram-message" },
+      },
+    });
+  });
+
+  it("rejects ambiguous or non-system Telegram message handlers", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          chat: {
+            provider: "telegram",
+            account: "app",
+            capabilities: ["telegram.messages.receive"],
+          },
+        },
+      }),
+    ).toThrow(/requires an events.message system Function/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions: [
+          {
+            name: "receive-chat",
+            entrypoint: "functions/receive-chat/index.ts",
+            access: "user",
+          },
+        ],
+        integrations: {
+          chat: {
+            provider: "telegram",
+            account: "calling_user",
+            capabilities: ["telegram.messages.receive"],
+            events: { message: { function: "receive-chat" } },
+          },
+        },
+      }),
+    ).toThrow(/must use the app account|must declare access: system/);
+  });
+
+  it("declares project-contained Asana access and a system event handler", () => {
+    const manifest = parseManifest({
+      ...valid,
+      functions: [
+        {
+          name: "asana-events",
+          entrypoint: "functions/asana-events/index.ts",
+          access: "system",
+        },
+      ],
+      integrations: {
+        work: {
+          provider: "asana",
+          account: "app",
+          capabilities: [
+            "asana.tasks.read",
+            "asana.tasks.update",
+            "asana.assignees.write",
+            "asana.sections.read",
+            "asana.sections.move_tasks",
+            "asana.custom_fields.read",
+            "asana.custom_field_values.write",
+            "asana.attachments.read",
+            "asana.attachments.write",
+            "asana.events.receive",
+          ],
+          events: { function: "asana-events" },
+        },
+      },
+    });
+
+    expect(manifest.integrations.work).toMatchObject({
+      provider: "asana",
+      account: "app",
+      cardinality: "one",
+      events: { function: "asana-events" },
+    });
+  });
+
+  it("requires Asana events to be app-owned, readable, and handled by a system Function", () => {
+    const integration = {
+      provider: "asana",
+      account: "app",
+      capabilities: ["asana.tasks.read", "asana.events.receive"],
+      events: { function: "asana-events" },
+    };
+    const functions = [
+      {
+        name: "asana-events",
+        entrypoint: "functions/asana-events/index.ts",
+        access: "system",
+      },
+    ];
+
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions,
+        integrations: {
+          work: { ...integration, account: "calling_user" },
+        },
+      }),
+    ).toThrow(/must use the app account/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions,
+        integrations: {
+          work: {
+            ...integration,
+            capabilities: ["asana.events.receive"],
+          },
+        },
+      }),
+    ).toThrow(/requires asana.tasks.read/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions: [{ ...functions[0], access: "user" }],
+        integrations: { work: integration },
+      }),
+    ).toThrow(/must declare access: system/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions,
+        integrations: {
+          work: {
+            ...integration,
+            capabilities: ["asana.tasks.read"],
+          },
+        },
+      }),
+    ).toThrow(/requires asana.events.receive/);
+  });
+
+  it("requires task read access for Asana mutations that return current task state", () => {
+    for (const capability of [
+      "asana.tasks.create",
+      "asana.tasks.update",
+      "asana.assignees.write",
+      "asana.sections.move_tasks",
+      "asana.custom_field_values.write",
+    ]) {
+      expect(() =>
+        parseManifest({
+          ...valid,
+          integrations: {
+            work: {
+              provider: "asana",
+              account: "app",
+              capabilities: [capability],
+            },
+          },
+        }),
+      ).toThrow(/requires asana.tasks.read/);
+    }
+  });
+
+  it("rejects unknown providers, capabilities, and duplicate capabilities", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          calendar: {
+            provider: "raw-google-api",
+            account: "app",
+            cardinality: "one",
+            capabilities: ["calendar.events.read"],
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          calendar: {
+            provider: "google-calendar",
+            account: "app",
+            cardinality: "one",
+            capabilities: ["calendar.events.delete"],
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          calendar: {
+            provider: "google-calendar",
+            account: "app",
+            cardinality: "one",
+            capabilities: ["calendar.events.read", "calendar.events.read"],
+          },
+        },
+      }),
+    ).toThrow(/must be unique/);
+  });
+
   it("rejects legacy requiredSecrets with direct migration guidance", () => {
     expect(() =>
       parseManifest({ ...valid, requiredSecrets: ["SIGNING_SECRET"] }),
@@ -386,8 +926,8 @@ describe("OpenCloud manifest", () => {
         ],
       },
     });
-    expect(manifest.email.addresses).toHaveLength(2);
-    expect(manifest.email.addresses[0]?.function).toBe("receive-support");
+    expect(manifest.email?.addresses).toHaveLength(2);
+    expect(manifest.email?.addresses[0]?.function).toBe("receive-support");
   });
 
   it("rejects duplicate email aliases and unknown inbound handlers", () => {
@@ -416,9 +956,7 @@ describe("OpenCloud manifest", () => {
           },
         ],
         email: {
-          addresses: [
-            { name: "support", function: "receive-support" },
-          ],
+          addresses: [{ name: "support", function: "receive-support" }],
         },
       }),
     ).toThrow(/must declare access: system/);
@@ -445,7 +983,11 @@ describe("OpenCloud manifest", () => {
       parseManifest({
         ...valid,
         functions: [
-          { name: "tick", entrypoint: "functions/tick/index.ts", access: "system" },
+          {
+            name: "tick",
+            entrypoint: "functions/tick/index.ts",
+            access: "system",
+          },
         ],
         cron: [
           {
