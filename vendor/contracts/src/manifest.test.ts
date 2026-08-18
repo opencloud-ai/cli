@@ -16,6 +16,7 @@ const valid = {
   ],
   functions: [],
   cron: [],
+  queues: [],
   email: { addresses: [] },
   health: { path: "/" },
   secrets: {},
@@ -247,6 +248,90 @@ describe("OpenCloud manifest", () => {
         ],
       }).functions[0]?.access,
     ).toBe("system");
+  });
+
+  it("declares bounded queues with system Function consumers", () => {
+    const manifest = parseManifest({
+      ...valid,
+      functions: [
+        {
+          name: "process-document",
+          entrypoint: "functions/process-document/index.ts",
+          access: "system",
+        },
+      ],
+      queues: [
+        {
+          name: "document-processing",
+          function: "process-document",
+          concurrency: 4,
+          maxAttempts: 5,
+          retryDelaySeconds: 10,
+          timeoutSeconds: 120,
+        },
+      ],
+    });
+
+    expect(manifest.queues).toEqual([
+      {
+        name: "document-processing",
+        function: "process-document",
+        concurrency: 4,
+        maxAttempts: 5,
+        retryDelaySeconds: 10,
+        retryBackoff: true,
+        timeoutSeconds: 120,
+      },
+    ]);
+  });
+
+  it("rejects duplicate queues, unknown consumers, and non-system consumers", () => {
+    expect(() =>
+      parseManifest({
+        ...valid,
+        queues: [
+          { name: "work", function: "missing" },
+          { name: "work", function: "missing" },
+        ],
+      }),
+    ).toThrow(/queues entries must be unique|unknown function/);
+
+    expect(() =>
+      parseManifest({
+        ...valid,
+        functions: [
+          {
+            name: "process-work",
+            entrypoint: "functions/process-work/index.ts",
+            access: "user",
+          },
+        ],
+        queues: [{ name: "work", function: "process-work" }],
+      }),
+    ).toThrow(/must declare access: system/);
+  });
+
+  it("bounds queue concurrency, attempts, retry delay, and timeout", () => {
+    for (const queue of [
+      { name: "work", function: "process-work", concurrency: 21 },
+      { name: "work", function: "process-work", maxAttempts: 0 },
+      { name: "work", function: "process-work", retryDelaySeconds: 3_601 },
+      { name: "work", function: "process-work", timeoutSeconds: 901 },
+    ]) {
+      expect(() =>
+        parseManifest({
+          ...valid,
+          functions: [
+            {
+              name: "process-work",
+              entrypoint: "functions/process-work/index.ts",
+              access: "system",
+            },
+          ],
+          queues: [queue],
+        }),
+      ).toThrow();
+    }
   });
 
   it("declares generated, required, and optional secrets without values", () => {

@@ -46,6 +46,18 @@ export const cronSchema = z
   })
   .strict();
 
+export const queueSchema = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    function: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    concurrency: z.number().int().min(1).max(20).default(1),
+    maxAttempts: z.number().int().min(1).max(10).default(3),
+    retryDelaySeconds: z.number().int().min(1).max(3_600).default(5),
+    retryBackoff: z.boolean().default(true),
+    timeoutSeconds: z.number().int().min(1).max(15 * 60).default(15 * 60),
+  })
+  .strict();
+
 export const filesAccessSchema = z.enum(["user", "app"]);
 
 export const secretModeSchema = z.enum(["generated", "required", "optional"]);
@@ -160,6 +172,7 @@ export const openCloudManifestSchema = z
     migrations: z.array(migrationSchema).max(500).default([]),
     functions: z.array(functionSchema).max(100).default([]),
     cron: z.array(cronSchema).max(100).default([]),
+    queues: z.array(queueSchema).max(50).default([]),
     email: z
       .object({
         addresses: z.array(emailAddressSchema).max(25).default([]),
@@ -191,6 +204,7 @@ export const openCloudManifestSchema = z
         | "migrations"
         | "functions"
         | "cron"
+        | "queues"
         | "email"
         | "observability",
     ) => {
@@ -215,6 +229,7 @@ export const openCloudManifestSchema = z
       "functions",
     );
     assertUnique(manifest.cron.map((cron) => cron.name), "cron");
+    assertUnique(manifest.queues.map((queue) => queue.name), "queues");
     assertUnique(
       manifest.email.addresses.map((address) => address.name),
       "email",
@@ -267,6 +282,24 @@ export const openCloudManifestSchema = z
         });
       }
     });
+    manifest.queues.forEach((queue, index) => {
+      const target = manifest.functions.find(
+        (definition) => definition.name === queue.function,
+      );
+      if (!target) {
+        context.addIssue({
+          code: "custom",
+          path: ["queues", index, "function"],
+          message: `queue references unknown function: ${queue.function}`,
+        });
+      } else if (target.access !== "system") {
+        context.addIssue({
+          code: "custom",
+          path: ["queues", index, "function"],
+          message: `queue function ${queue.function} must declare access: system`,
+        });
+      }
+    });
     manifest.email.addresses.forEach((address, index) => {
       if (!address.function) return;
       const target = manifest.functions.find(
@@ -296,6 +329,7 @@ export type FunctionAccess = z.infer<typeof functionAccessSchema>;
 export type SecretMode = z.infer<typeof secretModeSchema>;
 export type SdkVersion = z.infer<typeof sdkVersionSchema>;
 export type OpenCloudEmailAddress = z.infer<typeof emailAddressSchema>;
+export type OpenCloudQueue = z.infer<typeof queueSchema>;
 export type CustomMetricDefinition = z.infer<
   typeof customMetricDefinitionSchema
 >;

@@ -31,6 +31,7 @@ import {
   devEmailInjectionRequest,
   emailHistoryQuery,
 } from "./email.js";
+import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
 import {
   deleteSession,
   loadSession,
@@ -47,7 +48,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "3.1.0";
+const CLI_VERSION = "3.2.0";
 
 const program = new Command()
   .name("opencloud")
@@ -1044,7 +1045,7 @@ dev
       next: [
         "Open session.previewUrl or use `opencloud app dev request <directory> /`.",
         "After edits run `opencloud app dev sync <directory>`.",
-        "Functions remain dormant until `app dev invoke` or a deliberate preview action calls them.",
+        "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
         "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
       ],
     });
@@ -1398,12 +1399,12 @@ dev
     const bundle = await buildBundle(sourceRoot);
     if (!bundle.e2eTest) {
       throw new Error(
-        `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, invoke every Function, and verify the exact revision.`,
+        `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, exercise every Function through its intended path (including enqueueing queue consumers), and verify the exact revision.`,
       );
     }
     if (bundle.sha256 !== state.artifactSha256) {
       throw new Error(
-        "Local source differs from the active development revision. Run app dev sync, invoke every Function, and verify again before promotion.",
+        "Local source differs from the active development revision. Run app dev sync, exercise every Function through its intended path, and verify again before promotion.",
       );
     }
     const control = client();
@@ -1691,6 +1692,7 @@ program
         files: { access: "user", maxUploadBytes: 50 * 1024 * 1024 },
         migrations: [],
         functions: [],
+        queues: [],
         cron: [],
         health: { path: "/" },
         secrets: {},
@@ -1819,6 +1821,7 @@ program
       artifactBytes: bundle.archive.byteLength,
       migrations: bundle.manifest.migrations.length,
       functions: bundle.manifest.functions.length,
+      queues: bundle.manifest.queues.length,
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
       secrets: bundle.manifest.secrets,
       files: bundle.files,
@@ -1973,6 +1976,39 @@ cron
         {},
       ),
     );
+  });
+
+const jobs = program
+  .command("jobs")
+  .description("Inspect retained production background jobs and queue depth");
+
+jobs
+  .command("list")
+  .argument("<app-id>")
+  .option("--queue <name>", "filter recent jobs by declared queue")
+  .option(
+    "--state <state>",
+    "queued, running, retry_wait, succeeded, or dead_lettered",
+  )
+  .option("--from <iso>", "include jobs created at or after this time")
+  .option("--to <iso>", "include jobs created at or before this time")
+  .option("--cursor <cursor>", "continue a retained history page")
+  .option("--limit <number>", "result limit", "50")
+  .action(async (appId, options) => {
+    const query = backgroundJobsQuery(options);
+    output(
+      await client().get(
+        `/v1/apps/${encodeURIComponent(appId)}/jobs?${query}`,
+      ),
+    );
+  });
+
+jobs
+  .command("get")
+  .argument("<app-id>")
+  .argument("<job-id>")
+  .action(async (appId, jobId) => {
+    output(await client().get(backgroundJobPath(appId, jobId)));
   });
 
 const secret = program

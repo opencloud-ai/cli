@@ -233,6 +233,63 @@ export interface CronInvocationRecord {
   error: Record<string, unknown> | null;
 }
 
+export type BackgroundJobState =
+  | "queued"
+  | "running"
+  | "retry_wait"
+  | "succeeded"
+  | "dead_lettered";
+
+export interface BackgroundJobRecord {
+  id: string;
+  appId: string;
+  deploymentId: string;
+  queue: string;
+  consumerFunction: string;
+  producerFunction: string;
+  state: BackgroundJobState;
+  attempt: number;
+  maxAttempts: number;
+  runAt: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+  lastError: Record<string, unknown> | null;
+}
+
+export interface BackgroundJobStats {
+  created: number;
+  retried: number;
+  succeeded: number;
+  failed: number;
+  active: number;
+  queued: number;
+  running: number;
+  retryWaiting: number;
+}
+
+export interface BackgroundJobQueueStats extends BackgroundJobStats {
+  name: string;
+  declared: boolean;
+  functionName: string | null;
+  concurrency: number | null;
+  maxAttempts: number | null;
+  retryDelaySeconds: number | null;
+  retryBackoff: boolean | null;
+  timeoutSeconds: number | null;
+  oldestPendingAt: string | null;
+}
+
+export interface BackgroundJobsPage {
+  asOf: string;
+  retentionDays: number;
+  stats: BackgroundJobStats;
+  queues: BackgroundJobQueueStats[];
+  jobs: BackgroundJobRecord[];
+  nextCursor: string | null;
+}
+
 export interface DeploymentRecord {
   id: string;
   appId: string;
@@ -356,7 +413,7 @@ export interface AgentFeedBreach {
 
 export interface AgentFeedEvent {
   id: string;
-  type: "operation" | "cron";
+  type: "operation" | "cron" | "job";
   state: string;
   occurredAt: string;
   message: string;

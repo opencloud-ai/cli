@@ -30,6 +30,8 @@ describe("controlPlaneOperations", () => {
         "get_app_email_message",
         "generate_secret",
         "create_secret_entry_link",
+        "list_background_jobs",
+        "get_background_job",
         "get_agent_feed",
         "put_alert_rule",
       ]),
@@ -210,6 +212,51 @@ describe("controlPlaneOperations", () => {
     ).toMatchObject({ id: messageId, content: { text: "Need help" } });
   });
 
+  it("types metadata-only background job observability", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const operation = controlPlaneOperations.listBackgroundJobs;
+
+    expect(operation.mcp).toMatchObject({
+      toolName: "list_background_jobs",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    expect(
+      operation.input.parse({
+        appId,
+        query: {
+          queue: "task-processing",
+          state: "retry_wait",
+          from: "2026-08-17T10:00:00.000Z",
+          to: "2026-08-17T12:00:00.000Z",
+          limit: 25,
+        },
+      }),
+    ).toMatchObject({
+      query: {
+        queue: "task-processing",
+        state: "retry_wait",
+        from: "2026-08-17T10:00:00.000Z",
+        to: "2026-08-17T12:00:00.000Z",
+        limit: 25,
+      },
+    });
+    expect(() =>
+      operation.input.parse({ appId, query: { state: "cancelled" } }),
+    ).toThrow();
+    expect(() =>
+      operation.input.parse({
+        appId,
+        query: {
+          from: "2026-08-17T12:00:00.000Z",
+          to: "2026-08-17T10:00:00.000Z",
+        },
+      }),
+    ).toThrow(/after from/);
+    expect(operation.description).toContain("Payloads");
+  });
+
   it("keeps MCP approval hints aligned with high-risk behavior", () => {
     const tools = new Map(
       Object.values(controlPlaneOperations).flatMap((operation) =>
@@ -373,6 +420,7 @@ describe("controlPlaneOperations", () => {
         frontend: true,
         database: true,
         functions: true,
+        jobs: true,
         files: true,
         productionSecrets: false,
         cron: false,
