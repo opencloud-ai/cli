@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.2.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.3.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.2.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.2.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.3.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.3.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -179,6 +179,14 @@ Use the stable capability preview and isolated migration-replayed database befor
 "$OPENCLOUD_CLI" app dev receipts .
 "$OPENCLOUD_CLI" app dev evidence .
 ```
+
+`app dev start` returns `session.browserPreviewUrl`, and `app dev status`
+returns the same owner/builder review link as top-level `browserPreviewUrl`.
+Give that URL to a human reviewer: it opens the isolated revision in a
+persistent **Development preview — Not live** shell with Full size, Tablet,
+Mobile, and Reload controls. Keep the raw `previewUrl` for CLI and agent
+inspection; opening it directly in a normal browser may return
+`AUTH_REQUIRED`.
 
 Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-

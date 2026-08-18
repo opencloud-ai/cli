@@ -497,6 +497,11 @@ export const devSessionOutput = z
       "expired",
     ]),
     previewUrl: z.url(),
+    browserPreviewUrl: z
+      .url()
+      .describe(
+        "Owner/builder review link that opens the isolated revision in a clearly marked Not live preview shell with responsive viewport controls.",
+      ),
     baseDeploymentId: uuid.nullable(),
     activeRevision: z
       .object({
@@ -1372,7 +1377,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/drafts/{draftId}/dev-sessions",
     summary: "Start a development session",
     description:
-      "Creates or resumes an isolated preview for a validated draft and optionally applies its exact revision.",
+      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
@@ -1385,7 +1390,7 @@ export const controlPlaneOperations = {
       toolName: "start_dev_session",
       title: "Start dev session",
       description:
-        "Start or resume an isolated frontend and database preview for a validated draft.",
+        "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -1397,7 +1402,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Get a development session",
     description:
-      "Returns preview state, capabilities, and verification status.",
+      "Returns preview state, the owner/builder browserPreviewUrl for the marked responsive review shell, capabilities, and verification status.",
     auth: "bearer",
     scopes: ["app:read"],
     input: devSessionPath,

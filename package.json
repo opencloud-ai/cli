@@ -1,6 +1,6 @@
 {
   "name": "@opencloud/cli",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Versioned command-line client for building, deploying, and verifying OpenCloud applications",
   "type": "module",
   "bin": {

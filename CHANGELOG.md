@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.3.0
+
+- Surface each development session's authenticated `browserPreviewUrl` for
+  owner/builder review before deployment, while retaining the raw
+  `previewUrl` for bounded CLI and agent inspection.
+- Direct humans to the persistent **Development preview — Not live** shell and
+  its Full size, Tablet, Mobile, and Reload controls instead of the raw
+  capability origin that can return `AUTH_REQUIRED` in a normal browser.
+
 ## 3.2.0
 
 - Validate manifest-declared Postgres-backed queues, their bounded retry and
