@@ -42,6 +42,7 @@ interface AuthorManifest {
     sha256?: string;
   }>;
   functions?: unknown[];
+  queues?: unknown[];
   cron?: unknown[];
   email?: unknown;
   health?: unknown;
@@ -182,9 +183,13 @@ export async function buildBundle(
       await copyFile(sourceFile, destination);
       await chmod(destination, 0o644);
     }
+    const archiveManifest: Partial<OpenCloudManifest> = { ...manifest };
+    // Queue-free schema-2 apps keep the archive shape accepted by older
+    // platform releases while declared queues remain canonical bundle input.
+    if (manifest.queues.length === 0) delete archiveManifest.queues;
     await writeFile(
       path.join(staging, "opencloud.json"),
-      `${JSON.stringify(manifest, null, 2)}\n`,
+      `${JSON.stringify(archiveManifest, null, 2)}\n`,
       { flag: "wx", mode: 0o644 },
     );
 
@@ -450,7 +455,7 @@ async function inspectFunctionEntrypoints(
       /["'`]\/rest\/v1\//.test(content)
     ) {
       throw new Error(
-        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
+        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, ai, email, jobs, job, integrations, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
       );
     }
     const usesServerBoundary =

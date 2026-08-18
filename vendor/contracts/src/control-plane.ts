@@ -517,6 +517,7 @@ export const devSessionOutput = z
       frontend: z.literal(true),
       database: z.literal(true),
       functions: z.literal(true),
+      jobs: z.literal(true),
       files: z.literal(true),
       productionSecrets: z.literal(false),
       cron: z.literal(false),
@@ -706,7 +707,7 @@ const agentFeedBreachOutput = z
 const agentFeedEventOutput = z
   .object({
     id: z.string(),
-    type: z.enum(["operation", "cron"]),
+    type: z.enum(["operation", "cron", "job"]),
     state: z.string(),
     occurredAt: z.string(),
     message: z.string(),
@@ -766,6 +767,84 @@ const cronInvocationOutput = z
     error: jsonObject.nullable(),
   })
   .passthrough();
+
+export const backgroundJobStateSchema = z.enum([
+  "queued",
+  "running",
+  "retry_wait",
+  "succeeded",
+  "dead_lettered",
+]);
+
+export const backgroundJobsQuerySchema = z
+  .object({
+    queue: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/).optional(),
+    state: backgroundJobStateSchema.optional(),
+    from: z.iso.datetime({ offset: true }).optional(),
+    to: z.iso.datetime({ offset: true }).optional(),
+    cursor: z.string().max(512).optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  })
+  .superRefine((value, context) => {
+    if (!value.from || !value.to) return;
+    if (Date.parse(value.from) > Date.parse(value.to)) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message: "background jobs to must be after from",
+      });
+    }
+  });
+
+export const backgroundJobStatsSchema = z.object({
+  created: z.number().int().nonnegative(),
+  retried: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  active: z.number().int().nonnegative(),
+  queued: z.number().int().nonnegative(),
+  running: z.number().int().nonnegative(),
+  retryWaiting: z.number().int().nonnegative(),
+});
+
+export const backgroundJobOutput = z.object({
+  id: uuid,
+  appId: uuid,
+  deploymentId: uuid,
+  queue: z.string(),
+  consumerFunction: z.string(),
+  producerFunction: z.string(),
+  state: backgroundJobStateSchema,
+  attempt: z.number().int().nonnegative(),
+  maxAttempts: z.number().int().positive(),
+  runAt: z.string(),
+  createdAt: z.string(),
+  startedAt: z.string().nullable(),
+  completedAt: z.string().nullable(),
+  updatedAt: z.string(),
+  lastError: jsonObject.nullable(),
+});
+
+export const backgroundJobsPageOutput = z.object({
+  asOf: z.string(),
+  retentionDays: z.number().int().positive(),
+  stats: backgroundJobStatsSchema,
+  queues: z.array(
+    backgroundJobStatsSchema.extend({
+      name: z.string(),
+      declared: z.boolean(),
+      functionName: z.string().nullable(),
+      concurrency: z.number().int().positive().nullable(),
+      maxAttempts: z.number().int().positive().nullable(),
+      retryDelaySeconds: z.number().int().positive().nullable(),
+      retryBackoff: z.boolean().nullable(),
+      timeoutSeconds: z.number().int().positive().nullable(),
+      oldestPendingAt: z.string().nullable(),
+    }),
+  ),
+  jobs: z.array(backgroundJobOutput),
+  nextCursor: z.string().nullable(),
+});
 
 export type ControlPlaneAuth = "none" | "bearer" | "user";
 
@@ -1989,6 +2068,53 @@ export const controlPlaneOperations = {
       toolName: "list_cron_invocations",
       title: "List cron invocations",
       description: "Inspect cron execution history.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listBackgroundJobs: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/jobs",
+    summary: "List background jobs",
+    description:
+      "Returns retained production background-job totals, per-queue rollups, current depth, and a cursor-paginated metadata-only history page. Inclusive from/to creation times apply to totals, queue rollups, and history; queue and state filters narrow history. Successful and failed terminal records are retained for 14 days; active records remain until terminal. Payloads and idempotency keys are never returned.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: backgroundJobsQuerySchema.optional(),
+    }),
+    output: backgroundJobsPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_background_jobs",
+      title: "List background jobs",
+      description:
+        "Inspect retained production queue depth, created/retried/succeeded/failed totals, per-queue rollups, and cursor-paginated safe job metadata, optionally bounded by creation time, without reading payloads.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  getBackgroundJob: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/jobs/{jobId}",
+    summary: "Get a background job",
+    description:
+      "Returns safe production background-job execution metadata without its payload, idempotency key, or enqueuing user.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ jobId: uuid }),
+    output: backgroundJobOutput,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_background_job",
+      title: "Get background job",
+      description:
+        "Inspect one retained production background job and its sanitized last error without reading its payload.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

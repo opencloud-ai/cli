@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -36,6 +43,20 @@ version: test-1
 ${body.trim()}
 `,
   );
+}
+
+async function readArchivedManifest(
+  root: string,
+  archive: Buffer,
+): Promise<Record<string, unknown>> {
+  const archiveFile = path.join(root, `bundle-${crypto.randomUUID()}.tgz`);
+  const extracted = path.join(root, `extracted-${crypto.randomUUID()}`);
+  await writeFile(archiveFile, archive);
+  await mkdir(extracted);
+  await tar.extract({ cwd: extracted, file: archiveFile });
+  return JSON.parse(
+    await readFile(path.join(extracted, "opencloud.json"), "utf8"),
+  ) as Record<string, unknown>;
 }
 
 describe("bundle builder", () => {
@@ -134,6 +155,49 @@ functions:
       },
     });
     expect(archivedFiles.sort()).toEqual(first.files);
+    expect(await readArchivedManifest(root, first.archive)).not.toHaveProperty(
+      "queues",
+    );
+  });
+
+  it("validates and archives declared background queues", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "functions", "process-work"), {
+      recursive: true,
+    });
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "functions", "process-work", "index.ts"),
+      'import { defineFunction, schema } from "@opencloud/server"; export default defineFunction({ input: schema.object({}), handler: ({ job }) => ({ job }) });',
+    );
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+functions:
+  - name: process-work
+    entrypoint: functions/process-work/index.ts
+    access: system
+queues:
+  - name: work
+    function: process-work
+    concurrency: 2
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+
+    expect(bundle.manifest.queues).toEqual([
+      expect.objectContaining({
+        name: "work",
+        function: "process-work",
+        concurrency: 2,
+      }),
+    ]);
+    expect(archived.queues).toEqual(bundle.manifest.queues);
   });
 
   it("never archives local .opencloud development metadata", async () => {

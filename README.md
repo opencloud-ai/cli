@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.1.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.2.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.1.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.1.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.2.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.2.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -181,13 +181,14 @@ Use the stable capability preview and isolated migration-replayed database befor
 ```
 
 Development data is isolated from production and uses dummy records. Auth,
-Files, and Functions are available; Realtime and cron are not. Manifest-
+Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-
 generated secrets receive isolated synthetic development values, while owner-
 configured required values remain unavailable and optional values may be
-absent. Functions
-imported from `@opencloud/server` remain dormant until `app dev invoke` or a
-deliberate preview interaction calls them. Exact-revision verification requires
-every declared Function to have a successful explicit invocation and runs the
+absent. Ordinary Functions imported from `@opencloud/server` remain dormant
+until `app dev invoke` or a deliberate preview interaction calls them. A
+Function enqueue wakes its declared system consumer in the same isolated
+namespace. Exact-revision verification requires every declared Function to be
+successfully exercised through its intended path and runs the
 immutable `tests/opencloud.e2e.js` specification. The conventional test source
 stays outside `frontend.directory`, is included in the deterministic artifact,
 and must use only the bounded `@opencloud/test` UI fixtures.
@@ -215,6 +216,26 @@ MIME and attachment bytes are never returned. Development Function sends are
 captured instead of delivered; `app dev email inject` accepts only reserved
 `.test` sender and Reply-To addresses, and body/attachment file paths resolve
 relative to the app directory.
+
+## Background jobs
+
+Inspect retained production queue depth, per-queue policy and outcomes, or one
+job's safe execution metadata:
+
+```bash
+"$OPENCLOUD_CLI" jobs list "$APP_ID" --limit 25
+"$OPENCLOUD_CLI" jobs list "$APP_ID" \
+  --queue reminder-delivery --state dead_lettered \
+  --from 2026-08-18T09:00:00Z --to 2026-08-18T17:00:00Z
+"$OPENCLOUD_CLI" jobs get "$APP_ID" "$JOB_ID"
+```
+
+`--from` and `--to` are inclusive ISO 8601 creation times and apply to totals,
+queue rollups, and history. Pass `nextCursor` back through `--cursor` to
+continue history. Successful and failed terminal records are retained for 14
+days; active work remains visible until terminal. These commands never return
+job payloads, idempotency keys, or enqueuing user identifiers, and intentionally
+provide no cancel or redrive action.
 
 ## Agent Feed and alert rules
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.2.0
+
+- Validate manifest-declared Postgres-backed queues, their bounded retry and
+  concurrency policy, and system-only consumer Functions in local bundles.
+- Preserve queue-free schema-2 archive compatibility while including declared
+  queues in deterministic artifacts and development capability validation.
+- Add `jobs list|get` for retained production depth, created/retried/succeeded/
+  failed rollups, inclusive creation-time filtering, cursor pagination, and
+  metadata-only job inspection without payloads or idempotency keys.
+
 ## 3.1.0
 
 - Add `app email list|get` for filtered, cursor-paginated production message
