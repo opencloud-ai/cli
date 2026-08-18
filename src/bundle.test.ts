@@ -158,6 +158,9 @@ functions:
     expect(await readArchivedManifest(root, first.archive)).not.toHaveProperty(
       "queues",
     );
+    expect(await readArchivedManifest(root, first.archive)).not.toHaveProperty(
+      "integrations",
+    );
   });
 
   it("validates and archives declared background queues", async () => {
@@ -198,6 +201,38 @@ queues:
       }),
     ]);
     expect(archived.queues).toEqual(bundle.manifest.queues);
+  });
+
+  it("validates and archives declared HubSpot CRM integrations", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+integrations:
+  crm:
+    provider: hubspot-crm
+    account: app
+    cardinality: one
+    capabilities:
+      - crm.contacts.read
+      - crm.contacts.write
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+
+    expect(bundle.manifest.integrations.crm).toEqual({
+      provider: "hubspot-crm",
+      account: "app",
+      cardinality: "one",
+      capabilities: ["crm.contacts.read", "crm.contacts.write"],
+    });
+    expect(archived.integrations).toEqual(bundle.manifest.integrations);
   });
 
   it("never archives local .opencloud development metadata", async () => {

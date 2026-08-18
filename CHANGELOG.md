@@ -6,6 +6,9 @@
   concurrency policy, and system-only consumer Functions in local bundles.
 - Preserve queue-free schema-2 archive compatibility while including declared
   queues in deterministic artifacts and development capability validation.
+- Validate declarative brokered integration slots locally, including
+  project-contained Asana access and app-owned HubSpot CRM capabilities, while
+  keeping integration-free archives byte-compatible with older releases.
 - Add `jobs list|get` for retained production depth, created/retried/succeeded/
   failed rollups, inclusive creation-time filtering, cursor pagination, and
   metadata-only job inspection without payloads or idempotency keys.
