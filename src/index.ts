@@ -52,7 +52,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "3.2.0";
+const CLI_VERSION = "3.3.0";
 
 const program = new Command()
   .name("opencloud")
@@ -233,6 +233,7 @@ interface DevSessionWire {
   draftId: string;
   status: string;
   previewUrl: string;
+  browserPreviewUrl: string;
   activeRevision: {
     id: string;
     draftRevision: number;
@@ -1056,7 +1057,8 @@ dev
       validation: synchronized.validation,
       localState: devStatePath(sourceRoot),
       next: [
-        "Open session.previewUrl or use `opencloud app dev request <directory> /`.",
+        "Give session.browserPreviewUrl to an owner or builder for a clearly marked Not live browser review.",
+        "Use `opencloud app dev request <directory> /` for agent inspection; do not give session.previewUrl to a human reviewer.",
         "After edits run `opencloud app dev sync <directory>`.",
         "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
         "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
@@ -1093,7 +1095,7 @@ dev
 dev
   .command("status")
   .description(
-    "Show the active revision, capability URL, and verification receipt",
+    "Show the active revision, browser review link, capability URL, and verification receipt",
   )
   .argument("[directory]", "app source directory", ".")
   .action(async (directory) => {

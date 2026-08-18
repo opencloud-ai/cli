@@ -413,6 +413,8 @@ describe("controlPlaneOperations", () => {
       draftId: "33333333-3333-4333-8333-333333333333",
       status: "active",
       previewUrl: "https://dev-example.opencloud.ai",
+      browserPreviewUrl:
+        "https://dev-example.opencloud.ai/_opencloud/dev/launch",
       baseDeploymentId: null,
       activeRevision: null,
       verification: null,
@@ -434,9 +436,9 @@ describe("controlPlaneOperations", () => {
       expiresAt: "2026-08-06T00:00:00.000Z",
     };
 
-    expect(
-      controlPlaneOperations.getDevSession.output.parse(session).capabilities,
-    ).toEqual(session.capabilities);
+    const parsed = controlPlaneOperations.getDevSession.output.parse(session);
+    expect(parsed.capabilities).toEqual(session.capabilities);
+    expect(parsed.browserPreviewUrl).toBe(session.browserPreviewUrl);
     expect(() =>
       controlPlaneOperations.getDevSession.output.parse({
         ...session,
