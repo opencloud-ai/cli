@@ -36,6 +36,7 @@ import {
   emailHistoryQuery,
 } from "./email.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
+import { devNotificationCaptureLimit } from "./notifications.js";
 import {
   deleteSession,
   loadSession,
@@ -1266,6 +1267,26 @@ devEmail
         appId: state.appId,
         sessionId: state.sessionId,
         body,
+      }),
+    );
+  });
+
+const devNotifications = dev
+  .command("notifications")
+  .description("Inspect Web Push notifications captured in development");
+
+devNotifications
+  .command("list")
+  .description("List notifications captured from the active dev session")
+  .argument("[directory]", "app source directory", ".")
+  .option("--limit <number>", "maximum records", "100")
+  .action(async (directory, options) => {
+    const state = await requireDevState(callerPath(directory));
+    output(
+      await client().call("listDevNotificationCaptures", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+        query: { limit: devNotificationCaptureLimit(options.limit) },
       }),
     );
   });

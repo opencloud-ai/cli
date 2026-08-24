@@ -28,6 +28,7 @@ describe("controlPlaneOperations", () => {
         "verify_app",
         "list_app_email_messages",
         "get_app_email_message",
+        "list_dev_notification_captures",
         "generate_secret",
         "create_secret_entry_link",
         "list_background_jobs",
@@ -429,6 +430,7 @@ describe("controlPlaneOperations", () => {
         syntheticAuth: true,
         emailCapture: true,
         emailInboundInjection: true,
+        notificationCapture: true,
       },
       createdAt: "2026-08-05T00:00:00.000Z",
       updatedAt: "2026-08-05T00:00:00.000Z",
@@ -445,5 +447,48 @@ describe("controlPlaneOperations", () => {
         capabilities: { ...session.capabilities, files: false },
       }),
     ).toThrow();
+  });
+
+  it("types bounded development notification captures", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const captureId = "33333333-3333-4333-8333-333333333333";
+    const operation = controlPlaneOperations.listDevNotificationCaptures;
+
+    expect(operation).toMatchObject({
+      method: "GET",
+      path: "/v1/apps/{appId}/dev-sessions/{sessionId}/notifications/captures",
+      scopes: ["app:observe"],
+      queryKey: "query",
+    });
+    expect(operation.mcp).toMatchObject({
+      toolName: "list_dev_notification_captures",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+    expect(
+      operation.input.parse({ appId, sessionId, query: { limit: 25 } }),
+    ).toEqual({ appId, sessionId, query: { limit: 25 } });
+    expect(() =>
+      operation.input.parse({ appId, sessionId, query: { limit: 201 } }),
+    ).toThrow();
+    expect(
+      operation.output.parse([
+        {
+          schemaVersion: 1,
+          id: captureId,
+          appId,
+          devSessionId: sessionId,
+          userId: "44444444-4444-4444-8444-444444444444",
+          title: "Reminder",
+          body: "Check the oven",
+          path: "/reminders/1",
+          icon: "/icons/reminder.png",
+          status: "captured",
+          createdAt: "2026-08-24T00:00:00.000Z",
+        },
+      ]),
+    ).toHaveLength(1);
   });
 });

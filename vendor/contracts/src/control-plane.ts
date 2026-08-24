@@ -243,6 +243,22 @@ export const devEmailCaptureSchema = devEmailCaptureSummarySchema
   })
   .passthrough();
 
+export const devNotificationCaptureSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: uuid,
+    appId: uuid,
+    devSessionId: uuid,
+    userId: uuid,
+    title: z.string(),
+    body: z.string().nullable(),
+    path: z.string(),
+    icon: z.string(),
+    status: z.literal("captured"),
+    createdAt: z.string(),
+  })
+  .passthrough();
+
 export const appEmailMessageSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -529,6 +545,7 @@ export const devSessionOutput = z
       syntheticAuth: z.literal(true),
       emailCapture: z.literal(true),
       emailInboundInjection: z.literal(true),
+      notificationCapture: z.literal(true),
     }),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -1578,6 +1595,31 @@ export const controlPlaneOperations = {
       title: "Get dev email capture",
       description:
         "Inspect one captured development email without contacting an external provider.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listDevNotificationCaptures: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/notifications/captures",
+    summary: "List captured development notifications",
+    description:
+      "Returns visible Web Push payloads captured from only the selected development session without contacting browser push services.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: devSessionPath.extend({
+      query: z.object({ limit: z.number().int().min(1).max(200).default(100) }),
+    }),
+    output: z.array(devNotificationCaptureSchema),
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_dev_notification_captures",
+      title: "List dev notification captures",
+      description:
+        "Inspect Web Push notifications captured from an isolated development session.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

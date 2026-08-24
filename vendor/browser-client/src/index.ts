@@ -6,7 +6,7 @@
  * HTTP responses deliberately stay behind this module.
  */
 
-export const OPEN_CLOUD_SDK_VERSION = "2.0.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.1.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 export type OpenCloudVisibility = "public" | "private";
@@ -16,6 +16,7 @@ export type OpenCloudErrorSurface =
   | "data"
   | "files"
   | "functions"
+  | "notifications"
   | "realtime"
   | "telemetry";
 
@@ -68,6 +69,7 @@ export interface OpenCloudCapabilities {
   data: boolean;
   files: boolean;
   functions: boolean;
+  notifications: boolean;
   realtime: boolean;
   telemetry: boolean;
 }
@@ -256,6 +258,28 @@ export interface OpenCloudFunctionsClient {
   ): Promise<ReadableStream<Uint8Array>>;
 }
 
+export type OpenCloudNotificationState =
+  | "unsupported"
+  | "prompt"
+  | "denied"
+  | "unsubscribed"
+  | "subscribed";
+
+export interface OpenCloudNotificationStatus {
+  state: OpenCloudNotificationState;
+  permission: NotificationPermission | "unsupported";
+  subscribed: boolean;
+}
+
+export interface OpenCloudNotificationsClient {
+  /** Inspect support and permission without prompting the user. */
+  status(): Promise<OpenCloudNotificationStatus>;
+  /** Request permission and subscribe this signed-in browser. Call from a user gesture. */
+  subscribe(): Promise<OpenCloudNotificationStatus>;
+  /** Remove this signed-in browser's push subscription. */
+  unsubscribe(): Promise<OpenCloudNotificationStatus>;
+}
+
 export interface OpenCloudRealtimeClient {
   subscribe(
     topic: string,
@@ -284,6 +308,7 @@ export interface OpenCloudClient {
   readonly data: OpenCloudDataClient;
   readonly files: OpenCloudFilesClient;
   readonly functions: OpenCloudFunctionsClient;
+  readonly notifications: OpenCloudNotificationsClient;
   readonly realtime: OpenCloudRealtimeClient;
   readonly telemetry: OpenCloudTelemetryClient;
   dispose(): void;
@@ -313,6 +338,11 @@ interface RuntimeConfig {
   sdk: SdkConfig;
   capabilities: OpenCloudCapabilities;
   files: { access: "app" | "user"; maxUploadBytes: number } | null;
+  notifications: {
+    worker: string;
+    scope: string;
+    applicationServerKey: string;
+  } | null;
   functions: RuntimeFunction[];
 }
 
@@ -515,6 +545,7 @@ function parseRuntimeConfig(value: unknown, expectedOrigin: string): RuntimeConf
       "sdk",
       "capabilities",
       "files",
+      "notifications",
       "functions",
       "devSessionId",
       "devRevisionId",
@@ -566,7 +597,15 @@ function parseRuntimeConfig(value: unknown, expectedOrigin: string): RuntimeConf
   const rawCapabilities = object(input.capabilities, "capabilities");
   exactFields(
     rawCapabilities,
-    ["auth", "data", "files", "functions", "realtime", "telemetry"],
+    [
+      "auth",
+      "data",
+      "files",
+      "functions",
+      "notifications",
+      "realtime",
+      "telemetry",
+    ],
     "capabilities",
   );
   const capabilities: OpenCloudCapabilities = {
@@ -574,6 +613,10 @@ function parseRuntimeConfig(value: unknown, expectedOrigin: string): RuntimeConf
     data: bool(rawCapabilities.data, "capabilities.data"),
     files: bool(rawCapabilities.files, "capabilities.files"),
     functions: bool(rawCapabilities.functions, "capabilities.functions"),
+    notifications: bool(
+      rawCapabilities.notifications,
+      "capabilities.notifications",
+    ),
     realtime: bool(rawCapabilities.realtime, "capabilities.realtime"),
     telemetry: bool(rawCapabilities.telemetry, "capabilities.telemetry"),
   };
@@ -598,6 +641,38 @@ function parseRuntimeConfig(value: unknown, expectedOrigin: string): RuntimeConf
     throw invalidResponse(
       "OpenCloud config declared Files settings without the Files capability",
       "app",
+    );
+  }
+
+  let notifications: RuntimeConfig["notifications"] = null;
+  if (capabilities.notifications) {
+    const rawNotifications = object(input.notifications, "notifications");
+    exactFields(
+      rawNotifications,
+      ["worker", "scope", "applicationServerKey"],
+      "notifications",
+    );
+    const worker = string(rawNotifications.worker, "notifications.worker");
+    const scope = string(rawNotifications.scope, "notifications.scope");
+    const applicationServerKey = string(
+      rawNotifications.applicationServerKey,
+      "notifications.applicationServerKey",
+    );
+    if (
+      worker !== "/_opencloud/push-worker.js" ||
+      scope !== "/_opencloud/" ||
+      !/^[A-Za-z0-9_-]{80,100}$/.test(applicationServerKey)
+    ) {
+      throw invalidResponse(
+        "Invalid OpenCloud response field: notifications",
+        "notifications",
+      );
+    }
+    notifications = { worker, scope, applicationServerKey };
+  } else if (input.notifications !== undefined) {
+    throw invalidResponse(
+      "OpenCloud config declared notification settings without the notifications capability",
+      "notifications",
     );
   }
 
@@ -630,6 +705,7 @@ function parseRuntimeConfig(value: unknown, expectedOrigin: string): RuntimeConf
     sdk,
     capabilities,
     files,
+    notifications,
     functions,
   };
 }
@@ -1708,6 +1784,230 @@ class FunctionsClient {
   }
 }
 
+function supportsWebPush(): boolean {
+  return (
+    typeof globalThis.navigator === "object" &&
+    "serviceWorker" in globalThis.navigator &&
+    typeof globalThis.Notification === "function" &&
+    typeof globalThis.Notification.requestPermission === "function" &&
+    typeof globalThis.PushManager === "function"
+  );
+}
+
+function notificationStatus(
+  permission: NotificationPermission | "unsupported",
+  subscribed: boolean,
+): OpenCloudNotificationStatus {
+  return {
+    state:
+      permission === "unsupported"
+        ? "unsupported"
+        : permission === "denied"
+          ? "denied"
+          : subscribed
+            ? "subscribed"
+            : permission === "default"
+              ? "prompt"
+              : "unsubscribed",
+    permission,
+    subscribed,
+  };
+}
+
+function applicationServerKey(value: string): Uint8Array<ArrayBuffer> {
+  try {
+    const normalized = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const binary = globalThis.atob(padded);
+    const result = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      result[index] = binary.charCodeAt(index);
+    }
+    return result;
+  } catch (cause) {
+    throw invalidResponse(
+      "OpenCloud notifications returned an invalid application server key",
+      "notifications",
+      cause,
+    );
+  }
+}
+
+async function waitForActiveWorker(
+  registration: ServiceWorkerRegistration,
+): Promise<void> {
+  if (registration.active) return;
+  const worker = registration.installing ?? registration.waiting;
+  if (!worker) {
+    throw new OpenCloudError(
+      "The OpenCloud notification worker did not install",
+      { code: "WORKER_INSTALL_FAILED", surface: "notifications", retryable: true },
+    );
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      reject(
+        new OpenCloudError(
+          "The OpenCloud notification worker did not become active",
+          { code: "WORKER_INSTALL_TIMEOUT", surface: "notifications", retryable: true },
+        ),
+      );
+    }, 15_000);
+    const changed = () => {
+      if (worker.state === "activated") {
+        globalThis.clearTimeout(timeout);
+        resolve();
+      } else if (worker.state === "redundant") {
+        globalThis.clearTimeout(timeout);
+        reject(
+          new OpenCloudError(
+            "The OpenCloud notification worker installation was replaced",
+            { code: "WORKER_INSTALL_FAILED", surface: "notifications", retryable: true },
+          ),
+        );
+      }
+    };
+    worker.addEventListener("statechange", changed);
+    changed();
+  });
+}
+
+class NotificationsClient implements OpenCloudNotificationsClient {
+  constructor(private readonly runtime: RuntimeCore) {}
+
+  async status(): Promise<OpenCloudNotificationStatus> {
+    const config = await this.configuration();
+    if (!supportsWebPush()) return notificationStatus("unsupported", false);
+    const registration = await globalThis.navigator.serviceWorker.getRegistration(
+      new URL(config.scope, normalizedOrigin()).toString(),
+    );
+    const subscription = await registration?.pushManager.getSubscription();
+    if (!subscription) {
+      return notificationStatus(globalThis.Notification.permission, false);
+    }
+    const session = await this.runtime.session(false);
+    if (!session) {
+      return notificationStatus(globalThis.Notification.permission, false);
+    }
+    const response = await this.runtime.hostRequest(
+      "/_opencloud/notifications/subscription/status",
+      {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+      },
+      "notifications",
+    );
+    await requireOk(response, "notifications");
+    const result = object(await response.json(), "notification status");
+    exactFields(result, ["subscribed"], "notification status");
+    return notificationStatus(
+      globalThis.Notification.permission,
+      bool(result.subscribed, "notification status.subscribed"),
+    );
+  }
+
+  async subscribe(): Promise<OpenCloudNotificationStatus> {
+    if (!supportsWebPush()) {
+      throw new OpenCloudError(
+        "Web Push is not supported in this browser context",
+        { code: "WEB_PUSH_UNSUPPORTED", surface: "notifications" },
+      );
+    }
+    const activation = globalThis.navigator.userActivation;
+    if (activation && !activation.isActive) {
+      throw new OpenCloudError(
+        "Notification permission must be requested from a user action",
+        { code: "USER_GESTURE_REQUIRED", surface: "notifications" },
+      );
+    }
+    // Invoke the browser prompt in the original click/tap task. Config and
+    // session discovery may need network I/O and must not consume the gesture.
+    const permissionPromise = globalThis.Notification.requestPermission();
+    const [permission, config] = await Promise.all([
+      permissionPromise,
+      this.configuration(),
+      this.runtime.requireUser(),
+    ]);
+    if (permission !== "granted") {
+      return notificationStatus(permission, false);
+    }
+    const registration = await globalThis.navigator.serviceWorker.register(
+      config.worker,
+      { scope: config.scope, updateViaCache: "none" },
+    );
+    await waitForActiveWorker(registration);
+    const existing = await registration.pushManager.getSubscription();
+    const subscription =
+      existing ??
+      (await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: applicationServerKey(config.applicationServerKey),
+      }));
+    const serialized = subscription.toJSON();
+    if (!serialized.endpoint || !serialized.keys?.p256dh || !serialized.keys.auth) {
+      if (!existing) await subscription.unsubscribe().catch(() => false);
+      throw invalidResponse(
+        "The browser returned an incomplete Web Push subscription",
+        "notifications",
+      );
+    }
+    try {
+      const response = await this.runtime.hostRequest(
+        "/_opencloud/notifications/subscription",
+        {
+          method: "PUT",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({
+            endpoint: serialized.endpoint,
+            expirationTime: serialized.expirationTime ?? null,
+            keys: serialized.keys,
+          }),
+        },
+        "notifications",
+      );
+      await requireOk(response, "notifications");
+    } catch (error) {
+      if (!existing) await subscription.unsubscribe().catch(() => false);
+      throw error;
+    }
+    return notificationStatus("granted", true);
+  }
+
+  async unsubscribe(): Promise<OpenCloudNotificationStatus> {
+    const config = await this.configuration();
+    await this.runtime.requireUser();
+    if (!supportsWebPush()) return notificationStatus("unsupported", false);
+    const registration = await globalThis.navigator.serviceWorker.getRegistration(
+      new URL(config.scope, normalizedOrigin()).toString(),
+    );
+    const subscription = await registration?.pushManager.getSubscription();
+    if (!subscription) {
+      return notificationStatus(globalThis.Notification.permission, false);
+    }
+    const response = await this.runtime.hostRequest(
+      "/_opencloud/notifications/subscription",
+      {
+        method: "DELETE",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+      },
+      "notifications",
+    );
+    await requireOk(response, "notifications");
+    await subscription.unsubscribe();
+    return notificationStatus(globalThis.Notification.permission, false);
+  }
+
+  private async configuration(): Promise<NonNullable<RuntimeConfig["notifications"]>> {
+    const config = await this.runtime.config();
+    if (!config.capabilities.notifications || !config.notifications) {
+      throw capabilityUnavailable("notifications", "notifications");
+    }
+    return config.notifications;
+  }
+}
+
 type RealtimeState = "idle" | "connecting" | "joined" | "reconnecting" | "closed";
 
 class RealtimeChannel {
@@ -2151,6 +2451,7 @@ class OpenCloudClientImplementation implements OpenCloudClient {
   readonly data: DataClient;
   readonly files: FilesClient;
   readonly functions: FunctionsClient;
+  readonly notifications: NotificationsClient;
   readonly realtime: RealtimeClient;
   readonly telemetry: TelemetryClient;
   private readonly runtime = new RuntimeCore();
@@ -2161,6 +2462,7 @@ class OpenCloudClientImplementation implements OpenCloudClient {
     this.data = new DataClient(this.runtime);
     this.files = new FilesClient(this.runtime, this.data);
     this.functions = new FunctionsClient(this.runtime);
+    this.notifications = new NotificationsClient(this.runtime);
     this.realtime = new RealtimeClient(this.runtime);
     this.telemetry = new TelemetryClient(this.runtime);
   }
