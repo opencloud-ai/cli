@@ -14,11 +14,24 @@ const relativePath = z
     "path must not traverse outside the bundle",
   );
 
+const sameOriginAbsolutePath = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .refine(
+    (value) =>
+      value.startsWith("/") &&
+      !value.startsWith("//") &&
+      !value.includes("\\") &&
+      !/[\u0000-\u001f\u007f]/.test(value),
+    "path must be a same-origin absolute path",
+  );
+
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
-/** The pre-production hard cutover deliberately installs one SDK contract. */
-export const sdkVersionSchema = z.literal("2.0.0", {
-  error: "expected the installed SDK version 2.0.0",
+/** Exact immutable SDK artifacts installed by this platform release. */
+export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0"], {
+  error: "expected an installed SDK version: 2.0.0 or 2.1.0",
 });
 
 export const migrationSchema = z
@@ -506,6 +519,13 @@ export const openCloudManifestSchema = z
       })
       .strict()
       .optional(),
+    notifications: z
+      .object({
+        webPush: z.literal(true),
+        icon: sameOriginAbsolutePath.optional(),
+      })
+      .strict()
+      .optional(),
     health: z
       .object({ path: z.string().startsWith("/").max(200).default("/") })
       .strict()
@@ -531,6 +551,16 @@ export const openCloudManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
+    if (
+      manifest.notifications?.webPush &&
+      manifest.runtime.sdk.version !== "2.1.0"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["notifications", "webPush"],
+        message: "Web Push notifications require runtime SDK version 2.1.0",
+      });
+    }
     const assertUnique = (
       values: string[],
       path:
@@ -699,6 +729,9 @@ export type IntegrationCapability = z.infer<typeof integrationCapabilitySchema>;
 export type IntegrationDefinition = z.infer<typeof integrationDefinitionSchema>;
 export type SdkVersion = z.infer<typeof sdkVersionSchema>;
 export type OpenCloudEmailAddress = z.infer<typeof emailAddressSchema>;
+export type OpenCloudNotifications = NonNullable<
+  OpenCloudManifest["notifications"]
+>;
 export type OpenCloudQueue = z.infer<typeof queueSchema>;
 export type CustomMetricDefinition = z.infer<
   typeof customMetricDefinitionSchema

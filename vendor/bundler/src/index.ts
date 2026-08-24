@@ -45,6 +45,7 @@ interface AuthorManifest {
   queues?: unknown[];
   cron?: unknown[];
   email?: unknown;
+  notifications?: unknown;
   health?: unknown;
   secrets?: Record<string, unknown>;
   integrations?: Record<string, unknown>;
@@ -463,7 +464,7 @@ async function inspectFunctionEntrypoints(
       /["'`]\/rest\/v1\//.test(content)
     ) {
       throw new Error(
-        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, ai, email, jobs, job, integrations, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
+        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, ai, email, notifications, jobs, job, integrations, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
       );
     }
     const usesServerBoundary =
@@ -498,7 +499,7 @@ async function findFrontendSdkWarnings(
       /fetch\s*\(\s*["'`]\/(?:rest|storage)\/v1(?:\/|["'`])/.test(content)
     ) {
       throw new Error(
-        `Frontend source ${relative} uses a removed or raw OpenCloud interface. Import { opencloud } from "/_opencloud/sdk.js" and use opencloud.data, opencloud.files, opencloud.functions, and opencloud.realtime instead of client construction, raw REST or Storage requests, buckets, or object paths.`,
+        `Frontend source ${relative} uses a removed or raw OpenCloud interface. Import { opencloud } from "/_opencloud/sdk.js" and use opencloud.data, opencloud.files, opencloud.functions, opencloud.notifications, and opencloud.realtime instead of client construction, raw REST or Storage requests, buckets, or object paths.`,
       );
     }
     if (

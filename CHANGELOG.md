@@ -2,6 +2,12 @@
 
 ## 3.3.0
 
+- Vendor the Web Push manifest and browser SDK 2.1.0 contracts so apps can
+  subscribe signed-in browsers through the managed same-origin broker.
+- Validate optional same-origin notification icons and preserve them in local
+  bundles, while retaining SDK 2.0.0 compatibility for apps without Web Push.
+- Add `app dev notifications list` for provider-free inspection of visible
+  notification payloads captured from the active development session.
 - Surface each development session's authenticated `browserPreviewUrl` for
   owner/builder review before deployment, while retaining the raw
   `previewUrl` for bounded CLI and agent inspection.

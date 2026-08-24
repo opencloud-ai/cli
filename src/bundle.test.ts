@@ -115,7 +115,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "2.0.0",
+        version: "2.1.0",
       },
     });
     expect(first.files).toEqual([
@@ -161,6 +161,39 @@ functions:
     expect(await readArchivedManifest(root, first.archive)).not.toHaveProperty(
       "integrations",
     );
+  });
+
+  it("validates and archives Web Push configuration and its app icon", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend", "icons"), { recursive: true });
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "frontend", "icons", "notification.png"),
+      "synthetic-png",
+    );
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+runtime:
+  sdk:
+    version: 2.1.0
+notifications:
+  webPush: true
+  icon: /icons/notification.png
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+
+    expect(bundle.manifest.notifications).toEqual({
+      webPush: true,
+      icon: "/icons/notification.png",
+    });
+    expect(bundle.files).toContain("frontend/icons/notification.png");
+    expect(archived.notifications).toEqual(bundle.manifest.notifications);
   });
 
   it("validates and archives declared background queues", async () => {

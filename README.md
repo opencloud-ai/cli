@@ -172,6 +172,7 @@ Use the stable capability preview and isolated migration-replayed database befor
   --subject "Test request" --text "Please acknowledge this message."
 "$OPENCLOUD_CLI" app dev email list .
 "$OPENCLOUD_CLI" app dev email get . "$MESSAGE_ID"
+"$OPENCLOUD_CLI" app dev notifications list .
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
 "$OPENCLOUD_CLI" app dev verify . --parallelism 5
@@ -192,7 +193,9 @@ Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-
 generated secrets receive isolated synthetic development values, while owner-
 configured required values remain unavailable and optional values may be
-absent. Ordinary Functions imported from `@opencloud/server` remain dormant
+absent. Web Push deliveries are captured for inspection with
+`app dev notifications list` instead of contacting browser push services.
+Ordinary Functions imported from `@opencloud/server` remain dormant
 until `app dev invoke` or a deliberate preview interaction calls them. A
 Function enqueue wakes its declared system consumer in the same isolated
 namespace. Exact-revision verification requires every declared Function to be
@@ -224,6 +227,20 @@ MIME and attachment bytes are never returned. Development Function sends are
 captured instead of delivered; `app dev email inject` accepts only reserved
 `.test` sender and Reply-To addresses, and body/attachment file paths resolve
 relative to the app directory.
+
+## Web Push notifications
+
+Declare `notifications.webPush: true` with runtime SDK `2.1.0`, then use
+`opencloud.notifications.status()`, `.subscribe()`, and `.unsubscribe()` in the
+frontend. Subscribing must follow a user click or tap. Functions send visible
+notifications through their managed `notifications.send()` context; app code
+never receives VAPID keys or browser endpoints.
+
+The optional manifest `notifications.icon` is the app-wide fallback. A Function
+may override it per message, and OpenCloud uses its own logo if neither is
+provided. Browsers may apply platform-specific presentation rules; iOS and
+iPadOS currently display the installed web app icon instead of the per-message
+Web Push icon.
 
 ## Background jobs
 

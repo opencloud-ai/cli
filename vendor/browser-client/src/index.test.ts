@@ -33,7 +33,7 @@ const runtimeConfig = {
   environment: "production",
   sdk: {
     package: "@opencloud/js",
-    version: "2.0.0",
+    version: "2.1.0",
     module: "/_opencloud/sdk.js",
     types: "/_opencloud/sdk.d.ts",
     docs: "https://docs.opencloud.ai/sdk/javascript/",
@@ -43,10 +43,16 @@ const runtimeConfig = {
     data: true,
     files: true,
     functions: true,
+    notifications: true,
     realtime: true,
     telemetry: true,
   },
   files: { access: "user", maxUploadBytes: 10_000 },
+  notifications: {
+    worker: "/_opencloud/push-worker.js",
+    scope: "/_opencloud/",
+    applicationServerKey: `B${"A".repeat(86)}`,
+  },
   functions: [
     { name: "private-probe", access: "user" },
     { name: "public-probe", access: "public" },
@@ -178,7 +184,7 @@ afterEach(() => {
 
 describe("@opencloud/js v2", () => {
   it("exports one stable singleton contract without legacy factories or raw namespaces", () => {
-    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.0.0");
+    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.1.0");
     expect("OPEN_CLOUD_JS_VERSION" in sdk).toBe(false);
     expect(opencloud).toMatchObject({
       app: { info: expect.any(Function) },
@@ -200,6 +206,11 @@ describe("@opencloud/js v2", () => {
       functions: {
         call: expect.any(Function),
         stream: expect.any(Function),
+      },
+      notifications: {
+        status: expect.any(Function),
+        subscribe: expect.any(Function),
+        unsubscribe: expect.any(Function),
       },
       realtime: {
         subscribe: expect.any(Function),
@@ -669,6 +680,108 @@ describe("@opencloud/js v2", () => {
       code: "FUNCTION_NOT_DECLARED",
     });
     expect(calls).toHaveLength(3);
+  });
+
+  it("subscribes and unsubscribes Web Push only through the managed same-origin broker", async () => {
+    let currentSubscription: PushSubscription | null = null;
+    const unsubscribe = vi.fn(async () => {
+      currentSubscription = null;
+      return true;
+    });
+    const subscription = {
+      endpoint: "https://web.push.apple.com/Q2/browser-subscription",
+      expirationTime: null,
+      options: { userVisibleOnly: true },
+      getKey: vi.fn(),
+      toJSON: () => ({
+        endpoint: "https://web.push.apple.com/Q2/browser-subscription",
+        expirationTime: null,
+        keys: {
+          p256dh: "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          auth: "AAAAAAAAAAAAAAAAAAAAAA",
+        },
+      }),
+      unsubscribe,
+    } as unknown as PushSubscription;
+    const pushManager = {
+      getSubscription: vi.fn(async () => currentSubscription),
+      subscribe: vi.fn(async () => {
+        currentSubscription = subscription;
+        return subscription;
+      }),
+    };
+    const registration = {
+      active: {},
+      installing: null,
+      waiting: null,
+      pushManager,
+    } as unknown as ServiceWorkerRegistration;
+    const serviceWorker = {
+      getRegistration: vi.fn(async () => registration),
+      register: vi.fn(async () => registration),
+    };
+    class FakeNotification {
+      static permission: NotificationPermission = "default";
+      static async requestPermission(): Promise<NotificationPermission> {
+        FakeNotification.permission = "granted";
+        return "granted";
+      }
+    }
+    vi.stubGlobal("navigator", {
+      serviceWorker,
+      userActivation: { isActive: true },
+    });
+    vi.stubGlobal("Notification", FakeNotification);
+    vi.stubGlobal("PushManager", class {});
+    const calls: Array<{ path: string; method: string; body: unknown }> = [];
+    standardFetch((url, init) => {
+      if (url.pathname === "/_opencloud/notifications/subscription") {
+        calls.push({
+          path: url.pathname,
+          method: init.method ?? "GET",
+          body: JSON.parse(String(init.body)),
+        });
+        return json({ subscribed: init.method === "PUT" });
+      }
+      if (url.pathname === "/_opencloud/notifications/subscription/status") {
+        calls.push({
+          path: url.pathname,
+          method: init.method ?? "GET",
+          body: JSON.parse(String(init.body)),
+        });
+        return json({ subscribed: true });
+      }
+      return undefined;
+    });
+
+    await expect(opencloud.notifications.status()).resolves.toMatchObject({
+      state: "prompt",
+      subscribed: false,
+    });
+    await expect(opencloud.notifications.subscribe()).resolves.toMatchObject({
+      state: "subscribed",
+      subscribed: true,
+    });
+    await expect(opencloud.notifications.status()).resolves.toMatchObject({
+      state: "subscribed",
+      subscribed: true,
+    });
+    await expect(opencloud.notifications.unsubscribe()).resolves.toMatchObject({
+      state: "unsubscribed",
+      subscribed: false,
+    });
+    expect(serviceWorker.register).toHaveBeenCalledWith(
+      "/_opencloud/push-worker.js",
+      { scope: "/_opencloud/", updateViaCache: "none" },
+    );
+    expect(pushManager.subscribe).toHaveBeenCalledWith(
+      expect.objectContaining({ userVisibleOnly: true }),
+    );
+    expect(calls.map(({ method }) => method)).toEqual(["PUT", "POST", "DELETE"]);
+    expect(calls[0]?.body).toMatchObject({
+      endpoint: "https://web.push.apple.com/Q2/browser-subscription",
+    });
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
   it("normalizes backend and network errors into bounded typed failures", async () => {

@@ -46,17 +46,15 @@ describe("OpenCloud manifest", () => {
     );
   });
 
-  it("requires one exact deployment-pinned SDK version", () => {
-    expect(
-      parseManifest({
-        ...valid,
-        runtime: {
-          sdk: { version: "2.0.0" },
-        },
-      }).runtime,
-    ).toEqual({
-      sdk: { version: "2.0.0" },
-    });
+  it("requires an exact installed deployment-pinned SDK version", () => {
+    for (const version of ["2.0.0", "2.1.0"]) {
+      expect(
+        parseManifest({
+          ...valid,
+          runtime: { sdk: { version } },
+        }).runtime,
+      ).toEqual({ sdk: { version } });
+    }
   });
 
   it("rejects legacy versions, moving ranges, and tags", () => {
@@ -66,7 +64,60 @@ describe("OpenCloud manifest", () => {
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/installed SDK version 2\.0\.0/);
+      ).toThrow(/installed SDK version: 2\.0\.0 or 2\.1\.0/);
+    }
+  });
+
+  it("enables Web Push only through the exact notifications contract", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        runtime: { sdk: { version: "2.1.0" } },
+        notifications: { webPush: true },
+      }).notifications,
+    ).toEqual({ webPush: true });
+    expect(
+      parseManifest({
+        ...valid,
+        runtime: { sdk: { version: "2.1.0" } },
+        notifications: {
+          webPush: true,
+          icon: "/icons/notification.png?v=2",
+        },
+      }).notifications,
+    ).toEqual({
+      webPush: true,
+      icon: "/icons/notification.png?v=2",
+    });
+    expect(() =>
+      parseManifest({ ...valid, notifications: { webPush: false } }),
+    ).toThrow();
+    expect(() =>
+      parseManifest({
+        ...valid,
+        runtime: { sdk: { version: "2.0.0" } },
+        notifications: { webPush: true },
+      }),
+    ).toThrow(/require runtime SDK version 2\.1\.0/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        notifications: { webPush: true, silentPush: true },
+      }),
+    ).toThrow(/Unrecognized key/);
+    for (const icon of [
+      "https://cdn.example.test/icon.png",
+      "//cdn.example.test/icon.png",
+      "/icons\\notification.png",
+      "/icons/notification.png\n",
+    ]) {
+      expect(() =>
+        parseManifest({
+          ...valid,
+          runtime: { sdk: { version: "2.1.0" } },
+          notifications: { webPush: true, icon },
+        }),
+      ).toThrow(/same-origin absolute path/);
     }
   });
 
@@ -608,7 +659,10 @@ describe("OpenCloud manifest", () => {
           provider: "slack",
           account: "app",
           cardinality: "many",
-          capabilities: ["slack.messages.send", "slack.messages.receive"],
+          capabilities: [
+            "slack.messages.send",
+            "slack.messages.receive",
+          ],
           events: {
             message: { function: "receive-slack-message" },
           },
@@ -676,7 +730,10 @@ describe("OpenCloud manifest", () => {
         team_chat: {
           provider: "telegram",
           account: "app",
-          capabilities: ["telegram.messages.send", "telegram.messages.receive"],
+          capabilities: [
+            "telegram.messages.send",
+            "telegram.messages.receive",
+          ],
           events: {
             message: { function: "receive-telegram-message" },
           },
@@ -688,7 +745,10 @@ describe("OpenCloud manifest", () => {
       provider: "telegram",
       account: "app",
       cardinality: "one",
-      capabilities: ["telegram.messages.send", "telegram.messages.receive"],
+      capabilities: [
+        "telegram.messages.send",
+        "telegram.messages.receive",
+      ],
       events: {
         message: { function: "receive-telegram-message" },
       },
