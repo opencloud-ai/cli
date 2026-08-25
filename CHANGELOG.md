@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.4.0
+
+- Vendor the SDK 2.2.0 manifest and browser contracts so bundles can declare
+  app-owned Google Analytics, Search Console, and Google Ads reporting access.
+- Validate provider-scoped read capabilities and require SDK 2.2.0 for those
+  reporting integrations while retaining SDK 2.0.0 and 2.1.0 compatibility.
+- Default newly bundled apps to SDK 2.2.0 and preserve reporting declarations
+  in deterministic archives for development and deployment.
+
 ## 3.3.1
 
 - Accept protected schema-2 agent runtime sessions before a new app receives

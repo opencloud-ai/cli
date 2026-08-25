@@ -47,7 +47,7 @@ describe("OpenCloud manifest", () => {
   });
 
   it("requires an exact installed deployment-pinned SDK version", () => {
-    for (const version of ["2.0.0", "2.1.0"]) {
+    for (const version of ["2.0.0", "2.1.0", "2.2.0"]) {
       expect(
         parseManifest({
           ...valid,
@@ -64,7 +64,7 @@ describe("OpenCloud manifest", () => {
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/installed SDK version: 2\.0\.0 or 2\.1\.0/);
+      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, or 2\.2\.0/);
     }
   });
 
@@ -513,6 +513,68 @@ describe("OpenCloud manifest", () => {
         },
       }),
     ).toThrow(/not supported by google-drive/);
+  });
+
+  it("declares app-owned Google reporting resources", () => {
+    const integrations = parseManifest({
+      ...valid,
+      runtime: { sdk: { version: "2.2.0" } },
+      integrations: {
+        analytics: {
+          provider: "google-analytics",
+          account: "app",
+          capabilities: ["analytics.reports.read"],
+        },
+        search: {
+          provider: "google-search-console",
+          account: "app",
+          cardinality: "many",
+          capabilities: ["search.performance.read"],
+        },
+        ads: {
+          provider: "google-ads",
+          account: "app",
+          capabilities: ["ads.reporting.read"],
+        },
+      },
+    }).integrations;
+
+    expect(integrations).toMatchObject({
+      analytics: { provider: "google-analytics", cardinality: "one" },
+      search: { provider: "google-search-console", cardinality: "many" },
+      ads: { provider: "google-ads", cardinality: "one" },
+    });
+    for (const [provider, capability] of [
+      ["google-analytics", "analytics.reports.read"],
+      ["google-search-console", "search.performance.read"],
+      ["google-ads", "ads.reporting.read"],
+    ] as const) {
+      expect(() =>
+        parseManifest({
+          ...valid,
+          runtime: { sdk: { version: "2.2.0" } },
+          integrations: {
+            reporting: {
+              provider,
+              account: "calling_user",
+              capabilities: [capability],
+            },
+          },
+        }),
+      ).toThrow(new RegExp(`${provider} integrations must use the app account`));
+    }
+    expect(() =>
+      parseManifest({
+        ...valid,
+        integrations: {
+          analytics: {
+            provider: "google-analytics",
+            account: "app",
+            capabilities: ["analytics.reports.read"],
+          },
+        },
+      }),
+    ).toThrow(/google-analytics requires runtime SDK version 2\.2\.0 or later/);
   });
 
   it("declares app-owned HubSpot CRM access and bounds associations", () => {
