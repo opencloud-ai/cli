@@ -22,15 +22,27 @@ export interface StartingOnboardingSession {
   visibility: "public" | "private";
 }
 
-export interface ReadyAgentSession {
-  schemaVersion: 1;
+interface ReadyAgentSessionBase {
   state: "ready";
   apiUrl: string;
   appId: string;
-  appUrl: string;
   token: string;
   credentialExpiresAt: string;
 }
+
+export interface LegacyReadyAgentSession extends ReadyAgentSessionBase {
+  schemaVersion: 1;
+  appUrl: string;
+}
+
+export interface RuntimeReadyAgentSession extends ReadyAgentSessionBase {
+  schemaVersion: 2;
+  appUrl?: string;
+}
+
+export type ReadyAgentSession =
+  | LegacyReadyAgentSession
+  | RuntimeReadyAgentSession;
 
 export type OpenCloudSession =
   | StartingOnboardingSession
@@ -73,14 +85,11 @@ export function loadSession(file: string): OpenCloudSession | null {
     throw error;
   }
   const value = JSON.parse(raw) as Partial<OpenCloudSession>;
-  if (
-    value.schemaVersion !== 1 ||
-    typeof value.apiUrl !== "string" ||
-    !value.apiUrl
-  ) {
+  if (typeof value.apiUrl !== "string" || !value.apiUrl) {
     throw new Error(`Invalid OpenCloud session file: ${file}`);
   }
   if (
+    value.schemaVersion === 1 &&
     value.state === "starting" &&
     typeof value.idempotencyKey === "string" &&
     typeof value.email === "string" &&
@@ -90,15 +99,19 @@ export function loadSession(file: string): OpenCloudSession | null {
     return value as StartingOnboardingSession;
   }
   if (
+    (value.schemaVersion === 1 || value.schemaVersion === 2) &&
     value.state === "ready" &&
     typeof value.appId === "string" &&
-    typeof value.appUrl === "string" &&
     typeof value.token === "string" &&
-    typeof value.credentialExpiresAt === "string"
+    typeof value.credentialExpiresAt === "string" &&
+    (value.schemaVersion === 1
+      ? typeof value.appUrl === "string"
+      : value.appUrl === undefined || typeof value.appUrl === "string")
   ) {
     return value as ReadyAgentSession;
   }
   if (
+    value.schemaVersion === 1 &&
     value.state === "awaiting_email_verification" &&
     typeof value.onboardingId === "string" &&
     typeof value.completionToken === "string" &&

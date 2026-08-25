@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.1
+
+- Accept protected schema-2 agent runtime sessions before a new app receives
+  its public URL, so app-ID-based build, validation, and development work can
+  begin while identity assignment completes in parallel.
+- Keep schema-1 onboarding sessions compatible and recognize the public URL
+  when the runtime atomically adds it to the schema-2 session.
+
 ## 3.3.0
 
 - Vendor the Web Push manifest and browser SDK 2.1.0 contracts so apps can
