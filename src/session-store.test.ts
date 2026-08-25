@@ -5,6 +5,7 @@ import {
   rm,
   stat,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -49,6 +50,50 @@ describe("OpenCloud CLI session store", () => {
     expect(
       await readFile(path.join(directory, ".opencloud", ".gitignore"), "utf8"),
     ).toBe("*\n!.gitignore\n");
+  });
+
+  it("loads a runtime session before and after the app receives a public URL", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const file = path.join(directory, ".opencloud", "session.json");
+    const pendingSession: ReadyAgentSession = {
+      schemaVersion: 2,
+      state: "ready",
+      apiUrl: "https://api.opencloud.ai",
+      appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+      token: "oc_agent_secret",
+      credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+    };
+
+    await saveSession(file, pendingSession);
+    expect(loadSession(file)).toEqual(pendingSession);
+
+    const assignedSession: ReadyAgentSession = {
+      ...pendingSession,
+      appUrl: "https://family-tasks-a1b2c3.opencloud.ai",
+    };
+    await saveSession(file, assignedSession);
+    expect(loadSession(file)).toEqual(assignedSession);
+  });
+
+  it("keeps the public URL required in legacy ready sessions", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const file = path.join(directory, ".opencloud", "session.json");
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      JSON.stringify({
+        schemaVersion: 1,
+        state: "ready",
+        apiUrl: "https://api.opencloud.ai",
+        appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+        token: "oc_agent_secret",
+        credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+      }),
+    );
+
+    expect(() => loadSession(file)).toThrow("Invalid OpenCloud session file");
   });
 
   it("persists the retry key before onboarding can return a credential", async () => {
