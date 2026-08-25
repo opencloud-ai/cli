@@ -6,7 +6,7 @@
  * HTTP responses deliberately stay behind this module.
  */
 
-export const OPEN_CLOUD_SDK_VERSION = "2.1.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.2.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 export type OpenCloudVisibility = "public" | "private";

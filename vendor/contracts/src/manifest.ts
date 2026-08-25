@@ -30,8 +30,8 @@ const sameOriginAbsolutePath = z
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0"], {
-  error: "expected an installed SDK version: 2.0.0 or 2.1.0",
+export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0"], {
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, or 2.2.0",
 });
 
 export const migrationSchema = z
@@ -97,6 +97,9 @@ export const integrationCapabilitySchema = z.enum([
   "docs.documents.write",
   "slides.presentations.read",
   "slides.presentations.write",
+  "analytics.reports.read",
+  "search.performance.read",
+  "ads.reporting.read",
   "bank.accounts.read",
   "bank.balances.read",
   "bank.transactions.read",
@@ -138,6 +141,9 @@ export const integrationProviderSchema = z.enum([
   "google-sheets",
   "google-docs",
   "google-slides",
+  "google-analytics",
+  "google-search-console",
+  "google-ads",
   "gocardless-bank-account-data",
   "wise-balance-webhook",
   "slack",
@@ -164,6 +170,9 @@ const capabilitiesForProvider: Record<
     "slides.presentations.read",
     "slides.presentations.write",
   ]),
+  "google-analytics": new Set(["analytics.reports.read"]),
+  "google-search-console": new Set(["search.performance.read"]),
+  "google-ads": new Set(["ads.reporting.read"]),
   "gocardless-bank-account-data": new Set([
     "bank.accounts.read",
     "bank.balances.read",
@@ -258,7 +267,16 @@ export const integrationDefinitionSchema = z
         message: "wise-balance-webhook integrations must use the app account",
       });
     }
-    if (["slack", "telegram", "hubspot-crm"].includes(definition.provider)) {
+    if (
+      [
+        "slack",
+        "telegram",
+        "hubspot-crm",
+        "google-analytics",
+        "google-search-console",
+        "google-ads",
+      ].includes(definition.provider)
+    ) {
       if (definition.account !== "app") {
         context.addIssue({
           code: "custom",
@@ -553,13 +571,30 @@ export const openCloudManifestSchema = z
   .superRefine((manifest, context) => {
     if (
       manifest.notifications?.webPush &&
-      manifest.runtime.sdk.version !== "2.1.0"
+      manifest.runtime.sdk.version === "2.0.0"
     ) {
       context.addIssue({
         code: "custom",
         path: ["notifications", "webPush"],
-        message: "Web Push notifications require runtime SDK version 2.1.0",
+        message: "Web Push notifications require runtime SDK version 2.1.0 or later",
       });
+    }
+    for (const [name, integration] of Object.entries(manifest.integrations)) {
+      if (
+        [
+          "google-analytics",
+          "google-search-console",
+          "google-ads",
+        ].includes(integration.provider) &&
+        (manifest.runtime.sdk.version === "2.0.0" ||
+          manifest.runtime.sdk.version === "2.1.0")
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["integrations", name, "provider"],
+          message: `${integration.provider} requires runtime SDK version 2.2.0 or later`,
+        });
+      }
     }
     const assertUnique = (
       values: string[],

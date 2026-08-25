@@ -115,7 +115,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "2.1.0",
+        version: "2.2.0",
       },
     });
     expect(first.files).toEqual([
@@ -264,6 +264,58 @@ integrations:
       account: "app",
       cardinality: "one",
       capabilities: ["crm.contacts.read", "crm.contacts.write"],
+    });
+    expect(archived.integrations).toEqual(bundle.manifest.integrations);
+  });
+
+  it("validates and archives Google reporting integrations with SDK 2.2", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeManifest(
+      root,
+      `
+frontend:
+  directory: frontend
+runtime:
+  sdk:
+    version: 2.2.0
+integrations:
+  analytics:
+    provider: google-analytics
+    account: app
+    capabilities:
+      - analytics.reports.read
+  search:
+    provider: google-search-console
+    account: app
+    capabilities:
+      - search.performance.read
+  ads:
+    provider: google-ads
+    account: app
+    capabilities:
+      - ads.reporting.read
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.2.0");
+    expect(bundle.manifest.integrations).toMatchObject({
+      analytics: {
+        provider: "google-analytics",
+        capabilities: ["analytics.reports.read"],
+      },
+      search: {
+        provider: "google-search-console",
+        capabilities: ["search.performance.read"],
+      },
+      ads: {
+        provider: "google-ads",
+        capabilities: ["ads.reporting.read"],
+      },
     });
     expect(archived.integrations).toEqual(bundle.manifest.integrations);
   });
