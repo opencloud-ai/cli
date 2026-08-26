@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.5.0
+
+- Validate deployment-pinned alert rules against their declared custom metrics,
+  including bounded thresholds, windows, severities, and default lifecycle
+  settings.
+- Reject duplicate rule IDs, unknown metric references, and aggregations that
+  do not match counter or gauge metric semantics before building or deploying.
+
 ## 3.4.0
 
 - Vendor the SDK 2.2.0 manifest and browser contracts so bundles can declare

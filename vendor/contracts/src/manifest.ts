@@ -491,6 +491,39 @@ export const customMetricDefinitionSchema = z
   })
   .strict();
 
+const alertRuleIdSchema = z
+  .string()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z][a-z0-9-]*$/);
+
+const alertAggregationSchema = z.enum([
+  "sum",
+  "rate",
+  "latest",
+  "min",
+  "max",
+  "avg",
+]);
+const alertOperatorSchema = z.enum(["gt", "gte", "lt", "lte", "eq"]);
+const alertWindowSchema = z.enum(["5m", "15m", "1h", "24h"]);
+const alertSeveritySchema = z.enum(["info", "warning", "critical"]);
+
+export const manifestAlertRuleSchema = z
+  .object({
+    id: alertRuleIdSchema,
+    name: z.string().trim().min(1).max(120),
+    metric: customMetricNameSchema,
+    aggregation: alertAggregationSchema,
+    operator: alertOperatorSchema,
+    threshold: z.number().finite().min(-1e15).max(1e15),
+    window: alertWindowSchema,
+    minimumSamples: z.number().int().min(1).max(100_000).default(1),
+    severity: alertSeveritySchema.default("warning"),
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
 export const openCloudManifestSchema = z
   .object({
     schemaVersion: z.literal(2),
@@ -563,6 +596,7 @@ export const openCloudManifestSchema = z
     observability: z
       .object({
         metrics: z.array(customMetricDefinitionSchema).max(20).default([]),
+        alertRules: z.array(manifestAlertRuleSchema).max(20).optional(),
       })
       .strict()
       .optional(),
@@ -642,6 +676,39 @@ export const openCloudManifestSchema = z
       (manifest.observability?.metrics ?? []).map((metric) => metric.name),
       "observability",
     );
+    const alertRuleIds = new Set<string>();
+    (manifest.observability?.alertRules ?? []).forEach((rule, index) => {
+      if (alertRuleIds.has(rule.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["observability", "alertRules", index, "id"],
+          message: `observability alert rule IDs must be unique: ${rule.id}`,
+        });
+      }
+      alertRuleIds.add(rule.id);
+      const metric = manifest.observability?.metrics.find(
+        (definition) => definition.name === rule.metric,
+      );
+      if (!metric) {
+        context.addIssue({
+          code: "custom",
+          path: ["observability", "alertRules", index, "metric"],
+          message: `alert rule references unknown metric: ${rule.metric}`,
+        });
+        return;
+      }
+      const aggregationIsValid =
+        metric.type === "counter"
+          ? rule.aggregation === "sum" || rule.aggregation === "rate"
+          : ["latest", "min", "max", "avg"].includes(rule.aggregation);
+      if (!aggregationIsValid) {
+        context.addIssue({
+          code: "custom",
+          path: ["observability", "alertRules", index, "aggregation"],
+          message: `${rule.aggregation} is not valid for a ${metric.type} metric`,
+        });
+      }
+    });
     const orderedMigrations = [...manifest.migrations]
       .map((migration) => migration.id)
       .sort();
@@ -771,6 +838,7 @@ export type OpenCloudQueue = z.infer<typeof queueSchema>;
 export type CustomMetricDefinition = z.infer<
   typeof customMetricDefinitionSchema
 >;
+export type ManifestAlertRule = z.infer<typeof manifestAlertRuleSchema>;
 
 export function parseManifest(value: unknown): OpenCloudManifest {
   if (value && typeof value === "object" && !Array.isArray(value)) {
