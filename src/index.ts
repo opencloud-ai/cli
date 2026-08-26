@@ -53,7 +53,7 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 
-const CLI_VERSION = "3.4.0";
+const CLI_VERSION = "3.5.0";
 
 const program = new Command()
   .name("opencloud")

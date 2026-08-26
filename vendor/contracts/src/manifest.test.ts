@@ -214,6 +214,84 @@ describe("OpenCloud manifest", () => {
     });
   });
 
+  it("accepts deployment-pinned alert rules for declared metrics", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        observability: {
+          metrics: [{ name: "task_failures", type: "counter" }],
+          alertRules: [
+            {
+              id: "task-failure",
+              name: "Task processing failure",
+              metric: "task_failures",
+              aggregation: "sum",
+              operator: "gte",
+              threshold: 1,
+              window: "5m",
+              severity: "critical",
+            },
+          ],
+        },
+      }).observability?.alertRules,
+    ).toEqual([
+      {
+        id: "task-failure",
+        name: "Task processing failure",
+        metric: "task_failures",
+        aggregation: "sum",
+        operator: "gte",
+        threshold: 1,
+        window: "5m",
+        minimumSamples: 1,
+        severity: "critical",
+        enabled: true,
+      },
+    ]);
+  });
+
+  it("rejects invalid deployment-pinned alert rules", () => {
+    const observability = {
+      metrics: [{ name: "task_failures", type: "counter" }],
+    };
+    const rule = {
+      id: "task-failure",
+      name: "Task processing failure",
+      metric: "task_failures",
+      aggregation: "sum",
+      operator: "gte",
+      threshold: 1,
+      window: "5m",
+    };
+    expect(() =>
+      parseManifest({
+        ...valid,
+        observability: {
+          ...observability,
+          alertRules: [{ ...rule, metric: "missing_metric" }],
+        },
+      }),
+    ).toThrow(/references unknown metric/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        observability: {
+          ...observability,
+          alertRules: [{ ...rule, aggregation: "latest" }],
+        },
+      }),
+    ).toThrow(/not valid for a counter metric/);
+    expect(() =>
+      parseManifest({
+        ...valid,
+        observability: {
+          ...observability,
+          alertRules: [rule, rule],
+        },
+      }),
+    ).toThrow(/rule IDs must be unique/);
+  });
+
   it("rejects duplicate or high-cardinality custom metric definitions", () => {
     expect(() =>
       parseManifest({
