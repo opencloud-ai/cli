@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.7.0
+
+- Add a crash-safe, exact-app mutation journal with stable idempotency reuse,
+  durable-operation and workflow checkpoints, concurrent process locking, and
+  fail-closed recovery when a prior outcome cannot be reconciled safely.
+- Bind runtime journals to the exact API base, app, Agent root run, and owner
+  credential family without retaining URLs, credentials, request bodies,
+  email addresses, source paths, or secret-derived fingerprints.
+- Require the app-owner runtime journal to be its dedicated persistent Linux
+  mount, retain inode-anchored root/entry/lock handles, and serialize complete
+  development start/sync/promote/stop workflows across CLI processes.
+- Reconcile development verification by exact revision receipts and make
+  deploy, development start/sync/promote, draft apply, and production
+  verification recoverable across process loss.
+- Require the server's CLI mutation-journal compatibility marker before each
+  journal-managed exact-app mutation. Add a release audit for those Commander
+  leaves, vendored metadata, and entrypoint call sites, plus an explicit audit
+  of account, OAuth, onboarding, app-create, and app-connect boundaries.
+- Require a caller-stable key for pre-journal app creation. Document app
+  connection's bounded unkeyed-credential orphan/expiry behavior instead of
+  describing it as crash-safe replay.
+
 ## 3.6.0
 
 - Add exact-app owner command parity for lifecycle and access, server drafts,

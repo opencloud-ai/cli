@@ -88,6 +88,75 @@ describe("controlPlaneOperations", () => {
     expect(controlPlaneOperations.verifyApp.idempotency).toBe("required");
   });
 
+  it("matches the CLI mutation recovery metadata contract", () => {
+    expect(controlPlaneOperations.startAgentOnboarding.idempotency).toBe(
+      "required",
+    );
+    expect(controlPlaneOperations.completeAgentOnboarding.idempotency).toBe(
+      "none",
+    );
+    expect(controlPlaneOperations.startDevSession).toMatchObject({
+      idempotency: "intrinsic",
+      mcp: { idempotentHint: true },
+    });
+    for (const operation of [
+      controlPlaneOperations.createDraft,
+      controlPlaneOperations.mutateDevData,
+      controlPlaneOperations.invokeDevFunction,
+      controlPlaneOperations.injectDevEmail,
+      controlPlaneOperations.generateSecret,
+      controlPlaneOperations.createSecretEntryLink,
+    ]) {
+      expect(operation.idempotency).toBe("required");
+      expect(operation.mcp?.idempotentHint).toBe(false);
+    }
+    expect(controlPlaneOperations.verifyDevSession.idempotency).toBe("none");
+    expect(controlPlaneOperations.verifyDevSession.description).toContain(
+      "poll while the session status is verifying",
+    );
+    expect(controlPlaneOperations.requestAppAccessTokenApproval).toMatchObject({
+      method: "POST",
+      path: "/v1/apps/{appId}/access-token-requests",
+      idempotency: "required",
+    });
+    expect(controlPlaneOperations.putSecret).toMatchObject({
+      method: "PUT",
+      path: "/v1/apps/{appId}/secrets/{name}",
+      idempotency: "required",
+    });
+    expect(controlPlaneOperations.putSecret.description).toContain(
+      "replays the redacted success",
+    );
+    expect("mcp" in controlPlaneOperations.putSecret).toBe(false);
+  });
+
+  it("types the default-off platform mutation-journal marker", () => {
+    const operation = controlPlaneOperations.getPlatformVersion;
+    const base = {
+      version: "1.2.3",
+      commit: "abc123",
+      builtAt: "2026-09-02T00:00:00Z",
+      releaseId: "platform-v1.2.3",
+    };
+
+    expect(operation).toMatchObject({
+      method: "GET",
+      path: "/version",
+      auth: "none",
+      idempotency: "none",
+    });
+    expect(operation.output.parse({ ...base, contracts: {} })).toEqual({
+      ...base,
+      contracts: {},
+    });
+    expect(
+      operation.output.parse({
+        ...base,
+        contracts: { cliMutationJournal: 1 },
+      }),
+    ).toEqual({ ...base, contracts: { cliMutationJournal: 1 } });
+  });
+
   it("supports bounded cursor pages for retained app email history", () => {
     const appId = "22222222-2222-4222-8222-222222222222";
     const operation = controlPlaneOperations.getAppEmail;
@@ -490,5 +559,40 @@ describe("controlPlaneOperations", () => {
         },
       ]),
     ).toHaveLength(1);
+  });
+
+  it("fences development-session cleanup to the expected active deployment", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const deploymentId = "33333333-3333-4333-8333-333333333333";
+    const operation = controlPlaneOperations.stopDevSession;
+
+    expect(operation).toMatchObject({
+      method: "DELETE",
+      path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
+      queryKey: "query",
+    });
+    expect(
+      operation.input.parse({
+        appId,
+        sessionId,
+        query: { expectedActiveDeploymentId: deploymentId },
+      }),
+    ).toEqual({
+      appId,
+      sessionId,
+      query: { expectedActiveDeploymentId: deploymentId },
+    });
+    expect(operation.input.parse({ appId, sessionId })).toEqual({
+      appId,
+      sessionId,
+    });
+    expect(() =>
+      operation.input.parse({
+        appId,
+        sessionId,
+        query: { expectedActiveDeploymentId: "not-a-uuid" },
+      }),
+    ).toThrow();
   });
 });

@@ -20,6 +20,7 @@ export interface ClientOptions {
 export interface CallOptions {
   idempotencyKey?: string | undefined;
   timeoutMs?: number | undefined;
+  cacheControl?: "no-cache" | undefined;
 }
 
 export class ApiError extends Error {
@@ -82,6 +83,7 @@ export class OpenCloudClient {
       "body" in input ? input.body : undefined,
       idempotencyKey,
       options.timeoutMs,
+      options.cacheControl,
     );
     return operation.output.parse(response) as ControlPlaneOperationOutput<T>;
   }
@@ -217,6 +219,7 @@ export class OpenCloudClient {
     body?: unknown,
     idempotencyKey?: string,
     timeoutMs = 30_000,
+    cacheControl?: "no-cache",
   ): Promise<unknown> {
     const token = await this.resolveToken();
     const response = await this.fetcher(`${this.apiUrl}${requestPath}`, {
@@ -231,6 +234,7 @@ export class OpenCloudClient {
         accept: "application/json",
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+        ...(cacheControl ? { "cache-control": cacheControl } : {}),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(timeoutMs),

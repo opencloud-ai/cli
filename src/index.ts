@@ -10,8 +10,12 @@ import {
   OPEN_CLOUD_LOGO_DATA_URI,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
-import { OpenCloudClient } from "./api-client.js";
+import { ApiError, OpenCloudClient } from "./api-client.js";
 import { requestApp } from "./app-edge.js";
+import {
+  withDevStateLock,
+  withDevWorkflowLock,
+} from "./dev-workflow-lock.js";
 import {
   beginDeviceAuthorization,
   completeDeviceAuthorization,
@@ -52,6 +56,17 @@ import {
   loadWorkspaceBinding,
   resolveWorkspaceFile,
 } from "./workspace-store.js";
+import type { MutationCommandId } from "./mutation-dispositions.js";
+import { assertMutationJournalCompatibility } from "./mutation-compatibility.js";
+import {
+  MUTATION_JOURNAL_ENV,
+  MutationJournal,
+  assertAppOwnerMutationJournalDirectory,
+  mutationDigest,
+  resolveMutationJournalDirectory,
+  type MutationIntentSpec,
+  type MutationRun,
+} from "./mutation-journal.js";
 import {
   CliContractError,
   addOperationOptions,
@@ -68,7 +83,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.6.0";
+const CLI_VERSION = "3.7.0";
 
 const program = new Command()
   .name("opencloud")
@@ -107,9 +122,11 @@ function sessionFile(): string {
   );
 }
 
-function workspaceFile(): string {
+function workspaceFile(cwd = process.env.INIT_CWD ?? process.cwd()): string {
+  const configured = program.opts<{ workspaceFile?: string }>().workspaceFile;
   return resolveWorkspaceFile(
-    program.opts<{ workspaceFile?: string }>().workspaceFile,
+    configured,
+    configured ? process.env.INIT_CWD ?? process.cwd() : cwd,
   );
 }
 
@@ -117,22 +134,22 @@ function availableSession(): OpenCloudSession | null {
   return loadSession(sessionFile());
 }
 
-function availableWorkspace() {
-  return loadWorkspaceBinding(workspaceFile());
+function availableWorkspace(cwd?: string) {
+  return loadWorkspaceBinding(workspaceFile(cwd));
 }
 
-function targetApiUrl(): string {
+function targetApiUrl(cwd?: string): string {
   return (
     program.opts<{ apiUrl?: string }>().apiUrl ??
-    availableWorkspace()?.apiUrl ??
+    availableWorkspace(cwd)?.apiUrl ??
     availableSession()?.apiUrl ??
     DEFAULT_API_URL
   );
 }
 
-function client(): OpenCloudClient {
+function client(cwd?: string): OpenCloudClient {
   const options = program.opts<{ apiUrl?: string; token?: string }>();
-  const binding = availableWorkspace();
+  const binding = availableWorkspace(cwd);
   const legacy = availableSession();
   const apiUrl = options.apiUrl ?? binding?.apiUrl ?? legacy?.apiUrl;
   if (options.token) {
@@ -158,7 +175,7 @@ function client(): OpenCloudClient {
       tokenProvider: () => {
         tokenPromise ??= freshWorkspaceCredential({
           store: credentialStore,
-          bindingFile: workspaceFile(),
+          bindingFile: workspaceFile(cwd),
         }).then((stored) => stored.credential.token);
         return tokenPromise;
       },
@@ -211,6 +228,203 @@ function requiredAccountCredential() {
 
 function output(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function outputAsync(value: unknown): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(value)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+interface ExactAppMutationContext {
+  control: OpenCloudClient;
+  journal: MutationJournal;
+}
+
+async function exactAppMutationContext(
+  appIdValue: unknown,
+  cwd?: string,
+): Promise<ExactAppMutationContext> {
+  const appId = String(appIdValue).toLowerCase();
+  const bindingFile = workspaceFile(cwd);
+  const binding = loadWorkspaceBinding(bindingFile);
+  const legacy = availableSession();
+  const apiUrl = normalizeApiUrl(targetApiUrl(cwd));
+  const runtimeAuthority =
+    legacy?.state === "ready" &&
+    legacy.schemaVersion === 2 &&
+    legacy.authorityMode === "app_owner_v1"
+      ? {
+          rootRunId: legacy.rootRunId,
+          familyId: legacy.familyId,
+          appId: legacy.appId,
+          apiUrl: legacy.apiUrl,
+          token: legacy.token,
+        }
+      : undefined;
+  const configuredToken = program.opts<{ token?: string }>().token;
+  if (runtimeAuthority && configuredToken) {
+    throw new CliContractError(
+      "MUTATION_AUTHORITY_SOURCE_CONFLICT",
+      "An app-owner runtime session cannot be combined with --token or OPENCLOUD_TOKEN; no mutation was started",
+    );
+  }
+  if (
+    runtimeAuthority &&
+    binding &&
+    (await credentialStore.loadWorkspace(binding.apiUrl, binding.appId))
+  ) {
+    throw new CliContractError(
+      "MUTATION_AUTHORITY_SOURCE_CONFLICT",
+      "An app-owner runtime session cannot be combined with a stored workspace credential; no mutation was started",
+    );
+  }
+  if (binding && binding.appId.toLowerCase() !== appId) {
+    throw new CliContractError(
+      "MUTATION_APP_BINDING_MISMATCH",
+      `This workspace is connected to app ${binding.appId}; no mutation was started for ${appId}`,
+    );
+  }
+  if (
+    !binding &&
+    legacy?.state === "ready" &&
+    legacy.appId.toLowerCase() !== appId
+  ) {
+    throw new CliContractError(
+      "MUTATION_APP_BINDING_MISMATCH",
+      `This agent session belongs to app ${legacy.appId}; no mutation was started for ${appId}`,
+    );
+  }
+  if (
+    runtimeAuthority &&
+    (runtimeAuthority.appId.toLowerCase() !== appId ||
+      normalizeApiUrl(runtimeAuthority.apiUrl) !== apiUrl)
+  ) {
+    throw new CliContractError(
+      "MUTATION_APP_BINDING_MISMATCH",
+      "This runtime authority belongs to a different OpenCloud API or app; no mutation was started",
+    );
+  }
+  const configuredJournalDirectory = runtimeAuthority
+    ? assertAppOwnerMutationJournalDirectory(
+        process.env[MUTATION_JOURNAL_ENV],
+      )
+    : process.env[MUTATION_JOURNAL_ENV];
+  const directory = resolveMutationJournalDirectory({
+    configuredDirectory: configuredJournalDirectory,
+    ...(binding ? { workspaceFile: bindingFile } : {}),
+    configDirectory: credentialStore.configDirectory,
+    apiUrl,
+    appId,
+  });
+  const journal = await MutationJournal.open({
+    directory,
+    apiUrl,
+    appId,
+    ...(runtimeAuthority
+      ? {
+          authority: {
+            rootRunId: runtimeAuthority.rootRunId,
+            familyId: runtimeAuthority.familyId,
+          },
+          rejectParentSymlinks: true,
+          requireMountPoint: true,
+        }
+      : {}),
+  });
+  const control = runtimeAuthority
+    ? new OpenCloudClient({
+        apiUrl: runtimeAuthority.apiUrl,
+        token: runtimeAuthority.token,
+      })
+    : client(cwd);
+  await assertMutationJournalCompatibility(control);
+  return { control, journal };
+}
+
+interface JournalMutationInput {
+  commandId: MutationCommandId;
+  appId: unknown;
+  safeScope: unknown;
+  safeRequest: unknown;
+  explicitIdempotencyKey?: string | undefined;
+  retireDevStoppedWorkflow?: boolean | undefined;
+  cwd?: string | undefined;
+}
+
+function mutationIntent(input: JournalMutationInput): MutationIntentSpec {
+  return {
+    commandId: input.commandId,
+    safeScope: input.safeScope,
+    safeRequest: input.safeRequest,
+    ...(input.explicitIdempotencyKey !== undefined
+      ? { explicitIdempotencyKey: input.explicitIdempotencyKey }
+      : {}),
+    ...(input.retireDevStoppedWorkflow === true
+      ? { retireDevStoppedWorkflow: true }
+      : {}),
+  };
+}
+
+async function outputReplayMutation<T>(
+  input: JournalMutationInput,
+  start: (control: OpenCloudClient, idempotencyKey: string) => Promise<T>,
+  render: (value: T) => unknown | Promise<unknown> = (value) => value,
+): Promise<void> {
+  const context = await exactAppMutationContext(input.appId, input.cwd);
+  await context.journal.run(mutationIntent(input), async (run) => {
+    run.failIfUnknown();
+    await run.markAttempted();
+    const result = await start(context.control, run.idempotencyKey);
+    await outputAsync(await render(result));
+    await run.complete();
+  });
+}
+
+async function outputDurableMutation(
+  input: JournalMutationInput,
+  options: OperationOptions,
+  start: (
+    control: OpenCloudClient,
+    idempotencyKey: string,
+  ) => Promise<unknown>,
+): Promise<void> {
+  const context = await exactAppMutationContext(input.appId, input.cwd);
+  await context.journal.run(mutationIntent(input), async (run) => {
+    run.failIfUnknown();
+    let started: unknown;
+    if (run.operationId) {
+      started = await start(context.control, run.idempotencyKey);
+      const replayedOperation = operationFrom(started);
+      if (!replayedOperation || replayedOperation.id !== run.operationId) {
+        throw new CliContractError(
+          "MUTATION_REPLAY_MISMATCH",
+          "OpenCloud did not replay the journaled durable operation coordinate",
+        );
+      }
+    } else {
+      await run.markAttempted();
+      started = await start(context.control, run.idempotencyKey);
+      const operation = operationFrom(started);
+      if (!operation) {
+        throw new CliContractError(
+          "INVALID_OPERATION_RESPONSE",
+          "OpenCloud did not return a durable operation coordinate",
+        );
+      }
+      await run.checkpointOperation(operation.id);
+    }
+    const completed = await followOperation({
+      client: context.control,
+      started,
+      options,
+    });
+    await outputAsync(completed);
+    await run.complete();
+  });
 }
 
 function callerPath(value: string): string {
@@ -303,32 +517,82 @@ async function saveDevState(
   state: LocalDevState,
 ): Promise<void> {
   const directory = path.dirname(devStatePath(sourceRoot));
-  const temporary = path.join(
-    directory,
-    `.dev-${process.pid}-${randomUUID()}.tmp`,
-  );
   await mkdir(directory, { recursive: true });
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
-    mode: 0o600,
+  // Dev workflows always acquire .dev-workflow.lock first. This shorter lock
+  // makes the state-file compare/write atomic without reversing lock order.
+  await withDevStateLock(sourceRoot, async () => {
+    const temporary = path.join(
+      directory,
+      `.dev-${process.pid}-${randomUUID()}.tmp`,
+    );
+    try {
+      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+        mode: 0o600,
+      });
+      await rename(temporary, devStatePath(sourceRoot));
+    } finally {
+      await rm(temporary, { force: true });
+    }
   });
-  await rename(temporary, devStatePath(sourceRoot));
+}
+
+async function removeDevStateIfMatching(
+  sourceRoot: string,
+  expected: Pick<LocalDevState, "appId" | "sessionId"> &
+    Partial<Pick<LocalDevState, "draftId" | "artifactSha256">>,
+): Promise<"absent" | "removed" | "mismatch"> {
+  return withDevStateLock(sourceRoot, async () => {
+    const current = await readDevState(sourceRoot);
+    if (!current) return "absent";
+    if (
+      current.appId !== expected.appId ||
+      current.sessionId !== expected.sessionId ||
+      (expected.draftId !== undefined && current.draftId !== expected.draftId) ||
+      (expected.artifactSha256 !== undefined &&
+        current.artifactSha256 !== expected.artifactSha256)
+    ) {
+      return "mismatch";
+    }
+    await rm(devStatePath(sourceRoot), { force: true });
+    return "removed";
+  });
 }
 
 async function synchronizeValidatedDraft(
   control: OpenCloudClient,
   sourceRoot: string,
+  bundle: Awaited<ReturnType<typeof buildBundle>>,
+  run: MutationRun,
   existingDraftId?: string,
+  draftNamePrefix = "Dev",
 ): Promise<{
   appId: string;
   draftId: string;
   artifactSha256: string;
   validation: unknown;
 }> {
-  const bundle = await buildBundle(sourceRoot);
   printBundleFiles(bundle.files);
   printBundleWarnings(bundle.warnings);
+  if (
+    run.checkpoint?.artifactSha256 &&
+    run.checkpoint.artifactSha256 !== bundle.sha256
+  ) {
+    throw new CliContractError(
+      "MUTATION_INTENT_CHANGED",
+      "Local source no longer matches the journaled workflow artifact",
+    );
+  }
   let draft: { id: string; revision: number };
   if (existingDraftId) {
+    if (
+      run.checkpoint?.draftId &&
+      run.checkpoint.draftId !== existingDraftId
+    ) {
+      throw new CliContractError(
+        "MUTATION_REPLAY_MISMATCH",
+        "The local development draft differs from the journaled workflow",
+      );
+    }
     const existing = await control.call("getDraft", {
       appId: bundle.manifest.appId,
       draftId: existingDraftId,
@@ -340,25 +604,35 @@ async function synchronizeValidatedDraft(
     }
     draft = { id: existing.id, revision: existing.revision };
   } else {
-    const created = await control.call("createDraft", {
-      appId: bundle.manifest.appId,
-      body: {
-        name: `Dev ${manifestReleaseLabel(bundle.manifest)}`,
-        cloneActive: false,
+    await run.markAttempted();
+    const created = await control.call(
+      "createDraft",
+      {
+        appId: bundle.manifest.appId,
+        body: {
+          name: `${draftNamePrefix} ${manifestReleaseLabel(bundle.manifest)}`,
+          cloneActive: false,
+        },
       },
-    });
+      { idempotencyKey: childIdempotencyKey(run, "draft") },
+    );
+    if (
+      run.checkpoint?.draftId &&
+      run.checkpoint.draftId !== created.id
+    ) {
+      throw new CliContractError(
+        "MUTATION_REPLAY_MISMATCH",
+        "OpenCloud did not replay the journaled draft coordinate",
+      );
+    }
     draft = { id: created.id, revision: created.revision };
   }
-
-  const remoteFiles = await control.call("listDraftFiles", {
-    appId: bundle.manifest.appId,
+  await run.checkpointStage({
+    stage: "draft_ready",
+    artifactSha256: bundle.sha256,
     draftId: draft.id,
+    revision: draft.revision,
   });
-  const remote = new Map(
-    remoteFiles
-      .filter((file) => !file.deleted)
-      .map((file) => [file.path, file]),
-  );
   const local = new Map<string, { content: Buffer; sha256: string }>();
   for (const file of bundle.files) {
     const content =
@@ -371,40 +645,88 @@ async function synchronizeValidatedDraft(
     });
   }
 
-  const changes: Array<{
-    path: string;
-    baseSha256?: string | null;
-    contentBase64?: string;
-    delete?: boolean;
-  }> = [];
-  for (const [file, value] of local) {
-    const existing = remote.get(file);
-    if (existing?.sha256 === value.sha256) continue;
-    changes.push({
-      path: file,
-      ...(existing ? { baseSha256: existing.sha256 } : {}),
-      contentBase64: value.content.toString("base64"),
-    });
-  }
-  for (const [file, existing] of remote) {
-    if (!local.has(file)) {
-      changes.push({ path: file, baseSha256: existing.sha256, delete: true });
-    }
-  }
-  changes.sort((left, right) => left.path.localeCompare(right.path));
-
   let revision = draft.revision;
-  for (let offset = 0; offset < changes.length; offset += 200) {
+  let appliedCount = 0;
+  for (let iteration = 0; iteration < 10_000; iteration += 1) {
+    const current = await control.call("getDraft", {
+      appId: bundle.manifest.appId,
+      draftId: draft.id,
+    });
+    if (["deploying", "deployed", "discarded"].includes(current.status)) {
+      throw new Error(
+        `The source draft is ${current.status}; start a new workflow for the next change.`,
+      );
+    }
+    revision = current.revision;
+    const remoteFiles = await control.call("listDraftFiles", {
+      appId: bundle.manifest.appId,
+      draftId: draft.id,
+    });
+    const remote = new Map(
+      remoteFiles
+        .filter((file) => !file.deleted)
+        .map((file) => [file.path, file]),
+    );
+    const changes: Array<{
+      path: string;
+      baseSha256?: string | null;
+      contentBase64?: string;
+      delete?: boolean;
+    }> = [];
+    for (const [file, value] of local) {
+      const existing = remote.get(file);
+      if (existing?.sha256 === value.sha256) continue;
+      changes.push({
+        path: file,
+        ...(existing ? { baseSha256: existing.sha256 } : {}),
+        contentBase64: value.content.toString("base64"),
+      });
+    }
+    for (const [file, existing] of remote) {
+      if (!local.has(file)) {
+        changes.push({
+          path: file,
+          baseSha256: existing.sha256,
+          delete: true,
+        });
+      }
+    }
+    changes.sort((left, right) => left.path.localeCompare(right.path));
+    if (!changes.length) break;
+    const batch = changes.slice(0, 200);
+    await run.checkpointStage({
+      stage: "applying",
+      artifactSha256: bundle.sha256,
+      draftId: draft.id,
+      revision,
+      offset: appliedCount,
+    });
+    await run.markAttempted();
     const applied = await control.call("applyDraftChanges", {
       appId: bundle.manifest.appId,
       draftId: draft.id,
       body: {
         expectedRevision: revision,
-        changes: changes.slice(offset, offset + 200),
+        changes: batch,
       },
     });
+    if (applied.draft.revision <= revision) {
+      throw new CliContractError(
+        "INVALID_DRAFT_RESPONSE",
+        "OpenCloud did not advance the draft revision after applying changes",
+      );
+    }
     revision = applied.draft.revision;
+    appliedCount += batch.length;
+    await run.checkpointStage({
+      stage: "applying",
+      artifactSha256: bundle.sha256,
+      draftId: draft.id,
+      revision,
+      offset: appliedCount,
+    });
   }
+  await run.markAttempted();
   const validation = await control.call("validateDraft", {
     appId: bundle.manifest.appId,
     draftId: draft.id,
@@ -419,12 +741,26 @@ async function synchronizeValidatedDraft(
   if (validation.artifactSha256 !== bundle.sha256) {
     throw new Error("Local and server canonical bundle digests do not match");
   }
+  await run.checkpointStage({
+    stage: "validated",
+    artifactSha256: bundle.sha256,
+    draftId: draft.id,
+    revision,
+  });
   return {
     appId: bundle.manifest.appId,
     draftId: draft.id,
     artifactSha256: bundle.sha256,
     validation,
   };
+}
+
+function childIdempotencyKey(run: MutationRun, stage: string): string {
+  return `ocj1:${createHash("sha256")
+    .update(run.idempotencyKey)
+    .update("\0")
+    .update(stage)
+    .digest("hex")}`;
 }
 
 async function storeDevSession(
@@ -440,6 +776,25 @@ async function storeDevSession(
     artifactSha256,
     updatedAt: new Date().toISOString(),
   });
+}
+
+async function terminalRetainedDevSession(
+  control: OpenCloudClient,
+  appId: string,
+  sessionId: string,
+): Promise<DevSessionWire | null | undefined> {
+  try {
+    const session = (await control.call("getDevSession", {
+      appId,
+      sessionId,
+    })) as DevSessionWire;
+    return ["stopped", "expired"].includes(session.status)
+      ? session
+      : undefined;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
 }
 
 async function followDurableOperation(
@@ -488,6 +843,88 @@ async function outputOperation(
 
 function encoded(value: unknown): string {
   return encodeURIComponent(String(value));
+}
+
+interface DraftFileExpectation {
+  path: string;
+  deleted: boolean;
+  sha256?: string | undefined;
+}
+
+function draftFileExpectations(changes: unknown): DraftFileExpectation[] {
+  if (!Array.isArray(changes) || changes.length === 0) {
+    throw new CliContractError(
+      "INVALID_DRAFT_CHANGES",
+      "Draft changes must be a non-empty array",
+    );
+  }
+  const expected = new Map<string, DraftFileExpectation>();
+  for (const item of changes) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new CliContractError(
+        "INVALID_DRAFT_CHANGES",
+        "Every draft change must be an object",
+      );
+    }
+    const change = item as Record<string, unknown>;
+    if (typeof change.path !== "string" || !change.path) {
+      throw new CliContractError(
+        "INVALID_DRAFT_CHANGES",
+        "Every draft change must have a path",
+      );
+    }
+    if (change.delete === true) {
+      expected.set(change.path, { path: change.path, deleted: true });
+      continue;
+    }
+    if (
+      (typeof change.content === "string") ===
+      (typeof change.contentBase64 === "string")
+    ) {
+      throw new CliContractError(
+        "INVALID_DRAFT_CHANGES",
+        `Exactly one content encoding is required for ${change.path}`,
+      );
+    }
+    const content =
+      typeof change.content === "string"
+        ? Buffer.from(change.content, "utf8")
+        : Buffer.from(String(change.contentBase64), "base64");
+    expected.set(change.path, {
+      path: change.path,
+      deleted: false,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    });
+  }
+  return [...expected.values()];
+}
+
+function draftFilesMatchExpectations(
+  files: unknown,
+  expectations: DraftFileExpectation[],
+): boolean {
+  if (!Array.isArray(files)) return false;
+  const current = new Map<string, Record<string, unknown>>();
+  for (const value of files) {
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      typeof (value as Record<string, unknown>).path === "string"
+    ) {
+      current.set(
+        String((value as Record<string, unknown>).path),
+        value as Record<string, unknown>,
+      );
+    }
+  }
+  return expectations.every((expected) => {
+    const actual = current.get(expected.path);
+    if (expected.deleted) return !actual || actual.deleted === true;
+    return (
+      actual?.deleted === false && actual.sha256 === expected.sha256
+    );
+  });
 }
 
 function manifestReleaseLabel(manifest: {
@@ -914,7 +1351,10 @@ app
     "--owner-user-id <uuid>",
     "required when using the platform operator credential",
   )
-  .option("--idempotency-key <key>")
+  .requiredOption(
+    "--idempotency-key <key>",
+    "stable retry key required before the app-scoped journal exists",
+  )
   .action(async (options) => {
     output(
       await (
@@ -931,7 +1371,7 @@ app
           },
         },
         {
-          idempotencyKey: options.idempotencyKey ?? randomUUID(),
+          idempotencyKey: options.idempotencyKey,
         },
       ),
     );
@@ -1105,35 +1545,114 @@ dev
   .command("start")
   .description("Validate, sync, and start or resume an isolated dev preview")
   .argument("<directory>")
-  .action(async (directory) => {
+  .option("--idempotency-key <key>")
+  .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
-    const control = client();
+    await withDevWorkflowLock(sourceRoot, async () => {
     const previous = await readDevState(sourceRoot);
-    const synchronized = await synchronizeValidatedDraft(
-      control,
-      sourceRoot,
-      previous?.draftId,
-    );
-    if (previous && previous.appId !== synchronized.appId) {
+    const bundle = await buildBundle(sourceRoot);
+    if (previous && previous.appId !== bundle.manifest.appId) {
       throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
-    const session = (await control.call("startDevSession", {
-      appId: synchronized.appId,
-      draftId: synchronized.draftId,
-      body: { apply: true },
-    })) as DevSessionWire;
-    await storeDevSession(sourceRoot, synchronized.artifactSha256, session);
-    output({
-      session,
-      validation: synchronized.validation,
-      localState: devStatePath(sourceRoot),
-      next: [
-        "Give session.browserPreviewUrl to an owner or builder for a clearly marked Not live browser review.",
-        "Use `opencloud app dev request <directory> /` for agent inspection; do not give session.previewUrl to a human reviewer.",
-        "After edits run `opencloud app dev sync <directory>`.",
-        "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
-        "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
-      ],
+    const appId = bundle.manifest.appId;
+    const context = await exactAppMutationContext(appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud app dev start",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "dev-start", artifactSha256: bundle.sha256 },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        const retained = run.checkpoint;
+        let synchronized: {
+          appId: string;
+          draftId: string;
+          artifactSha256: string;
+          validation: unknown;
+        };
+        if (
+          retained?.sessionId &&
+          retained.draftId &&
+          retained.artifactSha256 === bundle.sha256
+        ) {
+          const validation = await context.control.call("validateDraft", {
+            appId,
+            draftId: retained.draftId,
+            body: {},
+          });
+          if (
+            !validation.passed ||
+            validation.artifactSha256 !== bundle.sha256
+          ) {
+            throw new CliContractError(
+              "MUTATION_REPLAY_MISMATCH",
+              "The journaled development draft no longer validates to the exact local artifact",
+            );
+          }
+          synchronized = {
+            appId,
+            draftId: retained.draftId,
+            artifactSha256: bundle.sha256,
+            validation,
+          };
+        } else {
+          synchronized = await synchronizeValidatedDraft(
+            context.control,
+            sourceRoot,
+            bundle,
+            run,
+            previous?.draftId,
+          );
+        }
+        await run.markAttempted();
+        const session = (await context.control.call(
+          "startDevSession",
+          {
+            appId,
+            draftId: synchronized.draftId,
+            body: { apply: true },
+          },
+          { idempotencyKey: childIdempotencyKey(run, "dev-start") },
+        )) as DevSessionWire;
+        if (
+          session.appId !== appId ||
+          session.draftId !== synchronized.draftId ||
+          session.activeRevision?.artifactSha256 !== bundle.sha256 ||
+          (retained?.sessionId && retained.sessionId !== session.id)
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not return the exact journaled development session and artifact",
+          );
+        }
+        await run.checkpointStage({
+          stage: "session_started",
+          artifactSha256: bundle.sha256,
+          draftId: synchronized.draftId,
+          sessionId: session.id,
+          activeRevisionId: session.activeRevision.id,
+          revision: session.activeRevision.draftRevision,
+        });
+        await storeDevSession(sourceRoot, bundle.sha256, session);
+        await outputAsync({
+          session,
+          validation: synchronized.validation,
+          localState: devStatePath(sourceRoot),
+          next: [
+            "Give session.browserPreviewUrl to an owner or builder for a clearly marked Not live browser review.",
+            "Use `opencloud app dev request <directory> /` for agent inspection; do not give session.previewUrl to a human reviewer.",
+            "After edits run `opencloud app dev sync <directory>`.",
+            "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
+            "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
+          ],
+        });
+        await run.complete();
+      },
+    );
     });
   });
 
@@ -1143,24 +1662,66 @@ dev
     "Validate local files and atomically replace the active dev revision",
   )
   .argument("<directory>")
-  .action(async (directory) => {
+  .option("--idempotency-key <key>")
+  .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
+    await withDevWorkflowLock(sourceRoot, async () => {
     const state = await requireDevState(sourceRoot);
-    const control = client();
-    const synchronized = await synchronizeValidatedDraft(
-      control,
-      sourceRoot,
-      state.draftId,
-    );
-    if (state.appId !== synchronized.appId) {
+    const bundle = await buildBundle(sourceRoot);
+    if (state.appId !== bundle.manifest.appId) {
       throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
-    const session = (await control.call("applyDevRevision", {
-      appId: state.appId,
-      sessionId: state.sessionId,
-    })) as DevSessionWire;
-    await storeDevSession(sourceRoot, synchronized.artifactSha256, session);
-    output({ session, validation: synchronized.validation });
+    const context = await exactAppMutationContext(state.appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud app dev sync",
+        appId: state.appId,
+        safeScope: { appId: state.appId, sessionId: state.sessionId },
+        safeRequest: { action: "dev-sync", artifactSha256: bundle.sha256 },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        const retained = run.checkpoint;
+        const synchronized = await synchronizeValidatedDraft(
+          context.control,
+          sourceRoot,
+          bundle,
+          run,
+          state.draftId,
+        );
+        await run.markAttempted();
+        const session = (await context.control.call(
+          "applyDevRevision",
+          { appId: state.appId, sessionId: state.sessionId },
+          { idempotencyKey: childIdempotencyKey(run, "dev-apply") },
+        )) as DevSessionWire;
+        if (
+          session.id !== state.sessionId ||
+          session.draftId !== state.draftId ||
+          session.activeRevision?.artifactSha256 !== bundle.sha256 ||
+          (retained?.sessionId && retained.sessionId !== session.id)
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not apply the exact journaled development revision",
+          );
+        }
+        await run.checkpointStage({
+          stage: "session_applied",
+          artifactSha256: bundle.sha256,
+          draftId: state.draftId,
+          sessionId: session.id,
+          activeRevisionId: session.activeRevision.id,
+          revision: session.activeRevision.draftRevision,
+        });
+        await storeDevSession(sourceRoot, bundle.sha256, session);
+        await outputAsync({ session, validation: synchronized.validation });
+        await run.complete();
+      },
+    );
+    });
   });
 
 dev
@@ -1223,18 +1784,34 @@ dev
   )
   .option("--values <json>", "row object or row array, as JSON")
   .option("--id <id>", "row id for updateById or deleteById")
+  .option("--idempotency-key <key>")
   .action(async (directory, table, action, options) => {
-    const state = await requireDevState(callerPath(directory));
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
     const body = devDataRequest(String(table), action as DevDataAction, {
       id: options.id === undefined ? undefined : String(options.id),
       values: options.values === undefined ? undefined : String(options.values),
     });
-    output(
-      await client().call("mutateDevData", {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev data",
         appId: state.appId,
-        sessionId: state.sessionId,
-        body,
-      }),
+        safeScope: {
+          appId: state.appId,
+          sessionId: state.sessionId,
+          table: String(table),
+          action: String(action),
+        },
+        safeRequest: { action: "mutate-dev-data" },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "mutateDevData",
+          { appId: state.appId, sessionId: state.sessionId, body },
+          { idempotencyKey: key },
+        ),
     );
   });
 
@@ -1313,6 +1890,7 @@ devEmail
     collectOption,
     [],
   )
+  .option("--idempotency-key <key>")
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);
@@ -1332,12 +1910,21 @@ devEmail
       },
       (value) => path.resolve(sourceRoot, value),
     );
-    output(
-      await client().call("injectDevEmail", {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev email inject",
         appId: state.appId,
-        sessionId: state.sessionId,
-        body,
-      }),
+        safeScope: { appId: state.appId, sessionId: state.sessionId },
+        safeRequest: { action: "inject-dev-email" },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "injectDevEmail",
+          { appId: state.appId, sessionId: state.sessionId, body },
+          { idempotencyKey: key },
+        ),
     );
   });
 
@@ -1367,21 +1954,40 @@ dev
   .argument("<directory>")
   .argument("<function-name>")
   .option("--body <json>", "JSON request body", "{}")
+  .option("--idempotency-key <key>")
   .action(async (directory, functionName, options) => {
-    const state = await requireDevState(callerPath(directory));
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
     let body: unknown;
     try {
       body = JSON.parse(String(options.body));
     } catch {
       throw new Error("--body must be valid JSON");
     }
-    output(
-      await client().call("invokeDevFunction", {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev invoke",
         appId: state.appId,
-        sessionId: state.sessionId,
-        functionName: String(functionName),
-        body: { body },
-      }),
+        safeScope: {
+          appId: state.appId,
+          sessionId: state.sessionId,
+          functionName: String(functionName),
+        },
+        safeRequest: { action: "invoke-dev-function" },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "invokeDevFunction",
+          {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            functionName: String(functionName),
+            body: { body },
+          },
+          { idempotencyKey: key },
+        ),
     );
   });
 
@@ -1469,8 +2075,11 @@ dev
     "--parallelism <number>",
     "number of isolated external E2E tests to run concurrently (1-10)",
   )
+  .option("--interval <seconds>", "reconciliation poll interval", "2")
+  .option("--timeout <seconds>", "maximum reconciliation time", "900")
   .action(async (directory, options) => {
-    const state = await requireDevState(callerPath(directory));
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
     const parallelism =
       options.parallelism === undefined
         ? undefined
@@ -1481,22 +2090,153 @@ dev
     ) {
       throw new Error("--parallelism must be an integer between 1 and 10");
     }
-    const result = await client().call("verifyDevSession", {
-      appId: state.appId,
-      sessionId: state.sessionId,
-      body: {
-        requireInteractionContract: true,
-        requireExternalE2eSpec: true,
-        ...(parallelism === undefined ? {} : { parallelism }),
+    const intervalMs =
+      parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
+      1_000;
+    const timeoutMs =
+      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) *
+      1_000;
+    const context = await exactAppMutationContext(state.appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud app dev verify",
+        appId: state.appId,
+        safeScope: { appId: state.appId, sessionId: state.sessionId },
+        safeRequest: {
+          action: "verify",
+          requireInteractionContract: true,
+          requireExternalE2eSpec: true,
+          parallelism: parallelism ?? null,
+        },
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        let session = (await context.control.call("getDevSession", {
+          appId: state.appId,
+          sessionId: state.sessionId,
+        })) as DevSessionWire;
+        const checkpoint = run.checkpoint;
+        const activeRevisionId =
+          checkpoint?.activeRevisionId ?? session.activeRevision?.id;
+        const artifactSha256 =
+          checkpoint?.artifactSha256 ?? session.activeRevision?.artifactSha256;
+        if (
+          !activeRevisionId ||
+          !artifactSha256 ||
+          session.activeRevision?.id !== activeRevisionId ||
+          session.activeRevision.artifactSha256 !== artifactSha256 ||
+          state.artifactSha256 !== artifactSha256
+        ) {
+          throw new CliContractError(
+            "DEV_VERIFICATION_TARGET_CHANGED",
+            "The active development revision no longer matches the journaled exact artifact; no verification was started",
+          );
+        }
+        if (!checkpoint) {
+          await run.checkpointStage({
+            stage: "verification_ready",
+            sessionId: state.sessionId,
+            activeRevisionId,
+            artifactSha256,
+          });
+        }
+
+        const matchingReceipt = async () => {
+          const receipts = await context.control.call("listDevReceipts", {
+            appId: state.appId,
+            query: { limit: 200 },
+          });
+          return receipts.find(
+            (receipt) =>
+              receipt.sessionId === state.sessionId &&
+              receipt.revisionId === activeRevisionId &&
+              receipt.artifactSha256 === artifactSha256,
+          );
+        };
+        {
+          const deadline = Date.now() + timeoutMs;
+          while (true) {
+            const receipt = await matchingReceipt();
+            if (receipt) {
+              if (receipt.summary.passed !== true) {
+                await run.complete();
+                throw new CliContractError(
+                  "DEV_VERIFICATION_FAILED",
+                  `Development verification ${receipt.id} did not pass`,
+                );
+              }
+              await outputAsync({
+                session,
+                receipt,
+                reconciled: run.attempted || session.status === "verified",
+              });
+              await run.complete();
+              return;
+            }
+            if (session.status !== "verifying") break;
+            if (Date.now() >= deadline) {
+              throw new CliContractError(
+                "DEV_VERIFICATION_WAIT_TIMEOUT",
+                "Timed out waiting for the active development verification; rerun the same command to continue reconciliation",
+                { retryable: true },
+              );
+            }
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, intervalMs),
+            );
+            session = (await context.control.call("getDevSession", {
+              appId: state.appId,
+              sessionId: state.sessionId,
+            })) as DevSessionWire;
+            if (
+              session.activeRevision?.id !== activeRevisionId ||
+              session.activeRevision.artifactSha256 !== artifactSha256
+            ) {
+              throw new CliContractError(
+                "DEV_VERIFICATION_TARGET_CHANGED",
+                "The development revision changed while verification was being reconciled",
+              );
+            }
+          }
+        }
+
+        if (session.status !== "active") {
+          throw new CliContractError(
+            "DEV_VERIFICATION_STATE_UNSAFE",
+            `Development session is ${session.status}; no new verification attempt was started`,
+          );
+        }
+        await run.markAttempted();
+        const result = await context.control.call("verifyDevSession", {
+          appId: state.appId,
+          sessionId: state.sessionId,
+          body: {
+            requireInteractionContract: true,
+            requireExternalE2eSpec: true,
+            ...(parallelism === undefined ? {} : { parallelism }),
+          },
+        });
+        if (
+          result.receipt.revisionId !== activeRevisionId ||
+          result.receipt.artifactSha256 !== artifactSha256
+        ) {
+          throw new CliContractError(
+            "DEV_VERIFICATION_TARGET_CHANGED",
+            "OpenCloud returned verification evidence for a different development revision",
+          );
+        }
+        if (!result.receipt.summary.passed) {
+          await run.complete();
+          throw new CliContractError(
+            "DEV_VERIFICATION_FAILED",
+            `Development verification ${result.receipt.id} did not pass`,
+          );
+        }
+        await outputAsync(result);
+        await run.complete();
       },
-    });
-    if (!result.receipt.summary.passed) {
-      throw new CliContractError(
-        "DEV_VERIFICATION_FAILED",
-        `Development verification ${result.receipt.id} did not pass`,
-      );
-    }
-    output(result);
+    );
   });
 
 dev
@@ -1511,96 +2251,385 @@ dev
   .option("--timeout <seconds>", "maximum wait per operation", "900")
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
-    const state = await requireDevState(sourceRoot);
+    await withDevWorkflowLock(sourceRoot, async () => {
+    const localState = await readDevState(sourceRoot);
     const bundle = await buildBundle(sourceRoot);
     if (!bundle.e2eTest) {
       throw new Error(
         `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, exercise every Function through its intended path (including enqueueing queue consumers), and verify the exact revision.`,
       );
     }
-    if (bundle.sha256 !== state.artifactSha256) {
-      throw new Error(
-        "Local source differs from the active development revision. Run app dev sync, exercise every Function through its intended path, and verify again before promotion.",
-      );
+    if (localState && bundle.manifest.appId !== localState.appId) {
+      throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
-    const control = client();
-    const result = await control.call(
-      "promoteDevRevision",
-      { appId: state.appId, sessionId: state.sessionId },
-      {
-        idempotencyKey: options.idempotencyKey ?? randomUUID(),
-        timeoutMs: 120_000,
-      },
-    );
-    const accepted = await followOperation({
-      client: control,
-      started: result,
-      options: {
-        follow: false,
-        interval: String(options.interval),
-        timeout: String(options.timeout),
-      },
-    });
-    if (options.follow === false) {
-      output({ promotion: accepted });
-      return;
-    }
-    if (!result.operation.id) {
-      throw new Error("Promotion did not return a durable operation");
-    }
-    const deploymentOperation = await followDurableOperation(
-      control,
-      result.operation.id,
+    const intervalMs =
       parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
-        1_000,
-      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) * 1_000,
-    );
-    const verification = await control.call(
-      "verifyApp",
-      { appId: state.appId },
-      {
-        idempotencyKey: randomUUID(),
-        timeoutMs: 120_000,
+      1_000;
+    const timeoutMs =
+      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) *
+      1_000;
+    const appId = bundle.manifest.appId;
+    const context = await exactAppMutationContext(appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud app dev promote",
+        appId,
+        safeScope: { appId },
+        safeRequest: {
+          action: "promote-dev",
+          artifactSha256: bundle.sha256,
+        },
+        explicitIdempotencyKey: options.idempotencyKey,
+        retireDevStoppedWorkflow: true,
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        const retained = run.checkpoint;
+        if (retained?.devStopped) {
+          if (!retained.sessionId) {
+            throw new CliContractError(
+              "CORRUPT_MUTATION_JOURNAL",
+              "The stopped development-session checkpoint is incomplete",
+            );
+          }
+          const localStateDisposition = await removeDevStateIfMatching(
+            sourceRoot,
+            {
+              appId,
+              sessionId: retained.sessionId,
+              ...(retained.draftId ? { draftId: retained.draftId } : {}),
+              ...(retained.artifactSha256
+                ? { artifactSha256: retained.artifactSha256 }
+                : {}),
+            },
+          );
+          await outputAsync({
+            completed: true,
+            appId,
+            productionVerificationId: retained.verificationId ?? null,
+            devStopped: true,
+            localStateRemoved: localStateDisposition !== "mismatch",
+            recovered: true,
+          });
+          await run.complete();
+          return;
+        }
+        const retainedTargetChanged =
+          retained?.sessionId !== undefined &&
+          ((localState !== null &&
+            (localState.sessionId !== retained.sessionId ||
+              (retained.draftId !== undefined &&
+                localState.draftId !== retained.draftId) ||
+              localState.artifactSha256 !== bundle.sha256)) ||
+            (retained.artifactSha256 !== undefined &&
+              retained.artifactSha256 !== bundle.sha256));
+        if (retainedTargetChanged && retained?.sessionId) {
+          const terminal = await terminalRetainedDevSession(
+            context.control,
+            appId,
+            retained.sessionId,
+          );
+          if (terminal !== undefined) {
+            await outputAsync({
+              completed: true,
+              appId,
+              retiredSessionId: retained.sessionId,
+              retiredSessionStatus: terminal?.status ?? "absent",
+              devStopped: true,
+              localStateRemoved: false,
+              recovered: true,
+            });
+            await run.complete();
+            return;
+          }
+          throw new CliContractError(
+            "DEV_SESSION_REPLAY_MISMATCH",
+            "The local development target differs from the unresolved promotion and the retained session is still active; no mutation was started",
+          );
+        }
+        if (localState && localState.artifactSha256 !== bundle.sha256) {
+          throw new Error(
+            "Local source differs from the active development revision. Run app dev sync, exercise every Function through its intended path, and verify again before promotion.",
+          );
+        }
+        const sessionId = retained?.sessionId ?? localState?.sessionId;
+        const draftId = retained?.draftId ?? localState?.draftId;
+        if (!sessionId || !draftId) {
+          await run.complete();
+          throw new CliContractError(
+            "DEV_SESSION_NOT_FOUND",
+            "No local or journaled development session was found",
+          );
+        }
+        const state: LocalDevState =
+          localState ?? {
+            schemaVersion: 1,
+            appId,
+            sessionId,
+            draftId,
+            artifactSha256: bundle.sha256,
+            updatedAt: new Date(0).toISOString(),
+          };
+        if (!retained?.sessionId) {
+          await run.checkpointStage({
+            stage: "promotion_ready",
+            artifactSha256: bundle.sha256,
+            draftId: state.draftId,
+            sessionId: state.sessionId,
+          });
+        }
+
+        await run.markAttempted();
+        const result = await context.control.call(
+          "promoteDevRevision",
+          { appId: state.appId, sessionId: state.sessionId },
+          {
+            idempotencyKey: childIdempotencyKey(run, "promote"),
+            timeoutMs: 120_000,
+          },
+        );
+        const promotionOperation = operationFrom(result);
+        if (
+          !promotionOperation ||
+          result.draft.id !== state.draftId ||
+          result.deployment.appId !== state.appId ||
+          result.deployment.artifactSha256 !== bundle.sha256
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not return the exact journaled promotion target",
+          );
+        }
+        const retainedPromotionOperation =
+          run.checkpoint?.deploymentOperationId ?? run.operationId;
+        if (
+          retainedPromotionOperation &&
+          retainedPromotionOperation !== promotionOperation.id
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not replay the journaled promotion operation",
+          );
+        }
+        if (!retainedPromotionOperation) {
+          await run.checkpointStage({
+            stage: "promoting",
+            artifactSha256: bundle.sha256,
+            draftId: state.draftId,
+            sessionId: state.sessionId,
+            operationId: promotionOperation.id,
+            deploymentOperationId: promotionOperation.id,
+          });
+        }
+        if (options.follow === false) {
+          await outputAsync({ promotion: result });
+          return;
+        }
+
+        const deploymentOperation = await followDurableOperation(
+          context.control,
+          promotionOperation.id,
+          intervalMs,
+          timeoutMs,
+        );
+        await run.checkpointStage({
+          stage: "promoted",
+          artifactSha256: bundle.sha256,
+          draftId: state.draftId,
+          sessionId: state.sessionId,
+          operationId: promotionOperation.id,
+          deploymentOperationId: promotionOperation.id,
+          ...(run.checkpoint?.verificationId
+            ? { verificationId: run.checkpoint.verificationId }
+            : {}),
+          ...(run.checkpoint?.verificationOperationId
+            ? {
+                verificationOperationId:
+                  run.checkpoint.verificationOperationId,
+              }
+            : {}),
+        });
+
+        const retainedVerificationId = run.checkpoint?.verificationId;
+        const retainedVerificationOperationId =
+          run.checkpoint?.verificationOperationId;
+        if (
+          (retainedVerificationId === undefined) !==
+          (retainedVerificationOperationId === undefined)
+        ) {
+          throw new CliContractError(
+            "CORRUPT_MUTATION_JOURNAL",
+            "The production verification checkpoint is incomplete",
+          );
+        }
+        await run.markAttempted();
+        const verification = await context.control.call(
+          "verifyApp",
+          { appId: state.appId },
+          {
+            idempotencyKey: childIdempotencyKey(run, "production-verify"),
+            timeoutMs: 120_000,
+          },
+        );
+        if (
+          (retainedVerificationId &&
+            retainedVerificationId !== verification.verification.id) ||
+          (retainedVerificationOperationId &&
+            retainedVerificationOperationId !== verification.operation.id) ||
+          verification.verification.deploymentId !== result.deployment.id
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not replay verification for the journaled production deployment",
+          );
+        }
+        if (!retainedVerificationId) {
+          await run.checkpointStage({
+            stage: "verifying_production",
+            artifactSha256: bundle.sha256,
+            draftId: state.draftId,
+            sessionId: state.sessionId,
+            operationId: promotionOperation.id,
+            deploymentOperationId: promotionOperation.id,
+            verificationId: verification.verification.id,
+            verificationOperationId: verification.operation.id,
+          });
+        }
+        const verificationOperation = await followDurableOperation(
+          context.control,
+          verification.operation.id,
+          intervalMs,
+          timeoutMs,
+        );
+        const finalVerification = await context.control.call(
+          "getVerification",
+          {
+            appId: state.appId,
+            verificationId: verification.verification.id,
+          },
+        );
+        if (
+          verificationOperation.state !== "succeeded" ||
+          finalVerification.state !== "passed" ||
+          finalVerification.deploymentId !== result.deployment.id
+        ) {
+          throw new CliContractError(
+            "VERIFICATION_FAILED",
+            "Production verification failed; dev remains available for repair",
+          );
+        }
+        await run.checkpointStage({
+          stage: "production_verified",
+          artifactSha256: bundle.sha256,
+          draftId: state.draftId,
+          sessionId: state.sessionId,
+          operationId: promotionOperation.id,
+          deploymentOperationId: promotionOperation.id,
+          verificationId: verification.verification.id,
+          verificationOperationId: verification.operation.id,
+        });
+
+        const appValue = await context.control.call("getApp", {
+          appId: state.appId,
+        });
+        if (appValue.activeDeploymentId !== result.deployment.id) {
+          throw new CliContractError(
+            "ACTIVE_DEPLOYMENT_CHANGED",
+            "Production changed after verification; the development session was retained",
+          );
+        }
+        let stopped: DevSessionWire;
+        if (run.checkpoint?.devStopped) {
+          stopped = (await context.control.call("getDevSession", {
+            appId: state.appId,
+            sessionId: state.sessionId,
+          })) as DevSessionWire;
+        } else {
+          await run.checkpointStage({
+            stage: "stopping_dev",
+            artifactSha256: bundle.sha256,
+            draftId: state.draftId,
+            sessionId: state.sessionId,
+            operationId: promotionOperation.id,
+            deploymentOperationId: promotionOperation.id,
+            verificationId: verification.verification.id,
+            verificationOperationId: verification.operation.id,
+            devStopped: false,
+          });
+          await run.markAttempted();
+          stopped = (await context.control.call("stopDevSession", {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            query: {
+              expectedActiveDeploymentId: result.deployment.id,
+            },
+          })) as DevSessionWire;
+          if (stopped.id !== state.sessionId || stopped.status !== "stopped") {
+            throw new CliContractError(
+              "DEV_SESSION_REPLAY_MISMATCH",
+              "OpenCloud did not stop the exact promoted development session",
+            );
+          }
+          await run.checkpointStage({
+            stage: "dev_stopped",
+            artifactSha256: bundle.sha256,
+            draftId: state.draftId,
+            sessionId: state.sessionId,
+            operationId: promotionOperation.id,
+            deploymentOperationId: promotionOperation.id,
+            verificationId: verification.verification.id,
+            verificationOperationId: verification.operation.id,
+            devStopped: true,
+          });
+        }
+        const localStateDisposition = await removeDevStateIfMatching(
+          sourceRoot,
+          {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            draftId: state.draftId,
+            artifactSha256: bundle.sha256,
+          },
+        );
+        if (localStateDisposition === "mismatch") {
+          await outputAsync({
+            completed: true,
+            appId: state.appId,
+            productionVerificationId: finalVerification.id,
+            devStopped: true,
+            localStateRemoved: false,
+            recovered: run.recovered,
+          });
+          await run.complete();
+          return;
+        }
+        await run.checkpointStage({
+          stage: "cleanup_complete",
+          artifactSha256: bundle.sha256,
+          draftId: state.draftId,
+          sessionId: state.sessionId,
+          operationId: promotionOperation.id,
+          deploymentOperationId: promotionOperation.id,
+          verificationId: verification.verification.id,
+          verificationOperationId: verification.operation.id,
+          devStopped: true,
+          localStateStored: false,
+        });
+        await outputAsync({
+          completed: true,
+          appId: state.appId,
+          liveUrl: appValue.appUrl ?? null,
+          productionVerificationId: finalVerification.id,
+          devStopped: stopped.status === "stopped",
+          localStateRemoved: true,
+          promotion: { ...result, operation: deploymentOperation },
+          verification: { ...verification, operation: verificationOperation },
+          finalVerification,
+        });
+        await run.complete();
       },
     );
-    const verificationOperation = await followDurableOperation(
-      control,
-      verification.operation.id,
-      parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
-        1_000,
-      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) * 1_000,
-    );
-    const finalVerification = await control.call("getVerification", {
-      appId: state.appId,
-      verificationId: verification.verification.id,
-    });
-    if (
-      verificationOperation.state !== "succeeded" ||
-      finalVerification.state !== "passed"
-    ) {
-      throw new CliContractError(
-        "VERIFICATION_FAILED",
-        "Production verification failed; dev remains available for repair",
-      );
-    }
-    const appValue = await control.call("getApp", {
-      appId: state.appId,
-    });
-    const stopped = await control.call("stopDevSession", {
-      appId: state.appId,
-      sessionId: state.sessionId,
-    });
-    await rm(devStatePath(sourceRoot), { force: true });
-    output({
-      completed: true,
-      appId: state.appId,
-      liveUrl: appValue.appUrl ?? null,
-      productionVerificationId: finalVerification.id,
-      devStopped: stopped.status === "stopped",
-      localStateRemoved: true,
-      promotion: { ...result, operation: deploymentOperation },
-      verification: { ...verification, operation: verificationOperation },
-      finalVerification,
     });
   });
 
@@ -1608,15 +2637,89 @@ dev
   .command("stop")
   .description("Destroy the preview artifacts, Function links, and dev schema")
   .argument("[directory]", "app source directory", ".")
-  .action(async (directory) => {
+  .option("--idempotency-key <key>")
+  .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
-    const state = await requireDevState(sourceRoot);
-    const result = await client().call("stopDevSession", {
-      appId: state.appId,
-      sessionId: state.sessionId,
+    await withDevWorkflowLock(sourceRoot, async () => {
+    const state = await readDevState(sourceRoot);
+    const appId =
+      state?.appId ?? (await buildBundle(sourceRoot)).manifest.appId;
+    const context = await exactAppMutationContext(appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud app dev stop",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "stop-dev" },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        const retainedSessionId = run.checkpoint?.sessionId;
+        if (run.completed && !retainedSessionId) {
+          throw new CliContractError(
+            "DEV_SESSION_NOT_FOUND",
+            "No local or journaled development session was found",
+          );
+        }
+        if (
+          retainedSessionId &&
+          state &&
+          state.sessionId !== retainedSessionId
+        ) {
+          const terminal = await terminalRetainedDevSession(
+            context.control,
+            appId,
+            retainedSessionId,
+          );
+          if (terminal !== undefined) {
+            await outputAsync({
+              session: terminal,
+              retiredSessionId: retainedSessionId,
+              retiredSessionStatus: terminal?.status ?? "absent",
+              localStateRemoved: false,
+              recovered: true,
+            });
+            await run.complete();
+            return;
+          }
+          throw new CliContractError(
+            "DEV_SESSION_REPLAY_MISMATCH",
+            "The local development session changed while an earlier active stop remains unresolved; no session was stopped",
+          );
+        }
+        const sessionId = retainedSessionId ?? state?.sessionId;
+        if (!sessionId) {
+          await run.complete();
+          throw new CliContractError(
+            "DEV_SESSION_NOT_FOUND",
+            "No local or journaled development session was found",
+          );
+        }
+        if (!run.checkpoint) {
+          await run.checkpointStage({ stage: "stopping", sessionId });
+        }
+        await run.markAttempted();
+        const result = await context.control.call(
+          "stopDevSession",
+          { appId, sessionId },
+          { idempotencyKey: run.idempotencyKey },
+        );
+        const localStateDisposition = await removeDevStateIfMatching(
+          sourceRoot,
+          { appId, sessionId },
+        );
+        if (localStateDisposition === "mismatch") {
+          await outputAsync({ session: result, localStateRemoved: false });
+          await run.complete();
+          return;
+        }
+        await outputAsync({ session: result, localStateRemoved: true });
+        await run.complete();
+      },
+    );
     });
-    await rm(devStatePath(sourceRoot), { force: true });
-    output({ session: result, localStateRemoved: true });
   });
 
 app
@@ -1648,44 +2751,99 @@ addOperationOptions(
     .description("Run the authoritative OpenCloud release verification gate")
     .argument("<app-id>"),
 ).action(async (appId, options: OperationOptions) => {
-  const control = client();
-  const started = (await control.call(
-    "verifyApp",
-    { appId },
-    {
-      idempotencyKey: options.idempotencyKey ?? randomUUID(),
-      timeoutMs: 120_000,
+  const context = await exactAppMutationContext(appId);
+  await context.journal.run(
+    mutationIntent({
+      commandId: "opencloud app verify",
+      appId,
+      safeScope: { appId },
+      safeRequest: { action: "verify" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    }),
+    async (run) => {
+      run.failIfUnknown();
+      let started: unknown;
+      let verificationId = run.checkpoint?.verificationId;
+      if (run.operationId) {
+        const replayed = (await context.control.call(
+          "verifyApp",
+          { appId },
+          { idempotencyKey: run.idempotencyKey, timeoutMs: 120_000 },
+        )) as {
+          verification?: { id?: string };
+          operation?: { id?: string; state?: string };
+        };
+        const replayedOperation = operationFrom(replayed);
+        if (
+          !replayedOperation ||
+          replayedOperation.id !== run.operationId ||
+          !verificationId ||
+          replayed.verification?.id !== verificationId
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud did not replay the journaled verification coordinates",
+          );
+        }
+        started = replayed;
+      } else {
+        await run.markAttempted();
+        const response = (await context.control.call(
+          "verifyApp",
+          { appId },
+          { idempotencyKey: run.idempotencyKey, timeoutMs: 120_000 },
+        )) as {
+          verification?: { id?: string };
+          operation?: { id?: string; state?: string };
+        };
+        const operation = operationFrom(response);
+        verificationId = response.verification?.id;
+        if (!operation || !verificationId) {
+          throw new CliContractError(
+            "INVALID_VERIFICATION_RESPONSE",
+            "OpenCloud did not return durable operation and verification coordinates",
+          );
+        }
+        await run.checkpointStage({
+          stage: "verification",
+          operationId: operation.id,
+          verificationId,
+        });
+        started = response;
+      }
+      const completed = await followOperation({
+        client: context.control,
+        started,
+        options,
+      });
+      if (!options.follow) {
+        await outputAsync(completed);
+        await run.complete();
+        return;
+      }
+      if (!verificationId) {
+        throw new CliContractError(
+          "INVALID_VERIFICATION_RESPONSE",
+          "The mutation journal has no verification coordinate",
+        );
+      }
+      const result = await context.control.call("getVerification", {
+        appId,
+        verificationId,
+      });
+      if (result.state !== "passed") {
+        throw new CliContractError(
+          "VERIFICATION_FAILED",
+          `OpenCloud verification ${result.id} finished in state ${result.state}`,
+        );
+      }
+      await outputAsync({
+        ...(completed as Record<string, unknown>),
+        verification: result,
+      });
+      await run.complete();
     },
-  )) as {
-    verification?: { id?: string };
-    operation?: { id?: string; state?: string };
-  };
-  const completed = await followOperation({
-    client: control,
-    started,
-    options,
-  });
-  if (!options.follow) {
-    output(completed);
-    return;
-  }
-  if (!started.verification?.id) {
-    throw new CliContractError(
-      "INVALID_VERIFICATION_RESPONSE",
-      "OpenCloud did not return a verification coordinate",
-    );
-  }
-  const result = await control.call("getVerification", {
-    appId,
-    verificationId: started.verification.id,
-  });
-  if (result.state !== "passed") {
-    throw new CliContractError(
-      "VERIFICATION_FAILED",
-      `OpenCloud verification ${result.id} finished in state ${result.state}`,
-    );
-  }
-  output({ ...(completed as Record<string, unknown>), verification: result });
+  );
 });
 
 addOperationOptions(
@@ -1708,13 +2866,18 @@ addOperationOptions(
         visibility: options.visibility,
       }).filter(([, value]) => value !== undefined),
     );
-    const control = client();
-    const started = await control.patch(
-      `/v1/apps/${encoded(appId)}`,
-      patch,
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: "opencloud app configure",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "configure" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.patch(`/v1/apps/${encoded(appId)}`, patch, key),
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -1726,13 +2889,22 @@ for (const lifecycle of [
   addOperationOptions(
     app.command(lifecycle[0]).description(lifecycle[2]).argument("<app-id>"),
   ).action(async (appId, options: OperationOptions) => {
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/${lifecycle[1]}`,
-      {},
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: `opencloud app ${lifecycle[0]}` as MutationCommandId,
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: lifecycle[1] },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/${lifecycle[1]}`,
+          {},
+          key,
+        ),
     );
-    await outputOperation(control, started, options);
   });
 }
 
@@ -1742,12 +2914,17 @@ addOperationOptions(
     .description("Delete the exact app after durable resource containment")
     .argument("<app-id>"),
 ).action(async (appId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.delete(
-    `/v1/apps/${encoded(appId)}`,
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud app delete",
+      appId,
+      safeScope: { appId },
+      safeRequest: { action: "delete" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) => control.delete(`/v1/apps/${encoded(appId)}`, key),
   );
-  await outputOperation(control, started, options);
 });
 
 app
@@ -1784,13 +2961,22 @@ addOperationOptions(
     appId,
     options: OperationOptions & { email: string; role: string },
   ) => {
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/access`,
-      { email: options.email, role: options.role },
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: "opencloud app access add",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "add-member" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/access`,
+          { email: options.email, role: options.role },
+          key,
+        ),
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -1803,13 +2989,21 @@ for (const mutation of [
   addOperationOptions(
     access.command(mutation[0]).argument("<app-id>").argument("<user-id>"),
   ).action(async (appId, userId, options: OperationOptions) => {
-    const control = client();
     const target = `/v1/apps/${encoded(appId)}/${mutation[1]}/${encoded(userId)}`;
-    const started =
-      mutation[2] === "PUT"
-        ? await control.put(target, {}, idempotencyKey(options))
-        : await control.delete(target, idempotencyKey(options));
-    await outputOperation(control, started, options);
+    await outputDurableMutation(
+      {
+        commandId: `opencloud app access ${mutation[0]}` as MutationCommandId,
+        appId,
+        safeScope: { appId, userId },
+        safeRequest: { action: mutation[0] },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        mutation[2] === "PUT"
+          ? control.put(target, {}, key)
+          : control.delete(target, key),
+    );
   });
 }
 
@@ -1831,22 +3025,35 @@ accessToken
   .option("--expires-in-days <days>", "token lifetime", "90")
   .option("--idempotency-key <key>")
   .action(async (appId, options) => {
-    const response = (await client().post(
-      `/v1/apps/${encoded(appId)}/access-tokens`,
+    const expiresInDays = parseBoundedNumber(
+      options.expiresInDays,
+      "--expires-in-days",
+      1,
+      365,
+    );
+    await outputReplayMutation(
       {
-        name: options.name,
-        expiresInDays: parseBoundedNumber(
-          options.expiresInDays,
-          "--expires-in-days",
-          1,
-          365,
-        ),
-        delivery: "reveal_link",
+        commandId: "opencloud app access-token create",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "create-access-token" },
+        explicitIdempotencyKey: options.idempotencyKey,
       },
-      idempotencyKey(options),
-    )) as Record<string, unknown>;
-    const { accessToken: _secret, ...safe } = response;
-    output(safe);
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/access-tokens`,
+          {
+            name: options.name,
+            expiresInDays,
+            delivery: "reveal_link",
+          },
+          key,
+        ) as Promise<Record<string, unknown>>,
+      (response) => {
+        const { accessToken: _secret, ...safe } = response;
+        return safe;
+      },
+    );
   });
 
 accessToken
@@ -1854,17 +3061,31 @@ accessToken
   .argument("<app-id>")
   .requiredOption("--name <name>")
   .option("--expires-in-days <days>", "token lifetime", "90")
+  .option("--idempotency-key <key>")
   .action(async (appId, options) => {
-    output(
-      await client().post(`/v1/apps/${encoded(appId)}/access-token-requests`, {
-        name: options.name,
-        expiresInDays: parseBoundedNumber(
-          options.expiresInDays,
-          "--expires-in-days",
-          1,
-          365,
+    const expiresInDays = parseBoundedNumber(
+      options.expiresInDays,
+      "--expires-in-days",
+      1,
+      365,
+    );
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app access-token request",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "request-access-token" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.call(
+          "requestAppAccessTokenApproval",
+          {
+            appId: String(appId),
+            body: { name: String(options.name), expiresInDays },
+          },
+          { idempotencyKey: key },
         ),
-      }),
     );
   });
 
@@ -1874,11 +3095,19 @@ accessToken
   .argument("<token-id>")
   .option("--idempotency-key <key>")
   .action(async (appId, tokenId, options) => {
-    output(
-      await client().delete(
-        `/v1/apps/${encoded(appId)}/access-tokens/${encoded(tokenId)}`,
-        idempotencyKey(options),
-      ),
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app access-token revoke",
+        appId,
+        safeScope: { appId, tokenId },
+        safeRequest: { action: "revoke" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.delete(
+          `/v1/apps/${encoded(appId)}/access-tokens/${encoded(tokenId)}`,
+          key,
+        ),
     );
   });
 
@@ -1893,11 +3122,23 @@ app
   .command("credential-revoke")
   .argument("<app-id>")
   .argument("<credential-id>")
-  .action(async (appId, credentialId) =>
-    output(
-      await client().delete(`/v1/apps/${appId}/credentials/${credentialId}`),
-    ),
-  );
+  .option("--idempotency-key <key>")
+  .action(async (appId, credentialId, options) => {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app credential-revoke",
+        appId,
+        safeScope: { appId, credentialId },
+        safeRequest: { action: "revoke" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.delete(
+          `/v1/apps/${encoded(appId)}/credentials/${encoded(credentialId)}`,
+          key,
+        ),
+    );
+  });
 
 app
   .command("credential-create")
@@ -1919,22 +3160,30 @@ app
   )
   .action(async (appId, options) => {
     const tokenFile = callerPath(String(options.tokenFile));
-    await assertPathAbsent(tokenFile, "TOKEN_FILE_EXISTS");
-    const response = await client().post(
-      `/v1/apps/${encoded(appId)}/credentials`,
-      {
-        name: options.name,
-        expiresInHours: parseBoundedNumber(
-          options.expiresInHours,
-          "--expires-in-hours",
-          1,
-          168,
-        ),
-        scopes: parseCommaList(options.scopes, "--scopes"),
-      },
-      idempotencyKey(options),
+    const expiresInHours = parseBoundedNumber(
+      options.expiresInHours,
+      "--expires-in-hours",
+      1,
+      168,
     );
-    output(await persistCredentialToken({ response, destination: tokenFile }));
+    const scopes = parseCommaList(options.scopes, "--scopes");
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app credential-create",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "create-credential" },
+        explicitIdempotencyKey: String(options.idempotencyKey),
+      },
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/credentials`,
+          { name: options.name, expiresInHours, scopes },
+          key,
+        ),
+      (response) =>
+        persistCredentialToken({ response, destination: tokenFile }),
+    );
   });
 
 const draft = program
@@ -1946,12 +3195,25 @@ draft
   .argument("<app-id>")
   .option("--name <name>")
   .option("--empty", "start without cloning the active release")
+  .option("--idempotency-key <key>")
   .action(async (appId, options) => {
-    output(
-      await client().post(`/v1/apps/${encoded(appId)}/drafts`, {
-        ...(options.name ? { name: String(options.name) } : {}),
-        cloneActive: options.empty !== true,
-      }),
+    await outputReplayMutation(
+      {
+        commandId: "opencloud draft create",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "create-draft" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/drafts`,
+          {
+            ...(options.name ? { name: String(options.name) } : {}),
+            cloneActive: options.empty !== true,
+          },
+          key,
+        ),
     );
   });
 
@@ -2010,25 +3272,88 @@ draft
   .argument("<draft-id>")
   .requiredOption("--expected-revision <revision>")
   .requiredOption("--changes-file <path>")
+  .option("--idempotency-key <key>")
   .action(async (appId, draftId, options) => {
     const changes = await jsonOption({
       file: String(options.changesFile),
       resolvePath: callerPath,
       kind: "array",
     });
-    output(
-      await client().patch(
-        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/files`,
-        {
-          expectedRevision: parseBoundedNumber(
-            options.expectedRevision,
-            "--expected-revision",
-            1,
-            Number.MAX_SAFE_INTEGER,
-          ),
-          changes,
+    const expectedRevision = parseBoundedNumber(
+      options.expectedRevision,
+      "--expected-revision",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const expectations = draftFileExpectations(changes);
+    const context = await exactAppMutationContext(appId);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud draft apply",
+        appId,
+        safeScope: { appId, draftId },
+        safeRequest: {
+          expectedRevision,
+          changesSha256: mutationDigest(changes),
         },
-      ),
+        explicitIdempotencyKey: options.idempotencyKey,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        if (run.attempted) {
+          const currentDraft = await context.control.call("getDraft", {
+            appId: String(appId),
+            draftId: String(draftId),
+          });
+          if (currentDraft.revision === expectedRevision + 1) {
+            const files = await context.control.call("listDraftFiles", {
+              appId: String(appId),
+              draftId: String(draftId),
+            });
+            if (!draftFilesMatchExpectations(files, expectations)) {
+              throw new CliContractError(
+                "MUTATION_REPLAY_MISMATCH",
+                "The draft advanced once, but its files do not match the unresolved apply request",
+              );
+            }
+            await outputAsync({ draft: currentDraft, files });
+            await run.complete();
+            return;
+          }
+          if (currentDraft.revision !== expectedRevision) {
+            throw new CliContractError(
+              "MUTATION_REPLAY_MISMATCH",
+              "The draft revision changed beyond the unresolved apply request; no request was replayed",
+            );
+          }
+        }
+        await run.checkpointStage({
+          stage: "applying",
+          revision: expectedRevision,
+        });
+        await run.markAttempted();
+        const result = await context.control.patch(
+          `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/files`,
+          { expectedRevision, changes },
+        );
+        const resultDraft =
+          result && typeof result === "object" && "draft" in result
+            ? (result as { draft?: unknown }).draft
+            : null;
+        if (
+          !resultDraft ||
+          typeof resultDraft !== "object" ||
+          (resultDraft as { revision?: unknown }).revision !==
+            expectedRevision + 1
+        ) {
+          throw new CliContractError(
+            "INVALID_DRAFT_RESPONSE",
+            "OpenCloud did not advance the draft by exactly one revision",
+          );
+        }
+        await outputAsync(result);
+        await run.complete();
+      },
     );
   });
 
@@ -2049,25 +3374,81 @@ draft
   .argument("<app-id>")
   .argument("<draft-id>")
   .option("--legacy-version <version>")
+  .option("--idempotency-key <key>")
   .action(async (appId, draftId, options) => {
-    output(
-      await client().post(
-        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/validate`,
-        options.legacyVersion ? { version: String(options.legacyVersion) } : {},
-      ),
+    const legacyVersion = options.legacyVersion
+      ? String(options.legacyVersion)
+      : null;
+    const context = await exactAppMutationContext(appId);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud draft validate",
+        appId,
+        safeScope: { appId, draftId },
+        safeRequest: { action: "validate", legacyVersion },
+        explicitIdempotencyKey: options.idempotencyKey,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        const currentDraft = await context.control.call("getDraft", {
+          appId: String(appId),
+          draftId: String(draftId),
+        });
+        const retainedRevision = run.checkpoint?.revision;
+        if (
+          retainedRevision !== undefined &&
+          currentDraft.revision !== retainedRevision
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "The draft revision changed after validation was journaled; no validation was replayed",
+          );
+        }
+        const revision = retainedRevision ?? currentDraft.revision;
+        if (retainedRevision === undefined) {
+          await run.checkpointStage({ stage: "validating", revision });
+        }
+        await run.markAttempted();
+        const result = await context.control.post(
+          `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/validate`,
+          legacyVersion ? { version: legacyVersion } : {},
+          run.idempotencyKey,
+        );
+        if (
+          !result ||
+          typeof result !== "object" ||
+          (result as { revision?: unknown }).revision !== revision
+        ) {
+          throw new CliContractError(
+            "MUTATION_REPLAY_MISMATCH",
+            "OpenCloud returned validation evidence for a different draft revision",
+          );
+        }
+        await outputAsync(result);
+        await run.complete();
+      },
     );
   });
 
 addOperationOptions(
   draft.command("deploy").argument("<app-id>").argument("<draft-id>"),
 ).action(async (appId, draftId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.post(
-    `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/deploy`,
-    undefined,
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud draft deploy",
+      appId,
+      safeScope: { appId, draftId },
+      safeRequest: { action: "deploy" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.post(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/deploy`,
+        undefined,
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 draft
@@ -2076,10 +3457,18 @@ draft
   .argument("<draft-id>")
   .option("--idempotency-key <key>")
   .action(async (appId, draftId, options) => {
-    output(
-      await client().delete(
+    await outputReplayMutation(
+      {
+        commandId: "opencloud draft discard",
+        appId,
+        safeScope: { appId, draftId },
+        safeRequest: { action: "discard" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.delete(
         `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}`,
-        idempotencyKey(options),
+        key,
       ),
     );
   });
@@ -2195,71 +3584,87 @@ addOperationOptions(program.command("deploy").argument("<directory>")).action(
   async (directory, options: OperationOptions) => {
     const sourceRoot = callerPath(directory);
     const bundle = await buildBundle(sourceRoot);
-    printBundleFiles(bundle.files);
-    printBundleWarnings(bundle.warnings);
     process.stderr.write(
       `Syncing ${manifestReleaseLabel(bundle.manifest)} (${bundle.sha256.slice(0, 12)})\n`,
     );
-    const control = client();
-    const draft = (await control.call("createDraft", {
-      appId: bundle.manifest.appId,
-      body: {
-        name: `CLI ${manifestReleaseLabel(bundle.manifest)}`,
-        cloneActive: false,
-      },
-    })) as { id?: string; revision?: number };
-    if (!draft.id || !draft.revision) {
-      throw new Error("Control plane did not return a source draft");
-    }
-    const changes = [];
-    for (const file of bundle.files) {
-      const content =
-        file === "opencloud.json"
-          ? Buffer.from(serializeBundleManifest(bundle.manifest))
-          : await readFile(path.join(sourceRoot, ...file.split("/")));
-      changes.push({
-        path: file,
-        contentBase64: content.toString("base64"),
-      });
-    }
-    let revision = draft.revision;
-    for (let offset = 0; offset < changes.length; offset += 200) {
-      const applied = (await control.call("applyDraftChanges", {
-        appId: bundle.manifest.appId,
-        draftId: draft.id,
-        body: {
-          expectedRevision: revision,
-          changes: changes.slice(offset, offset + 200),
-        },
-      })) as { draft?: { revision?: number } };
-      revision = applied.draft?.revision ?? revision + 1;
-    }
-    const validation = (await control.call("validateDraft", {
-      appId: bundle.manifest.appId,
-      draftId: draft.id,
-      body: {},
-    })) as { passed?: boolean; artifactSha256?: string };
-    if (!validation.passed) {
-      throw new CliContractError(
-        "DRAFT_VALIDATION_FAILED",
-        "Authoritative server validation failed",
-      );
-    }
-    if (validation.artifactSha256 !== bundle.sha256) {
-      throw new Error("Local and server canonical bundle digests do not match");
-    }
-    const started = await control.call(
-      "deployDraft",
-      {
-        appId: bundle.manifest.appId,
-        draftId: draft.id,
-      },
-      {
-        idempotencyKey: idempotencyKey(options),
-        timeoutMs: 120_000,
+    const appId = bundle.manifest.appId;
+    const context = await exactAppMutationContext(appId, sourceRoot);
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud deploy",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "deploy", artifactSha256: bundle.sha256 },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        let draftId = run.checkpoint?.draftId;
+        let started: unknown;
+        if (run.operationId) {
+          if (!draftId) {
+            throw new CliContractError(
+              "CORRUPT_MUTATION_JOURNAL",
+              "The deployment checkpoint is missing its source draft",
+            );
+          }
+          started = await context.control.call(
+            "deployDraft",
+            { appId, draftId },
+            {
+              idempotencyKey: childIdempotencyKey(run, "deploy"),
+              timeoutMs: 120_000,
+            },
+          );
+          if (operationFrom(started)?.id !== run.operationId) {
+            throw new CliContractError(
+              "MUTATION_REPLAY_MISMATCH",
+              "OpenCloud did not replay the journaled deployment operation",
+            );
+          }
+        } else {
+          const synchronized = await synchronizeValidatedDraft(
+            context.control,
+            sourceRoot,
+            bundle,
+            run,
+            undefined,
+            "CLI",
+          );
+          draftId = synchronized.draftId;
+          await run.markAttempted();
+          started = await context.control.call(
+            "deployDraft",
+            { appId, draftId },
+            {
+              idempotencyKey: childIdempotencyKey(run, "deploy"),
+              timeoutMs: 120_000,
+            },
+          );
+          const operation = operationFrom(started);
+          if (!operation) {
+            throw new CliContractError(
+              "INVALID_OPERATION_RESPONSE",
+              "OpenCloud did not return a durable deployment operation",
+            );
+          }
+          await run.checkpointStage({
+            stage: "deploying",
+            artifactSha256: bundle.sha256,
+            draftId,
+            operationId: operation.id,
+          });
+        }
+        const completed = await followOperation({
+          client: context.control,
+          started,
+          options,
+        });
+        await outputAsync(completed);
+        await run.complete();
       },
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -2411,13 +3816,22 @@ addOperationOptions(
     .argument("<app-id>")
     .argument("<deployment-id>"),
 ).action(async (appId, deploymentId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.post(
-    `/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}/rollback`,
-    {},
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud deployment rollback",
+      appId,
+      safeScope: { appId, deploymentId },
+      safeRequest: { action: "rollback" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.post(
+        `/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}/rollback`,
+        {},
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 deployment
@@ -2426,10 +3840,18 @@ deployment
   .argument("<deployment-id>")
   .option("--idempotency-key <key>")
   .action(async (appId, deploymentId, options) => {
-    output(
-      await client().delete(
+    await outputReplayMutation(
+      {
+        commandId: "opencloud deployment delete",
+        appId,
+        safeScope: { appId, deploymentId },
+        safeRequest: { action: "delete" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.delete(
         `/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}`,
-        idempotencyKey(options),
+        key,
       ),
     );
   });
@@ -2464,13 +3886,22 @@ addOperationOptions(
     .argument("<app-id>")
     .argument("<cron-name>"),
 ).action(async (appId, cronName, options: OperationOptions) => {
-  const control = client();
-  const started = await control.post(
-    `/v1/apps/${encoded(appId)}/cron/${encoded(cronName)}/operations`,
-    undefined,
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud cron invoke",
+      appId,
+      safeScope: { appId, cronName },
+      safeRequest: { action: "invoke" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.post(
+        `/v1/apps/${encoded(appId)}/cron/${encoded(cronName)}/operations`,
+        undefined,
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 const jobs = program
@@ -2515,13 +3946,27 @@ secret
   .argument("<name>")
   .option("--idempotency-key <key>")
   .action(async (appId, name, options) => {
+    const context = await exactAppMutationContext(appId);
     const value = await secretFromStdin();
-    output(
-      await client().put(
-        `/v1/apps/${encoded(appId)}/secrets/${encoded(name)}`,
-        { value },
-        idempotencyKey(options),
-      ),
+    await context.journal.run(
+      mutationIntent({
+        commandId: "opencloud secret set",
+        appId,
+        safeScope: { appId, name },
+        safeRequest: { action: "set-from-stdin" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      }),
+      async (run) => {
+        run.failIfUnknown();
+        await run.markAttempted();
+        const result = await context.control.call(
+          "putSecret",
+          { appId, name, body: { value } },
+          { idempotencyKey: run.idempotencyKey },
+        );
+        await outputAsync(result);
+        await run.complete();
+      },
     );
   });
 
@@ -2532,18 +3977,29 @@ secret
   .argument("<name>")
   .option("--bytes <number>", "random byte count", "32")
   .option("--encoding <encoding>", "base64url or hex", "base64url")
-  .action(async (appId, name, options) =>
-    output(
-      await client().call("generateSecret", {
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const bytes = parseBoundedNumber(options.bytes, "--bytes", 16, 64);
+    await outputReplayMutation(
+      {
+        commandId: "opencloud secret rotate",
         appId,
-        name,
-        body: {
-          bytes: Number(options.bytes),
-          encoding: options.encoding,
-        },
-      }),
-    ),
-  );
+        safeScope: { appId, name },
+        safeRequest: { action: "rotate" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.call(
+          "generateSecret",
+          {
+            appId,
+            name,
+            body: { bytes, encoding: options.encoding },
+          },
+          { idempotencyKey: key },
+        ),
+    );
+  });
 
 secret
   .command("configure")
@@ -2552,14 +4008,24 @@ secret
   )
   .argument("<app-id>")
   .argument("<name>")
-  .action(async (appId, name) =>
-    output(
-      await client().call("createSecretEntryLink", {
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud secret configure",
         appId,
-        name,
-      }),
-    ),
-  );
+        safeScope: { appId, name },
+        safeRequest: { action: "configure" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.call(
+          "createSecretEntryLink",
+          { appId, name },
+          { idempotencyKey: key },
+        ),
+    );
+  });
 
 secret
   .command("list")
@@ -2572,13 +4038,23 @@ secret
   .command("delete")
   .argument("<app-id>")
   .argument("<name>")
-  .action(async (appId, name) =>
-    output(
-      await client().delete(
-        `/v1/apps/${appId}/secrets/${encodeURIComponent(name)}`,
-      ),
-    ),
-  );
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud secret delete",
+        appId,
+        safeScope: { appId, name },
+        safeRequest: { action: "delete" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.delete(
+          `/v1/apps/${encoded(appId)}/secrets/${encoded(name)}`,
+          key,
+        ),
+    );
+  });
 
 const backup = program.command("backup").description("Manage app backups");
 
@@ -2619,26 +4095,40 @@ backup
 
 addOperationOptions(backup.command("create").argument("<app-id>")).action(
   async (appId, options: OperationOptions) => {
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/backups`,
-      {},
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: "opencloud backup create",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "create" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.post(`/v1/apps/${encoded(appId)}/backups`, {}, key),
     );
-    await outputOperation(control, started, options);
   },
 );
 
 addOperationOptions(
   backup.command("restore").argument("<app-id>").argument("<backup-id>"),
 ).action(async (appId, backupId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.post(
-    `/v1/apps/${encoded(appId)}/backups/${encoded(backupId)}/restore`,
-    {},
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud backup restore",
+      appId,
+      safeScope: { appId, backupId },
+      safeRequest: { action: "restore" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.post(
+        `/v1/apps/${encoded(appId)}/backups/${encoded(backupId)}/restore`,
+        {},
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 addOperationOptions(
@@ -2647,13 +4137,22 @@ addOperationOptions(
     .argument("<app-id>")
     .argument("<schedule>", "none, daily, or weekly"),
 ).action(async (appId, schedule, options: OperationOptions) => {
-  const control = client();
-  const started = await control.put(
-    `/v1/apps/${encoded(appId)}/backups/schedule`,
-    { schedule },
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud backup schedule",
+      appId,
+      safeScope: { appId },
+      safeRequest: { action: "schedule" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.put(
+        `/v1/apps/${encoded(appId)}/backups/schedule`,
+        { schedule },
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 const data = program
@@ -2725,13 +4224,22 @@ for (const mutation of [
         kind: mutation[2],
         defaultValue: mutation[3],
       });
-      const control = client();
-      const started = await control.post(
-        `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
-        { action: mutation[1], values },
-        idempotencyKey(options),
+      await outputDurableMutation(
+        {
+          commandId: `opencloud data ${mutation[0]}` as MutationCommandId,
+          appId,
+          safeScope: { appId, table },
+          safeRequest: { action: mutation[1] },
+          explicitIdempotencyKey: options.idempotencyKey,
+        },
+        options,
+        (control, key) =>
+          control.post(
+            `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+            { action: mutation[1], values },
+            key,
+          ),
       );
-      await outputOperation(control, started, options);
     },
   );
 }
@@ -2761,13 +4269,22 @@ addOperationOptions(
       kind: "object",
       defaultValue: {},
     });
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
-      { action: "updateById", id: rowId, values },
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: "opencloud data update",
+        appId,
+        safeScope: { appId, table, rowId },
+        safeRequest: { action: "updateById" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+          { action: "updateById", id: rowId, values },
+          key,
+        ),
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -2778,13 +4295,22 @@ addOperationOptions(
     .argument("<table>")
     .argument("<row-id>"),
 ).action(async (appId, table, rowId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.post(
-    `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
-    { action: "deleteById", id: rowId },
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud data delete",
+      appId,
+      safeScope: { appId, table, rowId },
+      safeRequest: { action: "deleteById" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.post(
+        `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+        { action: "deleteById", id: rowId },
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 const functionCommand = program
@@ -2814,13 +4340,22 @@ addOperationOptions(
       kind: "object",
       defaultValue: {},
     });
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/functions/${encoded(functionName)}/invocations`,
-      { input },
-      idempotencyKey(options),
+    await outputDurableMutation(
+      {
+        commandId: "opencloud function invoke",
+        appId,
+        safeScope: { appId, functionName },
+        safeRequest: { action: "invoke" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      options,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/functions/${encoded(functionName)}/invocations`,
+          { input },
+          key,
+        ),
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -2894,17 +4429,28 @@ addOperationOptions(
     const query = new URLSearchParams({
       name: options.name ? String(options.name) : path.basename(source),
     });
-    const control = client();
-    const started = await control.uploadFile(
-      "POST",
-      `/v1/apps/${encoded(appId)}/files?${query}`,
-      source,
+    await outputDurableMutation(
       {
-        ...(options.contentType ? { contentType: options.contentType } : {}),
-        idempotencyKey: idempotencyKey(options),
+        commandId: "opencloud file upload",
+        appId,
+        safeScope: { appId },
+        safeRequest: { action: "upload" },
+        explicitIdempotencyKey: options.idempotencyKey,
       },
+      options,
+      (control, key) =>
+        control.uploadFile(
+          "POST",
+          `/v1/apps/${encoded(appId)}/files?${query}`,
+          source,
+          {
+            ...(options.contentType
+              ? { contentType: options.contentType }
+              : {}),
+            idempotencyKey: key,
+          },
+        ),
     );
-    await outputOperation(control, started, options);
   },
 );
 
@@ -2930,29 +4476,49 @@ addOperationOptions(
     const query = options.name
       ? `?${new URLSearchParams({ name: String(options.name) })}`
       : "";
-    const control = client();
-    const started = await control.uploadFile(
-      "PUT",
-      `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}${query}`,
-      source,
+    await outputDurableMutation(
       {
-        ...(options.contentType ? { contentType: options.contentType } : {}),
-        idempotencyKey: idempotencyKey(options),
+        commandId: "opencloud file replace",
+        appId,
+        safeScope: { appId, fileId },
+        safeRequest: { action: "replace" },
+        explicitIdempotencyKey: options.idempotencyKey,
       },
+      options,
+      (control, key) =>
+        control.uploadFile(
+          "PUT",
+          `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}${query}`,
+          source,
+          {
+            ...(options.contentType
+              ? { contentType: options.contentType }
+              : {}),
+            idempotencyKey: key,
+          },
+        ),
     );
-    await outputOperation(control, started, options);
   },
 );
 
 addOperationOptions(
   file.command("delete").argument("<app-id>").argument("<file-id>"),
 ).action(async (appId, fileId, options: OperationOptions) => {
-  const control = client();
-  const started = await control.delete(
-    `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}`,
-    idempotencyKey(options),
+  await outputDurableMutation(
+    {
+      commandId: "opencloud file delete",
+      appId,
+      safeScope: { appId, fileId },
+      safeRequest: { action: "delete" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    },
+    options,
+    (control, key) =>
+      control.delete(
+        `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}`,
+        key,
+      ),
   );
-  await outputOperation(control, started, options);
 });
 
 const integration = program
@@ -2989,27 +4555,37 @@ integration
   .option("--trigger-mode <mode>")
   .option("--idempotency-key <key>")
   .action(async (appId, integrationName, options) => {
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/binding-operations`,
-      {
-        connectionId: options.connectionId,
-        ...(options.resourceId
-          ? { resourceId: String(options.resourceId) }
-          : {}),
-        label: options.label,
-        ...(options.triggerMode
-          ? { triggerMode: String(options.triggerMode) }
-          : {}),
-      },
-      idempotencyKey(options),
-    );
-    await outputOperation(control, started, {
+    const operationOptions: OperationOptions = {
       follow: true,
       interval: "2",
       timeout: "900",
       idempotencyKey: options.idempotencyKey,
-    });
+    };
+    await outputDurableMutation(
+      {
+        commandId: "opencloud integration bind",
+        appId,
+        safeScope: { appId, integrationName },
+        safeRequest: { action: "bind" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      operationOptions,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/binding-operations`,
+          {
+            connectionId: options.connectionId,
+            ...(options.resourceId
+              ? { resourceId: String(options.resourceId) }
+              : {}),
+            label: options.label,
+            ...(options.triggerMode
+              ? { triggerMode: String(options.triggerMode) }
+              : {}),
+          },
+          key,
+        ),
+    );
   });
 
 integration
@@ -3019,18 +4595,28 @@ integration
   .argument("<binding-id>")
   .option("--idempotency-key <key>")
   .action(async (appId, integrationName, bindingId, options) => {
-    const control = client();
-    const started = await control.post(
-      `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/bindings/${encoded(bindingId)}/delete-operations`,
-      undefined,
-      idempotencyKey(options),
-    );
-    await outputOperation(control, started, {
+    const operationOptions: OperationOptions = {
       follow: true,
       interval: "2",
       timeout: "900",
       idempotencyKey: options.idempotencyKey,
-    });
+    };
+    await outputDurableMutation(
+      {
+        commandId: "opencloud integration unbind",
+        appId,
+        safeScope: { appId, integrationName, bindingId },
+        safeRequest: { action: "unbind" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      operationOptions,
+      (control, key) =>
+        control.post(
+          `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/bindings/${encoded(bindingId)}/delete-operations`,
+          undefined,
+          key,
+        ),
+    );
   });
 
 program
@@ -3160,29 +4746,64 @@ alertRule
       .default("warning"),
   )
   .option("--disabled", "create the rule in a disabled state")
-  .action(async (appId, ruleId, options) =>
-    output(
-      await client().put(`/v1/apps/${appId}/alert-rules/${ruleId}`, {
-        name: options.name,
-        metric: options.metric,
-        aggregation: options.aggregation,
-        operator: options.operator,
-        threshold: Number(options.threshold),
-        window: options.window,
-        minimumSamples: Number(options.minimumSamples),
-        severity: options.severity,
-        enabled: options.disabled !== true,
-      }),
-    ),
-  );
+  .option("--idempotency-key <key>")
+  .action(async (appId, ruleId, options) => {
+    const body = {
+      name: options.name,
+      metric: options.metric,
+      aggregation: options.aggregation,
+      operator: options.operator,
+      threshold: Number(options.threshold),
+      window: options.window,
+      minimumSamples: Number(options.minimumSamples),
+      severity: options.severity,
+      enabled: options.disabled !== true,
+    };
+    await outputReplayMutation(
+      {
+        commandId: "opencloud alert-rule put",
+        appId,
+        safeScope: { appId, ruleId },
+        safeRequest: { action: "put", rule: body },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control.put(
+          `/v1/apps/${encoded(appId)}/alert-rules/${encoded(ruleId)}`,
+          body,
+          key,
+        ),
+    );
+  });
 
 alertRule
   .command("delete")
   .argument("<app-id>")
   .argument("<rule-id>")
-  .action(async (appId, ruleId) =>
-    output(await client().delete(`/v1/apps/${appId}/alert-rules/${ruleId}`)),
-  );
+  .option("--idempotency-key <key>")
+  .action(async (appId, ruleId, options) => {
+    await outputReplayMutation(
+      {
+        commandId: "opencloud alert-rule delete",
+        appId,
+        safeScope: { appId, ruleId },
+        safeRequest: { action: "delete" },
+        explicitIdempotencyKey: options.idempotencyKey,
+      },
+      (control, key) =>
+        control
+          .delete(
+            `/v1/apps/${encoded(appId)}/alert-rules/${encoded(ruleId)}`,
+            key,
+          )
+          .catch((error: unknown) => {
+            if (error instanceof ApiError && error.status === 404) {
+              return { id: ruleId, deleted: true, reconciled: true };
+            }
+            throw error;
+          }),
+    );
+  });
 
 program.parseAsync().catch((error: unknown) => {
   if (

@@ -42,6 +42,30 @@ describe("OpenCloudClient", () => {
     ).toBe(false);
   });
 
+  it("can require revalidation for the platform compatibility marker", async () => {
+    let request: RequestInit | undefined;
+    const client = new OpenCloudClient({
+      apiUrl: "https://api.opencloud.ai",
+      fetch: async (_input, init) => {
+        request = init;
+        return new Response(
+          JSON.stringify({
+            version: "1.2.3",
+            commit: "abc123",
+            builtAt: "2026-09-02T00:00:00Z",
+            releaseId: "platform-v1.2.3",
+            contracts: { cliMutationJournal: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    await client.call("getPlatformVersion", {}, { cacheControl: "no-cache" });
+
+    expect(new Headers(request?.headers).get("cache-control")).toBe("no-cache");
+  });
+
   it("streams owner File uploads with bounded metadata", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "opencloud-client-upload-test-"),

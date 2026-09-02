@@ -35,10 +35,28 @@ export interface LegacyReadyAgentSession extends ReadyAgentSessionBase {
   appUrl: string;
 }
 
-export interface RuntimeReadyAgentSession extends ReadyAgentSessionBase {
+interface RuntimeReadyAgentSessionBase extends ReadyAgentSessionBase {
   schemaVersion: 2;
   appUrl?: string;
 }
+
+export interface RuntimeLegacyReadyAgentSession
+  extends RuntimeReadyAgentSessionBase {
+  authorityMode?: "legacy_split_v1";
+  rootRunId?: never;
+  familyId?: never;
+}
+
+export interface RuntimeAppOwnerReadyAgentSession
+  extends RuntimeReadyAgentSessionBase {
+  authorityMode: "app_owner_v1";
+  rootRunId: string;
+  familyId: string;
+}
+
+export type RuntimeReadyAgentSession =
+  | RuntimeLegacyReadyAgentSession
+  | RuntimeAppOwnerReadyAgentSession;
 
 export type ReadyAgentSession =
   | LegacyReadyAgentSession
@@ -48,6 +66,9 @@ export type OpenCloudSession =
   | StartingOnboardingSession
   | PendingOnboardingSession
   | ReadyAgentSession;
+
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function defaultSessionFile(cwd = process.cwd()): string {
   return path.join(cwd, ".opencloud", "session.json");
@@ -84,7 +105,8 @@ export function loadSession(file: string): OpenCloudSession | null {
     }
     throw error;
   }
-  const value = JSON.parse(raw) as Partial<OpenCloudSession>;
+  const value = JSON.parse(raw) as Partial<OpenCloudSession> &
+    Record<string, unknown>;
   if (typeof value.apiUrl !== "string" || !value.apiUrl) {
     throw new Error(`Invalid OpenCloud session file: ${file}`);
   }
@@ -106,7 +128,18 @@ export function loadSession(file: string): OpenCloudSession | null {
     typeof value.credentialExpiresAt === "string" &&
     (value.schemaVersion === 1
       ? typeof value.appUrl === "string"
-      : value.appUrl === undefined || typeof value.appUrl === "string")
+      : (value.appUrl === undefined || typeof value.appUrl === "string") &&
+        ((value.authorityMode === undefined &&
+          value.rootRunId === undefined &&
+          value.familyId === undefined) ||
+          (value.authorityMode === "legacy_split_v1" &&
+            value.rootRunId === undefined &&
+            value.familyId === undefined) ||
+          (value.authorityMode === "app_owner_v1" &&
+            typeof value.rootRunId === "string" &&
+            UUID.test(value.rootRunId) &&
+            typeof value.familyId === "string" &&
+            UUID.test(value.familyId))))
   ) {
     return value as ReadyAgentSession;
   }

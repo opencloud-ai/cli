@@ -66,6 +66,20 @@ export const createCredentialRequestSchema = z.object({
     .min(1),
 });
 
+export const appAccessTokenDeliverySchema = z.enum(["response", "reveal_link"]);
+
+export const createAppAccessTokenRequestSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  expiresInDays: z.coerce.number().int().min(1).max(365).default(90),
+  delivery: appAccessTokenDeliverySchema.default("response"),
+});
+
+export const requestAppAccessTokenApprovalSchema =
+  createAppAccessTokenRequestSchema.pick({
+    name: true,
+    expiresInDays: true,
+  });
+
 export const startAgentOnboardingRequestSchema = z.object({
   email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
   projectName: z.string().trim().min(1).max(120),

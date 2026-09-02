@@ -8,7 +8,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const binary = path.join(root, "dist", "index.cjs");
 const contract = JSON.parse(
   await readFile(
-    path.join(import.meta.dirname, "public-cli-3.6.0-command-surface.json"),
+    path.join(import.meta.dirname, "public-cli-3.7.0-command-surface.json"),
     "utf8",
   ),
 );

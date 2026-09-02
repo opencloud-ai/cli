@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.6.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.7.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.6.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.6.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.7.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.7.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -69,11 +69,19 @@ binding and stores a separate renewable 24-hour app credential in the protected
 backend. This lets later terminal sessions reuse the account login and lets one
 user work safely across multiple app directories.
 
+`app create` runs before an app-scoped recovery journal exists, so it requires
+a caller-stable `--idempotency-key`; reuse that key only for retries of the
+same create request. `app connect` is an unkeyed credential exchange. If its
+response is lost before protected storage completes, the bounded 24-hour
+credential may remain orphaned until expiry and rerunning connect mints a
+replacement.
+
 ```bash
 # Only when the requested app does not already exist:
 "$OPENCLOUD_CLI" app create \
   --name "Family tasks" \
-  --visibility private
+  --visibility private \
+  --idempotency-key "$IDEMPOTENCY_KEY"
 
 # Revoke the login family and derived workspace credentials:
 "$OPENCLOUD_CLI" logout
@@ -130,7 +138,7 @@ schema-2-compatible source tree.
 
 ## Exact-app owner operations
 
-CLI 3.6 adds public command parity for an exact-app owner Agent: app lifecycle
+CLI 3.7 provides public command parity for an exact-app owner Agent: app lifecycle
 and access changes, source drafts, production data and Function execution,
 streamed managed Files, integration bindings, visitors, and durable operation
 recovery. Run `opencloud <group> --help` for the bounded command contract.
@@ -150,6 +158,23 @@ success emits one compact JSON document; failures emit redacted structured JSON
 and exit non-zero. `secret set` reads only standard input. `app
 credential-create` requires `--token-file`, refuses overwrite, writes the
 one-time token with mode `0600`, and never includes it in command output.
+
+Mutations are retained in a protected local recovery journal. Agent runtimes
+set `OPENCLOUD_MUTATION_JOURNAL_DIR` to the dedicated persistent Linux mount at
+`/workspace/.opencloud/agent-mutations`; the CLI verifies the exact mount,
+rejects symlinked components, retains inode-anchored journal directories, and
+binds unresolved work to the exact API base, app, runtime root, and credential
+family before replay. Human use remains portable and defaults to the nearest
+connected workspace, or the protected OpenCloud configuration directory when
+no workspace exists. All development start/sync/promote/stop workflows also
+share one stale-recoverable cross-process lock so a completed stop cannot race
+with a late state write. Journal files contain only opaque digests, idempotency
+keys, and server coordinates—never credentials, request bodies, email
+addresses, secret fingerprints, bearer URLs, or absolute source paths. The
+journal guarantee applies to exact-app mutations. Account OAuth,
+passwordless legacy onboarding, app creation, and app connection are separately
+audited authority/bootstrap boundaries with the recovery limits described
+above.
 
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every

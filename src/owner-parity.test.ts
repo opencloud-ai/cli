@@ -1,5 +1,14 @@
 import { Readable } from "node:stream";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -166,7 +175,66 @@ describe("owner-parity CLI helpers", () => {
       }),
     ).rejects.toMatchObject({ code: "TOKEN_FILE_EXISTS" });
     expect(await readFile(destination, "utf8")).toContain("do-not-print");
+    await expect(
+      persistCredentialToken({
+        response: {
+          id: "credential-1",
+          prefix: "oc_app_example",
+          token: "oc_app_do-not-print-this-token",
+        },
+        destination,
+      }),
+    ).resolves.toEqual(metadata);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects existing credential files unless they are exact mode 0600 regular files",
+    async () => {
+      const directory = await temporaryDirectory();
+      const destination = path.join(directory, "app.token");
+      const response = { token: "same-secret" };
+
+      await writeFile(destination, "same-secret\n", { mode: 0o400 });
+      await expect(
+        persistCredentialToken({ response, destination }),
+      ).rejects.toMatchObject({ code: "UNSAFE_TOKEN_FILE" });
+
+      await chmod(destination, 0o700);
+      await expect(
+        persistCredentialToken({ response, destination }),
+      ).rejects.toMatchObject({ code: "UNSAFE_TOKEN_FILE" });
+
+      await rm(destination);
+      const target = path.join(directory, "target.token");
+      await writeFile(target, "same-secret\n", { mode: 0o600 });
+      await symlink(target, destination);
+      await expect(
+        persistCredentialToken({ response, destination }),
+      ).rejects.toMatchObject({ code: "UNSAFE_TOKEN_FILE" });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "detects replacement of an existing credential path after O_NOFOLLOW open",
+    async () => {
+      const directory = await temporaryDirectory();
+      const destination = path.join(directory, "app.token");
+      const retained = path.join(directory, "retained.token");
+      await writeFile(destination, "same-secret\n", { mode: 0o600 });
+
+      await expect(
+        persistCredentialToken({
+          response: { token: "same-secret" },
+          destination,
+          afterExistingFileOpened: async () => {
+            await rename(destination, retained);
+            await writeFile(destination, "same-secret\n", { mode: 0o600 });
+          },
+        }),
+      ).rejects.toMatchObject({ code: "UNSAFE_TOKEN_FILE" });
+      expect(await readFile(retained, "utf8")).toBe("same-secret\n");
+    },
+  );
 
   it("streams downloads to a new file and refuses overwrite", async () => {
     const directory = await temporaryDirectory();

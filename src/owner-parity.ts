@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
-  chmod,
   link,
   lstat,
   mkdir,
@@ -297,11 +297,10 @@ export async function assertPathAbsent(
 export async function persistCredentialToken(input: {
   response: unknown;
   destination: string;
+  /** @internal Deterministic fault-injection seam for path-swap tests. */
+  afterExistingFileOpened?: (() => void | Promise<void>) | undefined;
 }): Promise<Record<string, unknown>> {
-  const destination = await assertPathAbsent(
-    input.destination,
-    "TOKEN_FILE_EXISTS",
-  );
+  const destination = path.resolve(input.destination);
   const response = input.response as Record<string, unknown>;
   const token = response?.token;
   if (typeof token !== "string" || !token) {
@@ -310,18 +309,104 @@ export async function persistCredentialToken(input: {
       "OpenCloud did not return the one-time credential",
     );
   }
-  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
-  await open(destination, "wx", 0o600).then(async (handle) => {
+  const serialized = Buffer.from(`${token}\n`, "utf8");
+  const metadata = (): Record<string, unknown> => {
+    const { token: _secret, ...safe } = response;
+    return { ...safe, tokenFile: destination };
+  };
+  const acceptExisting = async (): Promise<Record<string, unknown>> => {
+    const noFollow =
+      process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+    let handle;
     try {
-      await handle.writeFile(`${token}\n`, { encoding: "utf8" });
+      handle = await open(destination, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      throw new CliContractError(
+        "UNSAFE_TOKEN_FILE",
+        `Existing credential token path could not be opened safely: ${destination}`,
+        { cause: error },
+      );
+    }
+    try {
+      await input.afterExistingFileOpened?.();
+      const destinationMetadata = await handle.stat();
+      if (
+        !destinationMetadata.isFile() ||
+        (process.platform !== "win32" &&
+          (destinationMetadata.mode & 0o777) !== 0o600)
+      ) {
+        throw new CliContractError(
+          "UNSAFE_TOKEN_FILE",
+          `Existing credential token path is not a mode-0600 regular file: ${destination}`,
+        );
+      }
+      const existing = await handle.readFile();
+      let currentHandle;
+      try {
+        currentHandle = await open(
+          destination,
+          fsConstants.O_RDONLY | noFollow,
+        );
+      } catch (error) {
+        throw new CliContractError(
+          "UNSAFE_TOKEN_FILE",
+          `Existing credential token path changed while it was being verified: ${destination}`,
+          { cause: error },
+        );
+      }
+      try {
+        const currentMetadata = await currentHandle.stat();
+        if (
+          !currentMetadata.isFile() ||
+          currentMetadata.dev !== destinationMetadata.dev ||
+          currentMetadata.ino !== destinationMetadata.ino
+        ) {
+          throw new CliContractError(
+            "UNSAFE_TOKEN_FILE",
+            `Existing credential token path changed while it was being verified: ${destination}`,
+          );
+        }
+      } finally {
+        await currentHandle.close();
+      }
+      if (
+        existing.byteLength !== serialized.byteLength ||
+        !timingSafeEqual(existing, serialized)
+      ) {
+        throw new CliContractError(
+          "TOKEN_FILE_EXISTS",
+          `Refusing to overwrite credential token file ${destination}`,
+        );
+      }
+      return metadata();
+    } finally {
+      await handle.close();
+    }
+  };
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  const temporary = path.join(
+    path.dirname(destination),
+    `.${path.basename(destination)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(serialized);
+      if (process.platform !== "win32") await handle.chmod(0o600);
       await handle.sync();
     } finally {
       await handle.close();
     }
-  });
-  if (process.platform !== "win32") await chmod(destination, 0o600);
-  const { token: _secret, ...metadata } = response;
-  return { ...metadata, tokenFile: destination };
+    try {
+      await link(temporary, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return await acceptExisting();
+    }
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+  return metadata();
 }
 
 export async function downloadToFile(input: {

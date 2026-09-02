@@ -76,6 +76,48 @@ describe("OpenCloud CLI session store", () => {
     expect(loadSession(file)).toEqual(assignedSession);
   });
 
+  it("retains a validated app-owner root and credential family binding", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const file = path.join(directory, ".opencloud", "session.json");
+    const session: ReadyAgentSession = {
+      schemaVersion: 2,
+      state: "ready",
+      apiUrl: "https://api.opencloud.ai",
+      appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+      token: "oc_agent_secret",
+      credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+      authorityMode: "app_owner_v1",
+      rootRunId: "11111111-1111-4111-8111-111111111111",
+      familyId: "22222222-2222-4222-8222-222222222222",
+    };
+
+    await saveSession(file, session);
+    expect(loadSession(file)).toEqual(session);
+  });
+
+  it("rejects an app-owner runtime session without its root/family pair", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
+    directories.push(directory);
+    const file = path.join(directory, ".opencloud", "session.json");
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      JSON.stringify({
+        schemaVersion: 2,
+        state: "ready",
+        apiUrl: "https://api.opencloud.ai",
+        appId: "248c0b0d-4a85-46de-af54-e3afb145dc2b",
+        token: "oc_agent_secret",
+        credentialExpiresAt: "2026-07-30T12:00:00.000Z",
+        authorityMode: "app_owner_v1",
+        rootRunId: "11111111-1111-4111-8111-111111111111",
+      }),
+    );
+
+    expect(() => loadSession(file)).toThrow("Invalid OpenCloud session file");
+  });
+
   it("keeps the public URL required in legacy ready sessions", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-cli-"));
     directories.push(directory);

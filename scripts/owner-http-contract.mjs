@@ -10,17 +10,18 @@ const binary = path.join(root, "dist", "index.cjs");
 const temporary = await mkdtemp(
   path.join(os.tmpdir(), "opencloud-owner-http-contract-"),
 );
-const appId = "00000000-0000-0000-0000-000000000001";
-const operationId = "00000000-0000-0000-0000-000000000002";
-const fileId = "00000000-0000-0000-0000-000000000003";
-const connectionId = "00000000-0000-0000-0000-000000000004";
-const bindingId = "00000000-0000-0000-0000-000000000005";
-const draftId = "00000000-0000-0000-0000-000000000006";
-const userId = "00000000-0000-0000-0000-000000000007";
-const tokenId = "00000000-0000-0000-0000-000000000008";
-const deploymentId = "00000000-0000-0000-0000-000000000009";
-const messageId = "00000000-0000-0000-0000-00000000000a";
-const backupId = "00000000-0000-0000-0000-00000000000b";
+const appId = "00000000-0000-4000-8000-000000000001";
+const operationId = "00000000-0000-4000-8000-000000000002";
+const fileId = "00000000-0000-4000-8000-000000000003";
+const connectionId = "00000000-0000-4000-8000-000000000004";
+const bindingId = "00000000-0000-4000-8000-000000000005";
+const draftId = "00000000-0000-4000-8000-000000000006";
+const userId = "00000000-0000-4000-8000-000000000007";
+const tokenId = "00000000-0000-4000-8000-000000000008";
+const deploymentId = "00000000-0000-4000-8000-000000000009";
+const messageId = "00000000-0000-4000-8000-00000000000a";
+const backupId = "00000000-0000-4000-8000-00000000000b";
+const contractTimestamp = "2026-09-02T12:00:00.000Z";
 const requests = [];
 
 async function requestBody(request) {
@@ -37,6 +38,19 @@ const server = createServer(async (request, response) => {
     headers: request.headers,
     body,
   });
+  if (request.url === "/version") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        version: "3.7.0",
+        commit: "contract-test",
+        builtAt: "2026-09-02T00:00:00.000Z",
+        releaseId: "platform-v3.7.0-contract-test",
+        contracts: { cliMutationJournal: 1 },
+      }),
+    );
+    return;
+  }
   if (request.url === `/v1/apps/${appId}/files/${fileId}/content`) {
     response.writeHead(200, {
       "content-type": "application/octet-stream",
@@ -58,6 +72,14 @@ const server = createServer(async (request, response) => {
       expiresAt: "2026-09-03T00:00:00.000Z",
     };
   } else if (
+    request.method === "POST" &&
+    request.url === `/v1/apps/${appId}/access-token-requests`
+  ) {
+    payload = {
+      approvalUrl: "https://approval.example.test/request",
+      expiresAt: "2026-09-03T00:00:00.000Z",
+    };
+  } else if (
     request.method === "PUT" &&
     request.url === `/v1/apps/${appId}/secrets/API_KEY`
   ) {
@@ -67,6 +89,40 @@ const server = createServer(async (request, response) => {
     request.url === `/v1/apps/${appId}/drafts/${draftId}/files`
   ) {
     payload = { draft: { id: draftId, revision: 4 }, files: [] };
+  } else if (
+    request.method === "GET" &&
+    request.url === `/v1/apps/${appId}/drafts/${draftId}`
+  ) {
+    payload = {
+      id: draftId,
+      appId,
+      baseDeploymentId: null,
+      name: "Contract draft",
+      status: "open",
+      revision: 3,
+      createdAt: contractTimestamp,
+      updatedAt: contractTimestamp,
+      deployedAt: null,
+    };
+  } else if (
+    request.method === "POST" &&
+    request.url === `/v1/apps/${appId}/drafts/${draftId}/validate`
+  ) {
+    payload = {
+      id: operationId,
+      draftId,
+      revision: 3,
+      passed: true,
+      artifactSha256: "a".repeat(64),
+      manifest: {},
+      canonicalSourceManifest: "opencloud.yaml",
+      sourceManifest: "opencloud.yaml",
+      sourceFiles: [],
+      artifactFiles: [],
+      diagnostics: [],
+      nextAction: "deploy",
+      createdAt: contractTimestamp,
+    };
   } else if (
     request.method === "GET" &&
     request.url === `/v1/apps/${appId}/backups`
@@ -96,9 +152,14 @@ async function runCli(arguments_, options = {}) {
     "OPENCLOUD_TOKEN",
     "OPENCLOUD_SESSION_FILE",
     "OPENCLOUD_WORKSPACE_FILE",
+    "OPENCLOUD_MUTATION_JOURNAL_DIR",
   ]) {
     delete environment[name];
   }
+  environment.OPENCLOUD_MUTATION_JOURNAL_DIR = path.join(
+    temporary,
+    "mutation-journal",
+  );
   const result = await new Promise((resolve, reject) => {
     const child = spawn(
       binary,
@@ -149,20 +210,24 @@ async function verifyRequest({
 }) {
   const offset = requests.length;
   await runCli(arguments_);
-  const emitted = requests.slice(offset);
+  const emitted = requests
+    .slice(offset)
+    .filter((request) => request.url !== "/version");
   assert.ok(emitted.length >= 1, `${arguments_.join(" ")} made no request`);
-  assert.equal(emitted[0].method, method, arguments_.join(" "));
-  assert.equal(emitted[0].url, url, arguments_.join(" "));
+  const target = emitted.find(
+    (request) => request.method === method && request.url === url,
+  );
+  assert.ok(target, `${arguments_.join(" ")} omitted ${method} ${url}`);
   if (body !== undefined) {
     assert.deepEqual(
-      JSON.parse(emitted[0].body.toString("utf8")),
+      JSON.parse(target.body.toString("utf8")),
       body,
       arguments_.join(" "),
     );
   }
   if (idempotencyKey !== undefined) {
     assert.equal(
-      emitted[0].headers["idempotency-key"],
+      target.headers["idempotency-key"],
       idempotencyKey,
       arguments_.join(" "),
     );

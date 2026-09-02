@@ -12,6 +12,7 @@ import {
   operatorCreateAppRequestSchema,
   deploymentStateSchema,
   operationStateSchema,
+  requestAppAccessTokenApprovalSchema,
   startAgentOnboardingRequestSchema,
   upsertAlertRuleRequestSchema,
 } from "./api.js";
@@ -21,6 +22,15 @@ const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const secretName = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const jsonObject = z.record(z.string(), z.unknown());
 const emptyBody = z.object({});
+const platformVersionOutput = z.object({
+  version: z.string(),
+  commit: z.string(),
+  builtAt: z.string(),
+  releaseId: z.string(),
+  contracts: z.object({
+    cliMutationJournal: z.literal(1).optional(),
+  }),
+});
 
 const backupOutput = z.object({
   id: uuid,
@@ -894,7 +904,7 @@ export interface ControlPlaneOperation<
   output: TOutput;
   bodyKey?: "body";
   queryKey?: "query";
-  idempotency: "none" | "optional" | "required";
+  idempotency: "none" | "optional" | "required" | "intrinsic";
   mcp?: McpOperationMetadata;
 }
 
@@ -912,6 +922,18 @@ const appEmailCapturePath = appPath.extend({ messageId: uuid });
 const devEmailCapturePath = devSessionPath.extend({ messageId: uuid });
 
 export const controlPlaneOperations = {
+  getPlatformVersion: operation({
+    method: "GET",
+    path: "/version",
+    summary: "Get platform version and compatibility contracts",
+    description:
+      "Returns non-secret build metadata and explicitly activated client compatibility markers without caching the response. CLI mutation-journal support is safe only when contracts.cliMutationJournal is 1; absence means clients must fail before a journaled mutation. Clients should request revalidation before relying on the marker.",
+    auth: "none",
+    scopes: [],
+    input: emptyBody,
+    output: platformVersionOutput,
+    idempotency: "none",
+  }),
   startAgentOnboarding: operation({
     method: "POST",
     path: "/v1/onboarding/agent",
@@ -1151,7 +1173,7 @@ export const controlPlaneOperations = {
     }),
     output: draftOutput,
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "create_draft",
       title: "Create source draft",
@@ -1402,7 +1424,7 @@ export const controlPlaneOperations = {
     }),
     output: devSessionOutput,
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "intrinsic",
     mcp: {
       toolName: "start_dev_session",
       title: "Start dev session",
@@ -1410,7 +1432,7 @@ export const controlPlaneOperations = {
         "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
   }),
@@ -1512,7 +1534,7 @@ export const controlPlaneOperations = {
       body: z.string().nullable(),
     }),
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "mutate_dev_data",
       title: "Write dev fixture data",
@@ -1542,7 +1564,7 @@ export const controlPlaneOperations = {
       body: z.unknown(),
     }),
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "invoke_dev_function",
       title: "Invoke dev Function",
@@ -1639,16 +1661,16 @@ export const controlPlaneOperations = {
     }),
     output: injectedDevEmailSchema,
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "inject_dev_email",
       title: "Inject dev email",
       description:
-        "Test a development email handler with synthetic input; any reply is captured instead of delivered.",
+        "Test a development email handler with synthetic input. The app-defined handler may change isolated data or external systems; email replies are captured instead of delivered.",
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
-      openWorldHint: false,
+      openWorldHint: true,
     },
   }),
   verifyDevSession: operation({
@@ -1656,7 +1678,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/verify",
     summary: "Verify a development revision",
     description:
-      "Runs Chromium, console, HTTP, and exact-revision external browser checks and issues a receipt bound to the exact revision.",
+      "Runs Chromium, console, HTTP, and exact-revision external browser checks and issues a receipt bound to the exact revision. After a lost response, poll while the session status is verifying, then accept only a durable receipt matching the exact active revision and artifact; start another attempt only after no active attempt or matching receipt remains.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: devSessionPath.extend({
@@ -1675,7 +1697,7 @@ export const controlPlaneOperations = {
       toolName: "verify_dev_session",
       title: "Verify dev session",
       description:
-        "Run the development verification gate for the exact active revision.",
+        "Run the development verification gate for the exact active revision. If the response is lost, poll a verifying session and reconcile its exact revision and artifact receipt before requesting another attempt.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -1761,16 +1783,24 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Stop a development session",
     description:
-      "Removes its preview artifacts, Function links, and dev schema.",
+      "Removes its preview artifacts, Function links, and dev schema. When expectedActiveDeploymentId is supplied, cleanup proceeds only while that exact deployment remains active.",
     auth: "bearer",
     scopes: ["app:deploy"],
-    input: devSessionPath,
+    input: devSessionPath.extend({
+      query: z
+        .object({
+          expectedActiveDeploymentId: uuid.optional(),
+        })
+        .optional(),
+    }),
     output: devSessionOutput,
+    queryKey: "query",
     idempotency: "none",
     mcp: {
       toolName: "stop_dev_session",
       title: "Stop dev session",
-      description: "Destroy an app's isolated development session.",
+      description:
+        "Destroy an app's isolated development session, optionally only if an exact production deployment remains active.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
@@ -1922,6 +1952,30 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  putSecret: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/secrets/{name}",
+    summary: "Set a secret",
+    description:
+      "Stores or replaces one app secret without returning its value. Retrying the same Idempotency-Key with the same name and value replays the redacted success; reusing the key with different input returns a conflict.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({
+      name: secretName,
+      body: z.object({
+        value: z
+          .string()
+          .min(1)
+          .max(64 * 1024),
+      }),
+    }),
+    output: z.object({
+      name: secretName,
+      stored: z.literal(true),
+    }),
+    bodyKey: "body",
+    idempotency: "required",
+  }),
   generateSecret: operation({
     method: "POST",
     path: "/v1/apps/{appId}/secrets/{name}/generate",
@@ -1943,7 +1997,7 @@ export const controlPlaneOperations = {
       generatedBytes: z.number().int().positive(),
     }),
     bodyKey: "body",
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "generate_secret",
       title: "Generate secret",
@@ -1969,7 +2023,7 @@ export const controlPlaneOperations = {
       url: z.url(),
       expiresAt: z.string(),
     }),
-    idempotency: "none",
+    idempotency: "required",
     mcp: {
       toolName: "create_secret_entry_link",
       title: "Create secret entry link",
@@ -2405,6 +2459,19 @@ export const controlPlaneOperations = {
       .passthrough(),
     bodyKey: "body",
     idempotency: "none",
+  }),
+  requestAppAccessTokenApproval: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/access-token-requests",
+    summary: "Request owner approval for an app access token",
+    description:
+      "Allows an existing app-scoped CLI identity to return a short-lived owner approval URL without receiving the runtime secret.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ body: requestAppAccessTokenApprovalSchema }),
+    output: z.object({ approvalUrl: z.url(), expiresAt: z.string() }),
+    bodyKey: "body",
+    idempotency: "required",
   }),
 } as const;
 
