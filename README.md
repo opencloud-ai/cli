@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.5.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.6.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.5.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.5.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.6.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.6.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -97,7 +97,7 @@ OpenCloud selects the app address from the title and adds a six-character
 random suffix.
 
 - A new email gets a provisional account, project, and 24-hour app credential
-  immediately. The user confirms the Resend email within 24 hours.
+  immediately. The user confirms the OpenCloud email within 24 hours.
 - An existing email gets no credential until its owner confirms the emailed
   request. Then run `"$OPENCLOUD_CLI" onboard-complete`.
 
@@ -109,7 +109,7 @@ commit that session file. Commands use it automatically:
 "$OPENCLOUD_CLI" app list
 "$OPENCLOUD_CLI" app get "$APP_ID"
 "$OPENCLOUD_CLI" doctor
-"$OPENCLOUD_CLI" init /absolute/path/to/app --version 2026.07.29-1
+"$OPENCLOUD_CLI" init /absolute/path/to/app
 "$OPENCLOUD_CLI" artifact-check /absolute/path/to/app \
   --expect-app-id "$APP_ID" \
   --max-files 4
@@ -122,6 +122,34 @@ commit that session file. Commands use it automatically:
 deployment contract. It refuses deployment when the local and server bundle
 digests differ. For normal agent work, prefer the isolated development and
 verified-promotion flow below.
+
+New projects use manifest schema 3 and omit a top-level release version;
+OpenCloud assigns that version while promoting the immutable artifact. Pass
+`init --version <legacy-version>` only when intentionally creating a
+schema-2-compatible source tree.
+
+## Exact-app owner operations
+
+CLI 3.6 adds public command parity for an exact-app owner Agent: app lifecycle
+and access changes, source drafts, production data and Function execution,
+streamed managed Files, integration bindings, visitors, and durable operation
+recovery. Run `opencloud <group> --help` for the bounded command contract.
+
+Mutation commands that return an operation follow it to terminal success by
+default. Use `--no-follow` to retain the accepted operation immediately, and
+recover an interrupted or timed-out wait without repeating the mutation:
+
+```bash
+"$OPENCLOUD_CLI" operation get "$OPERATION_ID" --follow \
+  --interval 2 --timeout 300
+"$OPENCLOUD_CLI" operation list "$APP_ID" --limit 50
+```
+
+Reuse one `--idempotency-key` for retries of the same intended effect. Every
+success emits one compact JSON document; failures emit redacted structured JSON
+and exit non-zero. `secret set` reads only standard input. `app
+credential-create` requires `--token-file`, refuses overwrite, writes the
+one-time token with mode `0600`, and never includes it in command output.
 
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every
@@ -303,6 +331,8 @@ npm ci
 npm test
 npm run typecheck
 npm run build
+npm run test:contract
+npm run test:package
 node dist/index.cjs --cli-version
 ```
 

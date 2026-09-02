@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.6.0
+
+- Add exact-app owner command parity for lifecycle and access, server drafts,
+  production data, Functions and Files, operations, deployment cleanup,
+  visitors, integration bindings, direct secret replacement, and legacy email
+  capture inspection.
+- Follow durable owner operations by default with bounded polling, typed
+  terminal failures, caller-stable idempotency keys, and explicit recovery by
+  operation ID after an ambiguous response or timeout.
+- Stream managed File uploads and downloads, keep secrets on standard input,
+  write one-time app credentials only to a new mode-`0600` file, and emit one
+  compact structured JSON result or redacted structured error per command.
+- Default new versionless app artifacts to manifest schema 3, while retaining
+  immutable schema-2 artifacts and their legacy version metadata.
+- Add command-surface, streaming-boundary, schema compatibility, and packed
+  tarball acceptance checks for the public release candidate.
+
 ## 3.5.0
 
 - Validate deployment-pinned alert rules against their declared custom metrics,

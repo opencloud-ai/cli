@@ -52,13 +52,30 @@ import {
   loadWorkspaceBinding,
   resolveWorkspaceFile,
 } from "./workspace-store.js";
+import {
+  CliContractError,
+  addOperationOptions,
+  assertPathAbsent,
+  downloadToFile,
+  followOperation,
+  jsonOption,
+  operationFrom,
+  parseBoundedNumber,
+  parseCommaList,
+  persistCredentialToken,
+  secretFromStdin,
+  structuredCliError,
+  type OperationOptions,
+} from "./owner-parity.js";
 
-const CLI_VERSION = "3.5.0";
+const CLI_VERSION = "3.6.0";
 
 const program = new Command()
   .name("opencloud")
   .description("Agent- and human-facing client for the OpenCloud control plane")
   .version(CLI_VERSION, "-V, --cli-version", "print the CLI version")
+  .exitOverride()
+  .configureOutput({ writeErr: () => undefined })
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -193,7 +210,7 @@ function requiredAccountCredential() {
 }
 
 function output(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function callerPath(value: string): string {
@@ -326,7 +343,7 @@ async function synchronizeValidatedDraft(
     const created = await control.call("createDraft", {
       appId: bundle.manifest.appId,
       body: {
-        name: `Dev ${bundle.manifest.version}`,
+        name: `Dev ${manifestReleaseLabel(bundle.manifest)}`,
         cloneActive: false,
       },
     });
@@ -394,8 +411,10 @@ async function synchronizeValidatedDraft(
     body: {},
   });
   if (!validation.passed) {
-    output({ draft, validation });
-    throw new Error("Authoritative server validation failed");
+    throw new CliContractError(
+      "DRAFT_VALIDATION_FAILED",
+      "Authoritative server validation failed",
+    );
   }
   if (validation.artifactSha256 !== bundle.sha256) {
     throw new Error("Local and server canonical bundle digests do not match");
@@ -427,21 +446,57 @@ async function followDurableOperation(
   control: OpenCloudClient,
   operationId: string,
   intervalMs = 2_000,
-): Promise<{ id?: string; state?: string }> {
-  let operation: { id?: string; state?: string } = {
-    id: operationId,
-    state: "queued",
-  };
-  while (
-    !["succeeded", "failed", "cancelled"].includes(operation.state ?? "")
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    operation = (await control.call("getOperation", {
-      operationId,
-    })) as { id?: string; state?: string };
-    output({ operation });
+  timeoutMs = 15 * 60 * 1_000,
+): Promise<NonNullable<ReturnType<typeof operationFrom>>> {
+  const followed = await followOperation({
+    client: control,
+    started: { id: operationId, state: "queued" },
+    options: {
+      follow: true,
+      interval: String(intervalMs / 1_000),
+      timeout: String(timeoutMs / 1_000),
+    },
+  });
+  const operation = operationFrom(followed);
+  if (!operation) {
+    throw new CliContractError(
+      "INVALID_OPERATION_RESPONSE",
+      "OpenCloud returned an invalid durable operation",
+    );
   }
   return operation;
+}
+
+function idempotencyKey(options: { idempotencyKey?: string }): string {
+  const key = options.idempotencyKey?.trim() || randomUUID();
+  if (key.length < 8 || key.length > 200) {
+    throw new CliContractError(
+      "INVALID_IDEMPOTENCY_KEY",
+      "--idempotency-key must contain 8 through 200 characters",
+    );
+  }
+  return key;
+}
+
+async function outputOperation(
+  control: OpenCloudClient,
+  started: unknown,
+  options: OperationOptions,
+): Promise<void> {
+  output(await followOperation({ client: control, started, options }));
+}
+
+function encoded(value: unknown): string {
+  return encodeURIComponent(String(value));
+}
+
+function manifestReleaseLabel(manifest: {
+  schemaVersion: number;
+  version?: string;
+}): string {
+  return manifest.schemaVersion === 2 && manifest.version
+    ? manifest.version
+    : "publisher-versioned schema 3";
 }
 
 function onboardingApiUrl(): string {
@@ -1025,6 +1080,21 @@ email
     );
   });
 
+email
+  .command("capture-get")
+  .description(
+    "Get one legacy development email capture by exact app and message",
+  )
+  .argument("<app-id>")
+  .argument("<message-id>")
+  .action(async (appId, messageId) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/email/captures/${encoded(messageId)}`,
+      ),
+    );
+  });
+
 const dev = app
   .command("dev")
   .description(
@@ -1420,8 +1490,13 @@ dev
         ...(parallelism === undefined ? {} : { parallelism }),
       },
     });
+    if (!result.receipt.summary.passed) {
+      throw new CliContractError(
+        "DEV_VERIFICATION_FAILED",
+        `Development verification ${result.receipt.id} did not pass`,
+      );
+    }
     output(result);
-    if (!result.receipt.summary.passed) process.exitCode = 1;
   });
 
 dev
@@ -1432,6 +1507,8 @@ dev
   .argument("[directory]", "app source directory", ".")
   .option("--idempotency-key <key>")
   .option("--no-follow", "return after starting the production deployment")
+  .option("--interval <seconds>", "operation poll interval", "2")
+  .option("--timeout <seconds>", "maximum wait per operation", "900")
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);
@@ -1455,20 +1532,29 @@ dev
         timeoutMs: 120_000,
       },
     );
-    output({ promotion: result });
-    if (options.follow === false) return;
+    const accepted = await followOperation({
+      client: control,
+      started: result,
+      options: {
+        follow: false,
+        interval: String(options.interval),
+        timeout: String(options.timeout),
+      },
+    });
+    if (options.follow === false) {
+      output({ promotion: accepted });
+      return;
+    }
     if (!result.operation.id) {
       throw new Error("Promotion did not return a durable operation");
     }
     const deploymentOperation = await followDurableOperation(
       control,
       result.operation.id,
+      parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
+        1_000,
+      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) * 1_000,
     );
-    if (deploymentOperation.state !== "succeeded") {
-      throw new Error(
-        `Production deployment ${deploymentOperation.state ?? "failed"}; dev remains available for repair`,
-      );
-    }
     const verification = await control.call(
       "verifyApp",
       { appId: state.appId },
@@ -1477,21 +1563,23 @@ dev
         timeoutMs: 120_000,
       },
     );
-    output({ verification });
     const verificationOperation = await followDurableOperation(
       control,
       verification.operation.id,
+      parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
+        1_000,
+      parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) * 1_000,
     );
     const finalVerification = await control.call("getVerification", {
       appId: state.appId,
       verificationId: verification.verification.id,
     });
-    output({ finalVerification });
     if (
       verificationOperation.state !== "succeeded" ||
       finalVerification.state !== "passed"
     ) {
-      throw new Error(
+      throw new CliContractError(
+        "VERIFICATION_FAILED",
         "Production verification failed; dev remains available for repair",
       );
     }
@@ -1510,6 +1598,9 @@ dev
       productionVerificationId: finalVerification.id,
       devStopped: stopped.status === "stopped",
       localStateRemoved: true,
+      promotion: { ...result, operation: deploymentOperation },
+      verification: { ...verification, operation: verificationOperation },
+      finalVerification,
     });
   });
 
@@ -1551,76 +1642,242 @@ app
     );
   });
 
-app
-  .command("verify")
-  .description("Run the authoritative OpenCloud release verification gate")
-  .argument("<app-id>")
-  .option("--idempotency-key <key>")
-  .option("--follow", "follow the durable verification operation", true)
-  .option("--interval <seconds>", "poll interval", "2")
-  .action(async (appId, options) => {
-    const control = client();
-    const started = (await control.call(
-      "verifyApp",
-      { appId },
-      {
-        idempotencyKey: options.idempotencyKey ?? randomUUID(),
-        timeoutMs: 120_000,
-      },
-    )) as {
-      verification?: { id?: string };
-      operation?: { id?: string; state?: string };
-    };
-    output(started);
-    if (!options.follow || !started.operation?.id) return;
-    let operationValue: { state?: string } = started.operation;
-    while (
-      !["succeeded", "failed", "cancelled"].includes(operationValue.state ?? "")
-    ) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Number(options.interval) * 1000),
-      );
-      operationValue = (await control.call("getOperation", {
-        operationId: started.operation.id!,
-      })) as { state?: string };
-      output(operationValue);
-    }
-    if (started.verification?.id) {
-      const result = await control.call("getVerification", {
-        appId,
-        verificationId: started.verification.id,
-      });
-      output(result);
-      if (
-        result &&
-        typeof result === "object" &&
-        "state" in result &&
-        result.state !== "passed"
-      ) {
-        process.exitCode = 1;
-      }
-    }
+addOperationOptions(
+  app
+    .command("verify")
+    .description("Run the authoritative OpenCloud release verification gate")
+    .argument("<app-id>"),
+).action(async (appId, options: OperationOptions) => {
+  const control = client();
+  const started = (await control.call(
+    "verifyApp",
+    { appId },
+    {
+      idempotencyKey: options.idempotencyKey ?? randomUUID(),
+      timeoutMs: 120_000,
+    },
+  )) as {
+    verification?: { id?: string };
+    operation?: { id?: string; state?: string };
+  };
+  const completed = await followOperation({
+    client: control,
+    started,
+    options,
   });
+  if (!options.follow) {
+    output(completed);
+    return;
+  }
+  if (!started.verification?.id) {
+    throw new CliContractError(
+      "INVALID_VERIFICATION_RESPONSE",
+      "OpenCloud did not return a verification coordinate",
+    );
+  }
+  const result = await control.call("getVerification", {
+    appId,
+    verificationId: started.verification.id,
+  });
+  if (result.state !== "passed") {
+    throw new CliContractError(
+      "VERIFICATION_FAILED",
+      `OpenCloud verification ${result.id} finished in state ${result.state}`,
+    );
+  }
+  output({ ...(completed as Record<string, unknown>), verification: result });
+});
 
-app
-  .command("configure")
-  .argument("<app-id>")
-  .option("--name <name>")
-  .option("--visibility <visibility>")
-  .option("--idempotency-key <key>")
-  .action(async (appId, options) => {
+addOperationOptions(
+  app
+    .command("configure")
+    .argument("<app-id>")
+    .option("--name <name>")
+    .option("--visibility <visibility>"),
+).action(
+  async (
+    appId,
+    options: OperationOptions & {
+      name?: string;
+      visibility?: string;
+    },
+  ) => {
     const patch = Object.fromEntries(
       Object.entries({
         name: options.name,
-        expiresInHours: Number(options.expiresInHours),
         visibility: options.visibility,
       }).filter(([, value]) => value !== undefined),
     );
+    const control = client();
+    const started = await control.patch(
+      `/v1/apps/${encoded(appId)}`,
+      patch,
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+for (const lifecycle of [
+  ["restart", "restart", "Restart the active app runtime"],
+  ["archive", "archive", "Archive the app"],
+  ["unarchive", "unarchive", "Restore an archived app"],
+] as const) {
+  addOperationOptions(
+    app.command(lifecycle[0]).description(lifecycle[2]).argument("<app-id>"),
+  ).action(async (appId, options: OperationOptions) => {
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/${lifecycle[1]}`,
+      {},
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  });
+}
+
+addOperationOptions(
+  app
+    .command("delete")
+    .description("Delete the exact app after durable resource containment")
+    .argument("<app-id>"),
+).action(async (appId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.delete(
+    `/v1/apps/${encoded(appId)}`,
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
+app
+  .command("members")
+  .description("List app dashboard members")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/members`));
+  });
+
+const access = app
+  .command("access")
+  .description("Inspect and change exact-app access");
+
+access
+  .command("list")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/access`));
+  });
+
+addOperationOptions(
+  access
+    .command("add")
+    .argument("<app-id>")
+    .requiredOption("--email <email>")
+    .addOption(
+      new Option("--role <role>")
+        .choices(["builder", "app_user"])
+        .makeOptionMandatory(),
+    ),
+).action(
+  async (
+    appId,
+    options: OperationOptions & { email: string; role: string },
+  ) => {
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/access`,
+      { email: options.email, role: options.role },
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+for (const mutation of [
+  ["grant", "access", "PUT"],
+  ["revoke", "access", "DELETE"],
+  ["builder-add", "builders", "PUT"],
+  ["builder-remove", "builders", "DELETE"],
+] as const) {
+  addOperationOptions(
+    access.command(mutation[0]).argument("<app-id>").argument("<user-id>"),
+  ).action(async (appId, userId, options: OperationOptions) => {
+    const control = client();
+    const target = `/v1/apps/${encoded(appId)}/${mutation[1]}/${encoded(userId)}`;
+    const started =
+      mutation[2] === "PUT"
+        ? await control.put(target, {}, idempotencyKey(options))
+        : await control.delete(target, idempotencyKey(options));
+    await outputOperation(control, started, options);
+  });
+}
+
+const accessToken = app
+  .command("access-token")
+  .description("Manage exact-app runtime access tokens");
+
+accessToken
+  .command("list")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/access-tokens`));
+  });
+
+accessToken
+  .command("create")
+  .argument("<app-id>")
+  .requiredOption("--name <name>")
+  .option("--expires-in-days <days>", "token lifetime", "90")
+  .option("--idempotency-key <key>")
+  .action(async (appId, options) => {
+    const response = (await client().post(
+      `/v1/apps/${encoded(appId)}/access-tokens`,
+      {
+        name: options.name,
+        expiresInDays: parseBoundedNumber(
+          options.expiresInDays,
+          "--expires-in-days",
+          1,
+          365,
+        ),
+        delivery: "reveal_link",
+      },
+      idempotencyKey(options),
+    )) as Record<string, unknown>;
+    const { accessToken: _secret, ...safe } = response;
+    output(safe);
+  });
+
+accessToken
+  .command("request")
+  .argument("<app-id>")
+  .requiredOption("--name <name>")
+  .option("--expires-in-days <days>", "token lifetime", "90")
+  .action(async (appId, options) => {
     output(
-      await client().patch(
-        `/v1/apps/${appId}`,
-        patch,
-        options.idempotencyKey ?? randomUUID(),
+      await client().post(`/v1/apps/${encoded(appId)}/access-token-requests`, {
+        name: options.name,
+        expiresInDays: parseBoundedNumber(
+          options.expiresInDays,
+          "--expires-in-days",
+          1,
+          365,
+        ),
+      }),
+    );
+  });
+
+accessToken
+  .command("revoke")
+  .argument("<app-id>")
+  .argument("<token-id>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, tokenId, options) => {
+    output(
+      await client().delete(
+        `/v1/apps/${encoded(appId)}/access-tokens/${encoded(tokenId)}`,
+        idempotencyKey(options),
       ),
     );
   });
@@ -1646,19 +1903,184 @@ app
   .command("credential-create")
   .argument("<app-id>")
   .requiredOption("--name <name>")
+  .requiredOption(
+    "--token-file <path>",
+    "new mode-0600 file for the one-time credential",
+  )
+  .requiredOption(
+    "--idempotency-key <key>",
+    "stable key for retrying this exact credential request",
+  )
+  .option("--expires-in-hours <hours>", "credential lifetime", "24")
   .option(
     "--scopes <scopes>",
     "comma-separated app scopes",
     "app:read,app:deploy,app:configure,app:observe,app:rollback,app:restart",
   )
   .action(async (appId, options) => {
-    output(
-      await client().post(`/v1/apps/${appId}/credentials`, {
+    const tokenFile = callerPath(String(options.tokenFile));
+    await assertPathAbsent(tokenFile, "TOKEN_FILE_EXISTS");
+    const response = await client().post(
+      `/v1/apps/${encoded(appId)}/credentials`,
+      {
         name: options.name,
-        scopes: String(options.scopes)
-          .split(",")
-          .map((scope) => scope.trim()),
+        expiresInHours: parseBoundedNumber(
+          options.expiresInHours,
+          "--expires-in-hours",
+          1,
+          168,
+        ),
+        scopes: parseCommaList(options.scopes, "--scopes"),
+      },
+      idempotencyKey(options),
+    );
+    output(await persistCredentialToken({ response, destination: tokenFile }));
+  });
+
+const draft = program
+  .command("draft")
+  .description("Manage server-side app source drafts");
+
+draft
+  .command("create")
+  .argument("<app-id>")
+  .option("--name <name>")
+  .option("--empty", "start without cloning the active release")
+  .action(async (appId, options) => {
+    output(
+      await client().post(`/v1/apps/${encoded(appId)}/drafts`, {
+        ...(options.name ? { name: String(options.name) } : {}),
+        cloneActive: options.empty !== true,
       }),
+    );
+  });
+
+draft
+  .command("list")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/drafts`));
+  });
+
+draft
+  .command("get")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .action(async (appId, draftId) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}`,
+      ),
+    );
+  });
+
+draft
+  .command("files")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .action(async (appId, draftId) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/files`,
+      ),
+    );
+  });
+
+draft
+  .command("read")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .requiredOption(
+    "--path <path>",
+    "draft-relative path (repeat for more)",
+    collectOption,
+  )
+  .action(async (appId, draftId, options) => {
+    output(
+      await client().post(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/files/read`,
+        { paths: options.path },
+      ),
+    );
+  });
+
+draft
+  .command("apply")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .requiredOption("--expected-revision <revision>")
+  .requiredOption("--changes-file <path>")
+  .action(async (appId, draftId, options) => {
+    const changes = await jsonOption({
+      file: String(options.changesFile),
+      resolvePath: callerPath,
+      kind: "array",
+    });
+    output(
+      await client().patch(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/files`,
+        {
+          expectedRevision: parseBoundedNumber(
+            options.expectedRevision,
+            "--expected-revision",
+            1,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          changes,
+        },
+      ),
+    );
+  });
+
+draft
+  .command("diff")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .action(async (appId, draftId) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/diff`,
+      ),
+    );
+  });
+
+draft
+  .command("validate")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .option("--legacy-version <version>")
+  .action(async (appId, draftId, options) => {
+    output(
+      await client().post(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/validate`,
+        options.legacyVersion ? { version: String(options.legacyVersion) } : {},
+      ),
+    );
+  });
+
+addOperationOptions(
+  draft.command("deploy").argument("<app-id>").argument("<draft-id>"),
+).action(async (appId, draftId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.post(
+    `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/deploy`,
+    undefined,
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
+draft
+  .command("discard")
+  .argument("<app-id>")
+  .argument("<draft-id>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, draftId, options) => {
+    output(
+      await client().delete(
+        `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}`,
+        idempotencyKey(options),
+      ),
     );
   });
 
@@ -1667,7 +2089,10 @@ program
   .description("Create a minimal app bundle")
   .argument("<directory>")
   .option("--app-id <uuid>", "defaults to the connected workspace app")
-  .option("--version <version>", "initial deployment version", "v1")
+  .option(
+    "--version <version>",
+    "legacy schema-2 deployment version (omit for schema 3)",
+  )
   .action(async (directory, options) => {
     const root = callerPath(directory);
     const binding = loadWorkspaceBinding(resolveWorkspaceFile(undefined, root));
@@ -1719,9 +2144,9 @@ program
     await writeFile(
       path.join(root, "opencloud.yaml"),
       YAML.stringify({
-        schemaVersion: 2,
+        schemaVersion: options.version ? 2 : 3,
         appId,
-        version: options.version,
+        ...(options.version ? { version: String(options.version) } : {}),
         frontend: { directory: "frontend", spa: true },
         runtime: {
           sdk: {
@@ -1766,23 +2191,20 @@ test("REQ-001 replace this with the app's primary outcome", async ({
     output({ directory: root, manifest: path.join(root, "opencloud.yaml") });
   });
 
-program
-  .command("deploy")
-  .argument("<directory>")
-  .option("--idempotency-key <key>")
-  .action(async (directory, options) => {
+addOperationOptions(program.command("deploy").argument("<directory>")).action(
+  async (directory, options: OperationOptions) => {
     const sourceRoot = callerPath(directory);
     const bundle = await buildBundle(sourceRoot);
     printBundleFiles(bundle.files);
     printBundleWarnings(bundle.warnings);
     process.stderr.write(
-      `Syncing ${bundle.manifest.version} (${bundle.sha256.slice(0, 12)})\n`,
+      `Syncing ${manifestReleaseLabel(bundle.manifest)} (${bundle.sha256.slice(0, 12)})\n`,
     );
     const control = client();
     const draft = (await control.call("createDraft", {
       appId: bundle.manifest.appId,
       body: {
-        name: `CLI ${bundle.manifest.version}`,
+        name: `CLI ${manifestReleaseLabel(bundle.manifest)}`,
         cloneActive: false,
       },
     })) as { id?: string; revision?: number };
@@ -1818,26 +2240,28 @@ program
       body: {},
     })) as { passed?: boolean; artifactSha256?: string };
     if (!validation.passed) {
-      output({ draft, validation });
-      throw new Error("Authoritative server validation failed");
+      throw new CliContractError(
+        "DRAFT_VALIDATION_FAILED",
+        "Authoritative server validation failed",
+      );
     }
     if (validation.artifactSha256 !== bundle.sha256) {
       throw new Error("Local and server canonical bundle digests do not match");
     }
-    output(
-      await control.call(
-        "deployDraft",
-        {
-          appId: bundle.manifest.appId,
-          draftId: draft.id,
-        },
-        {
-          idempotencyKey: options.idempotencyKey ?? randomUUID(),
-          timeoutMs: 120_000,
-        },
-      ),
+    const started = await control.call(
+      "deployDraft",
+      {
+        appId: bundle.manifest.appId,
+        draftId: draft.id,
+      },
+      {
+        idempotencyKey: idempotencyKey(options),
+        timeoutMs: 120_000,
+      },
     );
-  });
+    await outputOperation(control, started, options);
+  },
+);
 
 program
   .command("validate")
@@ -1855,7 +2279,9 @@ program
       scope: "local-artifact",
       authoritative: false,
       appId: bundle.manifest.appId,
-      version: bundle.manifest.version,
+      ...(bundle.manifest.schemaVersion === 2
+        ? { version: bundle.manifest.version }
+        : {}),
       artifactSha256: bundle.sha256,
       artifactBytes: bundle.archive.byteLength,
       migrations: bundle.manifest.migrations.length,
@@ -1907,7 +2333,9 @@ program
       valid: true,
       checkpoint: "early-agent-artifact-v1",
       appId: bundle.manifest.appId,
-      version: bundle.manifest.version,
+      ...(bundle.manifest.schemaVersion === 2
+        ? { version: bundle.manifest.version }
+        : {}),
       fileCount: bundle.files.length,
       artifactSha256: bundle.sha256,
       artifactBytes: bundle.archive.byteLength,
@@ -1928,22 +2356,34 @@ operation
   .argument("<operation-id>")
   .option("--follow")
   .option("--interval <seconds>", "poll interval", "2")
+  .option("--timeout <seconds>", "maximum follow time", "900")
   .action(async (operationId, options) => {
-    do {
-      const value = (await client().get(`/v1/operations/${operationId}`)) as {
-        state?: string;
-      };
-      output(value);
-      if (
-        !options.follow ||
-        ["succeeded", "failed", "cancelled"].includes(value.state ?? "")
-      ) {
-        break;
-      }
-      await new Promise((resolve) =>
-        setTimeout(resolve, Number(options.interval) * 1000),
-      );
-    } while (true);
+    const control = client();
+    const started = await control.get(`/v1/operations/${encoded(operationId)}`);
+    output(
+      await followOperation({
+        client: control,
+        started,
+        options: {
+          follow: options.follow === true,
+          interval: String(options.interval),
+          timeout: String(options.timeout),
+        },
+      }),
+    );
+  });
+
+operation
+  .command("list")
+  .argument("<app-id>")
+  .option("--limit <number>", "result limit", "50")
+  .action(async (appId, options) => {
+    const limit = parseBoundedNumber(options.limit, "--limit", 1, 100);
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/operations?limit=${limit}`,
+      ),
+    );
   });
 
 const deployment = program
@@ -1965,20 +2405,34 @@ deployment
     output(await client().get(`/v1/apps/${appId}/deployments/${deploymentId}`)),
   );
 
+addOperationOptions(
+  deployment
+    .command("rollback")
+    .argument("<app-id>")
+    .argument("<deployment-id>"),
+).action(async (appId, deploymentId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.post(
+    `/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}/rollback`,
+    {},
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
 deployment
-  .command("rollback")
+  .command("delete")
   .argument("<app-id>")
   .argument("<deployment-id>")
   .option("--idempotency-key <key>")
-  .action(async (appId, deploymentId, options) =>
+  .action(async (appId, deploymentId, options) => {
     output(
-      await client().post(
-        `/v1/apps/${appId}/deployments/${deploymentId}/rollback`,
-        {},
-        options.idempotencyKey ?? randomUUID(),
+      await client().delete(
+        `/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}`,
+        idempotencyKey(options),
       ),
-    ),
-  );
+    );
+  });
 
 const cron = program
   .command("cron")
@@ -2001,21 +2455,23 @@ cron
     output(await client().get(`/v1/apps/${appId}/cron/invocations?${query}`));
   });
 
-cron
-  .command("invoke")
-  .description(
-    "Trigger an enabled cron on the active deployment and record normal invocation history",
-  )
-  .argument("<app-id>")
-  .argument("<cron-name>")
-  .action(async (appId, cronName) => {
-    output(
-      await client().post(
-        `/v1/apps/${appId}/cron/${encodeURIComponent(cronName)}/invoke`,
-        {},
-      ),
-    );
-  });
+addOperationOptions(
+  cron
+    .command("invoke")
+    .description(
+      "Trigger an enabled cron on the active deployment as a durable operation",
+    )
+    .argument("<app-id>")
+    .argument("<cron-name>"),
+).action(async (appId, cronName, options: OperationOptions) => {
+  const control = client();
+  const started = await control.post(
+    `/v1/apps/${encoded(appId)}/cron/${encoded(cronName)}/operations`,
+    undefined,
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
 
 const jobs = program
   .command("jobs")
@@ -2051,6 +2507,23 @@ jobs
 const secret = program
   .command("secret")
   .description("Manage app-scoped secrets");
+
+secret
+  .command("set")
+  .description("Replace a secret using standard input only")
+  .argument("<app-id>")
+  .argument("<name>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const value = await secretFromStdin();
+    output(
+      await client().put(
+        `/v1/apps/${encoded(appId)}/secrets/${encoded(name)}`,
+        { value },
+        idempotencyKey(options),
+      ),
+    );
+  });
 
 secret
   .command("rotate")
@@ -2117,43 +2590,448 @@ backup
   );
 
 backup
-  .command("create")
-  .argument("<app-id>")
-  .option("--idempotency-key <key>")
-  .action(async (appId, options) =>
-    output(
-      await client().post(
-        `/v1/apps/${appId}/backups`,
-        {},
-        options.idempotencyKey ?? randomUUID(),
-      ),
-    ),
-  );
-
-backup
-  .command("restore")
+  .command("get")
   .argument("<app-id>")
   .argument("<backup-id>")
-  .option("--idempotency-key <key>")
-  .action(async (appId, backupId, options) =>
-    output(
-      await client().post(
-        `/v1/apps/${appId}/backups/${backupId}/restore`,
-        {},
-        options.idempotencyKey ?? randomUUID(),
-      ),
-    ),
-  );
+  .action(async (appId, backupId) => {
+    const backups = await client().get(`/v1/apps/${encoded(appId)}/backups`);
+    if (!Array.isArray(backups)) {
+      throw new CliContractError(
+        "INVALID_BACKUP_RESPONSE",
+        "OpenCloud returned an invalid backup list",
+      );
+    }
+    const selected = backups.find(
+      (candidate) =>
+        candidate &&
+        typeof candidate === "object" &&
+        "id" in candidate &&
+        candidate.id === backupId,
+    );
+    if (!selected) {
+      throw new CliContractError(
+        "BACKUP_NOT_FOUND",
+        `Backup ${backupId} was not found for app ${appId}`,
+      );
+    }
+    output(selected);
+  });
 
-backup
-  .command("schedule")
-  .argument("<app-id>")
-  .argument("<schedule>", "none, daily, or weekly")
-  .action(async (appId, schedule) =>
-    output(
-      await client().put(`/v1/apps/${appId}/backups/schedule`, { schedule }),
-    ),
+addOperationOptions(backup.command("create").argument("<app-id>")).action(
+  async (appId, options: OperationOptions) => {
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/backups`,
+      {},
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+addOperationOptions(
+  backup.command("restore").argument("<app-id>").argument("<backup-id>"),
+).action(async (appId, backupId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.post(
+    `/v1/apps/${encoded(appId)}/backups/${encoded(backupId)}/restore`,
+    {},
+    idempotencyKey(options),
   );
+  await outputOperation(control, started, options);
+});
+
+addOperationOptions(
+  backup
+    .command("schedule")
+    .argument("<app-id>")
+    .argument("<schedule>", "none, daily, or weekly"),
+).action(async (appId, schedule, options: OperationOptions) => {
+  const control = client();
+  const started = await control.put(
+    `/v1/apps/${encoded(appId)}/backups/schedule`,
+    { schedule },
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
+const data = program
+  .command("data")
+  .description("Inspect and mutate exact-app production data");
+
+data
+  .command("tables")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/data/tables`));
+  });
+
+data
+  .command("list")
+  .argument("<app-id>")
+  .argument("<table>")
+  .option("--limit <number>", "result limit", "50")
+  .option("--cursor <cursor>")
+  .action(async (appId, table, options) => {
+    const query = new URLSearchParams({
+      limit: String(parseBoundedNumber(options.limit, "--limit", 1, 100)),
+      ...(options.cursor ? { cursor: String(options.cursor) } : {}),
+    });
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/data/${encoded(table)}/rows?${query}`,
+      ),
+    );
+  });
+
+data
+  .command("get")
+  .argument("<app-id>")
+  .argument("<table>")
+  .argument("<row-id>")
+  .action(async (appId, table, rowId) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/data/${encoded(table)}/rows/${encoded(rowId)}`,
+      ),
+    );
+  });
+
+for (const mutation of [
+  ["create", "create", "object", {}],
+  ["create-many", "createMany", "array", [{}]],
+] as const) {
+  addOperationOptions(
+    data
+      .command(mutation[0])
+      .argument("<app-id>")
+      .argument("<table>")
+      .option("--values <json>")
+      .option("--values-file <path>"),
+  ).action(
+    async (
+      appId,
+      table,
+      options: OperationOptions & {
+        values?: string;
+        valuesFile?: string;
+      },
+    ) => {
+      const values = await jsonOption({
+        inline: options.values,
+        file: options.valuesFile,
+        resolvePath: callerPath,
+        kind: mutation[2],
+        defaultValue: mutation[3],
+      });
+      const control = client();
+      const started = await control.post(
+        `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+        { action: mutation[1], values },
+        idempotencyKey(options),
+      );
+      await outputOperation(control, started, options);
+    },
+  );
+}
+
+addOperationOptions(
+  data
+    .command("update")
+    .argument("<app-id>")
+    .argument("<table>")
+    .argument("<row-id>")
+    .option("--values <json>")
+    .option("--values-file <path>"),
+).action(
+  async (
+    appId,
+    table,
+    rowId,
+    options: OperationOptions & {
+      values?: string;
+      valuesFile?: string;
+    },
+  ) => {
+    const values = await jsonOption({
+      inline: options.values,
+      file: options.valuesFile,
+      resolvePath: callerPath,
+      kind: "object",
+      defaultValue: {},
+    });
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+      { action: "updateById", id: rowId, values },
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+addOperationOptions(
+  data
+    .command("delete")
+    .argument("<app-id>")
+    .argument("<table>")
+    .argument("<row-id>"),
+).action(async (appId, table, rowId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.post(
+    `/v1/apps/${encoded(appId)}/data/${encoded(table)}/mutations`,
+    { action: "deleteById", id: rowId },
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
+const functionCommand = program
+  .command("function")
+  .description("Invoke production Functions as durable operations");
+
+addOperationOptions(
+  functionCommand
+    .command("invoke")
+    .argument("<app-id>")
+    .argument("<function-name>")
+    .option("--input <json>")
+    .option("--input-file <path>"),
+).action(
+  async (
+    appId,
+    functionName,
+    options: OperationOptions & {
+      input?: string;
+      inputFile?: string;
+    },
+  ) => {
+    const input = await jsonOption({
+      inline: options.input,
+      file: options.inputFile,
+      resolvePath: callerPath,
+      kind: "object",
+      defaultValue: {},
+    });
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/functions/${encoded(functionName)}/invocations`,
+      { input },
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+const file = program
+  .command("file")
+  .description("Manage exact-app production files");
+
+file
+  .command("list")
+  .argument("<app-id>")
+  .option("--limit <number>", "result limit", "50")
+  .option("--cursor <cursor>")
+  .action(async (appId, options) => {
+    const query = new URLSearchParams({
+      limit: String(parseBoundedNumber(options.limit, "--limit", 1, 100)),
+      ...(options.cursor ? { cursor: String(options.cursor) } : {}),
+    });
+    output(await client().get(`/v1/apps/${encoded(appId)}/files?${query}`));
+  });
+
+file
+  .command("get")
+  .argument("<app-id>")
+  .argument("<file-id>")
+  .action(async (appId, fileId) => {
+    output(
+      await client().get(`/v1/apps/${encoded(appId)}/files/${encoded(fileId)}`),
+    );
+  });
+
+file
+  .command("download")
+  .argument("<app-id>")
+  .argument("<file-id>")
+  .requiredOption("--output <path>")
+  .option("--force", "replace an existing output file")
+  .action(async (appId, fileId, options) => {
+    const destination = callerPath(String(options.output));
+    if (options.force !== true) {
+      await assertPathAbsent(destination, "OUTPUT_FILE_EXISTS");
+    }
+    const response = await client().download(
+      `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}/content`,
+    );
+    output(
+      await downloadToFile({
+        response,
+        destination,
+        force: options.force === true,
+      }),
+    );
+  });
+
+addOperationOptions(
+  file
+    .command("upload")
+    .argument("<app-id>")
+    .argument("<path>")
+    .option("--name <name>")
+    .option("--content-type <type>"),
+).action(
+  async (
+    appId,
+    sourceValue,
+    options: OperationOptions & {
+      name?: string;
+      contentType?: string;
+    },
+  ) => {
+    const source = callerPath(String(sourceValue));
+    const query = new URLSearchParams({
+      name: options.name ? String(options.name) : path.basename(source),
+    });
+    const control = client();
+    const started = await control.uploadFile(
+      "POST",
+      `/v1/apps/${encoded(appId)}/files?${query}`,
+      source,
+      {
+        ...(options.contentType ? { contentType: options.contentType } : {}),
+        idempotencyKey: idempotencyKey(options),
+      },
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+addOperationOptions(
+  file
+    .command("replace")
+    .argument("<app-id>")
+    .argument("<file-id>")
+    .argument("<path>")
+    .option("--name <name>")
+    .option("--content-type <type>"),
+).action(
+  async (
+    appId,
+    fileId,
+    sourceValue,
+    options: OperationOptions & {
+      name?: string;
+      contentType?: string;
+    },
+  ) => {
+    const source = callerPath(String(sourceValue));
+    const query = options.name
+      ? `?${new URLSearchParams({ name: String(options.name) })}`
+      : "";
+    const control = client();
+    const started = await control.uploadFile(
+      "PUT",
+      `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}${query}`,
+      source,
+      {
+        ...(options.contentType ? { contentType: options.contentType } : {}),
+        idempotencyKey: idempotencyKey(options),
+      },
+    );
+    await outputOperation(control, started, options);
+  },
+);
+
+addOperationOptions(
+  file.command("delete").argument("<app-id>").argument("<file-id>"),
+).action(async (appId, fileId, options: OperationOptions) => {
+  const control = client();
+  const started = await control.delete(
+    `/v1/apps/${encoded(appId)}/files/${encoded(fileId)}`,
+    idempotencyKey(options),
+  );
+  await outputOperation(control, started, options);
+});
+
+const integration = program
+  .command("integration")
+  .description("Manage exact-app integration bindings");
+
+integration
+  .command("list")
+  .argument("<app-id>")
+  .action(async (appId) => {
+    output(await client().get(`/v1/apps/${encoded(appId)}/integrations`));
+  });
+
+integration
+  .command("resources")
+  .argument("<app-id>")
+  .argument("<integration-name>")
+  .requiredOption("--connection-id <uuid>")
+  .action(async (appId, integrationName, options) => {
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/connections/${encoded(options.connectionId)}/resources`,
+      ),
+    );
+  });
+
+integration
+  .command("bind")
+  .argument("<app-id>")
+  .argument("<integration-name>")
+  .requiredOption("--connection-id <uuid>")
+  .option("--resource-id <id>")
+  .option("--label <label>", "binding label", "Connected account")
+  .option("--trigger-mode <mode>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, integrationName, options) => {
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/binding-operations`,
+      {
+        connectionId: options.connectionId,
+        ...(options.resourceId
+          ? { resourceId: String(options.resourceId) }
+          : {}),
+        label: options.label,
+        ...(options.triggerMode
+          ? { triggerMode: String(options.triggerMode) }
+          : {}),
+      },
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, {
+      follow: true,
+      interval: "2",
+      timeout: "900",
+      idempotencyKey: options.idempotencyKey,
+    });
+  });
+
+integration
+  .command("unbind")
+  .argument("<app-id>")
+  .argument("<integration-name>")
+  .argument("<binding-id>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, integrationName, bindingId, options) => {
+    const control = client();
+    const started = await control.post(
+      `/v1/apps/${encoded(appId)}/integrations/${encoded(integrationName)}/bindings/${encoded(bindingId)}/delete-operations`,
+      undefined,
+      idempotencyKey(options),
+    );
+    await outputOperation(control, started, {
+      follow: true,
+      interval: "2",
+      timeout: "900",
+      idempotencyKey: options.idempotencyKey,
+    });
+  });
 
 program
   .command("logs")
@@ -2211,6 +3089,24 @@ program
   .action(async (appId) =>
     output(await client().get(`/v1/apps/${appId}/usage`)),
   );
+
+program
+  .command("visitors")
+  .description("Read privacy-preserving app visitor analytics")
+  .argument("<app-id>")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .action(async (appId, options) => {
+    const query = new URLSearchParams({
+      ...(options.from ? { from: String(options.from) } : {}),
+      ...(options.to ? { to: String(options.to) } : {}),
+    });
+    output(
+      await client().get(
+        `/v1/apps/${encoded(appId)}/visitors${query.size ? `?${query}` : ""}`,
+      ),
+    );
+  });
 
 program
   .command("agent-feed")
@@ -2289,8 +3185,16 @@ alertRule
   );
 
 program.parseAsync().catch((error: unknown) => {
-  process.stderr.write(
-    `${error instanceof Error ? error.message : String(error)}\n`,
-  );
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    ["commander.helpDisplayed", "commander.version"].includes(
+      String(error.code),
+    )
+  ) {
+    return;
+  }
+  process.stderr.write(`${JSON.stringify(structuredCliError(error))}\n`);
   process.exitCode = 1;
 });

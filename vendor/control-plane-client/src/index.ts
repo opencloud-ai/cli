@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import {
   controlPlaneOperations,
   type ControlPlaneOperationId,
@@ -51,16 +54,13 @@ export class OpenCloudClient {
     const operation = controlPlaneOperations[operationId];
     const input = operation.input.parse(rawInput) as Record<string, unknown>;
     let requestPath = operation.path;
-    requestPath = requestPath.replace(
-      /\{([^}]+)\}/g,
-      (_, name: string) => {
-        const value = input[name];
-        if (typeof value !== "string") {
-          throw new Error(`Operation ${operationId} is missing path ${name}`);
-        }
-        return encodeURIComponent(value);
-      },
-    );
+    requestPath = requestPath.replace(/\{([^}]+)\}/g, (_, name: string) => {
+      const value = input[name];
+      if (typeof value !== "string") {
+        throw new Error(`Operation ${operationId} is missing path ${name}`);
+      }
+      return encodeURIComponent(value);
+    });
     const query = input.query;
     if (query && typeof query === "object") {
       const search = new URLSearchParams();
@@ -74,7 +74,7 @@ export class OpenCloudClient {
     }
     const idempotencyKey =
       operation.idempotency === "required"
-        ? options.idempotencyKey ?? randomUUID()
+        ? (options.idempotencyKey ?? randomUUID())
         : options.idempotencyKey;
     const response = await this.request(
       operation.method,
@@ -93,7 +93,7 @@ export class OpenCloudClient {
   post(
     path: string,
     body?: unknown,
-    idempotencyKey = randomUUID(),
+    idempotencyKey: string = randomUUID(),
   ): Promise<unknown> {
     return this.request("POST", path, body, idempotencyKey);
   }
@@ -101,7 +101,7 @@ export class OpenCloudClient {
   patch(
     path: string,
     body: unknown,
-    idempotencyKey = randomUUID(),
+    idempotencyKey: string = randomUUID(),
   ): Promise<unknown> {
     return this.request("PATCH", path, body, idempotencyKey);
   }
@@ -109,12 +109,15 @@ export class OpenCloudClient {
   put(
     path: string,
     body: unknown,
-    idempotencyKey = randomUUID(),
+    idempotencyKey: string = randomUUID(),
   ): Promise<unknown> {
     return this.request("PUT", path, body, idempotencyKey);
   }
 
-  delete(path: string, idempotencyKey = randomUUID()): Promise<unknown> {
+  delete(
+    path: string,
+    idempotencyKey: string = randomUUID(),
+  ): Promise<unknown> {
     return this.request("DELETE", path, undefined, idempotencyKey);
   }
 
@@ -122,7 +125,7 @@ export class OpenCloudClient {
     appId: string,
     manifest: unknown,
     archive: Buffer,
-    idempotencyKey = randomUUID(),
+    idempotencyKey: string = randomUUID(),
   ): Promise<unknown> {
     const token = await this.resolveToken();
     if (!token) {
@@ -152,6 +155,62 @@ export class OpenCloudClient {
     return this.parse(response);
   }
 
+  async uploadFile(
+    method: "POST" | "PUT",
+    requestPath: string,
+    filePath: string,
+    options: {
+      contentType?: string;
+      idempotencyKey?: string;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<unknown> {
+    const token = await this.resolveToken();
+    if (!token) {
+      throw new Error("An OpenCloud credential is required");
+    }
+    const metadata = await stat(filePath);
+    if (!metadata.isFile()) throw new Error("Upload source must be a file");
+    const source = createReadStream(filePath);
+    try {
+      const response = await this.fetcher(`${this.apiUrl}${requestPath}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/json",
+          ...(options.contentType
+            ? { "content-type": options.contentType }
+            : {}),
+          "content-length": String(metadata.size),
+          "idempotency-key": options.idempotencyKey ?? randomUUID(),
+        },
+        body: Readable.toWeb(source) as BodyInit,
+        duplex: "half",
+        signal: AbortSignal.timeout(options.timeoutMs ?? 120_000),
+      } as RequestInit & { duplex: "half" });
+      return await this.parse(response);
+    } finally {
+      source.destroy();
+    }
+  }
+
+  async download(requestPath: string, timeoutMs = 120_000): Promise<Response> {
+    const token = await this.resolveToken();
+    if (!token) {
+      throw new Error("An OpenCloud credential is required");
+    }
+    const response = await this.fetcher(`${this.apiUrl}${requestPath}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "*/*",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) await this.parse(response);
+    return response;
+  }
+
   private async request(
     method: string,
     requestPath: string,
@@ -163,13 +222,10 @@ export class OpenCloudClient {
     const response = await this.fetcher(`${this.apiUrl}${requestPath}`, {
       method,
       headers: {
-        ...(token
-          ? { authorization: `Bearer ${token}` }
-          : {}),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(this.options.internalMcpSecret
           ? {
-              "x-opencloud-mcp-internal":
-                this.options.internalMcpSecret,
+              "x-opencloud-mcp-internal": this.options.internalMcpSecret,
             }
           : {}),
         accept: "application/json",
