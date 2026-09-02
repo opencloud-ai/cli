@@ -94,7 +94,18 @@ export interface MutationJournalOpenInput {
   rejectParentSymlinks?: boolean | undefined;
   requireMountPoint?: boolean | undefined;
   now?: (() => Date) | undefined;
+  /** Test-only crash injection after a durable initialization boundary. */
+  onInitializationCheckpoint?:
+    | ((
+        checkpoint: MutationJournalInitializationCheckpoint,
+      ) => void | Promise<void>)
+    | undefined;
 }
+
+export type MutationJournalInitializationCheckpoint =
+  | "identity_durable"
+  | "binding_durable"
+  | "ready_durable";
 
 export interface MutationJournalAuthorityBinding {
   rootRunId: string;
@@ -134,7 +145,8 @@ interface MutationJournalBinding {
 }
 
 interface MutationJournalIdentityWitness {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
+  state: "initializing" | "ready";
   journalId: string;
   apiBaseSha256: string;
   appId: string;
@@ -178,7 +190,7 @@ const BINDING_KEYS = [
   "journalId",
   "schemaVersion",
 ].sort();
-const WITNESS_KEYS = [
+const WITNESS_V2_KEYS = [
   "apiBaseSha256",
   "appId",
   "entriesDev",
@@ -193,6 +205,7 @@ const WITNESS_KEYS = [
   "rootUid",
   "schemaVersion",
 ].sort();
+const WITNESS_V3_KEYS = [...WITNESS_V2_KEYS, "state"].sort();
 const ENTRY_KEYS = [
   "attemptCount",
   "attemptedAt",
@@ -409,9 +422,18 @@ function parseIdentityWitness(
     );
   }
   const item = value as Record<string, unknown>;
+  const witnessKeys =
+    item.schemaVersion === 2
+      ? WITNESS_V2_KEYS
+      : item.schemaVersion === 3
+        ? WITNESS_V3_KEYS
+        : null;
   if (
-    !exactKeys(item, WITNESS_KEYS) ||
-    item.schemaVersion !== 2 ||
+    witnessKeys === null ||
+    !exactKeys(item, witnessKeys) ||
+    (item.schemaVersion === 3 &&
+      item.state !== "initializing" &&
+      item.state !== "ready") ||
     typeof item.journalId !== "string" ||
     !UUID.test(item.journalId) ||
     typeof item.apiBaseSha256 !== "string" ||
@@ -448,7 +470,10 @@ function parseIdentityWitness(
       `Mutation journal identity witness has an invalid schema: ${file}`,
     );
   }
-  return item as unknown as MutationJournalIdentityWitness;
+  return {
+    ...item,
+    state: item.schemaVersion === 2 ? "ready" : item.state,
+  } as unknown as MutationJournalIdentityWitness;
 }
 
 function isIsoDate(value: unknown): value is string {
@@ -1202,7 +1227,7 @@ export class MutationJournal {
   private readonly entriesDirectory: string;
   private readonly locksDirectory: string;
   private readonly binding: MutationJournalBinding;
-  private readonly witness: MutationJournalIdentityWitness;
+  private witness: MutationJournalIdentityWitness;
   private readonly witnessFile: string;
   private readonly rootIdentity: DirectoryIdentity;
   private readonly entriesIdentity: DirectoryIdentity;
@@ -1322,7 +1347,6 @@ export class MutationJournal {
           maxTimeout: 500,
         },
       });
-      let witnessCreated = false;
       try {
         await cleanupOrphanAtomicTemps(
           witnessParent,
@@ -1331,9 +1355,9 @@ export class MutationJournal {
       const rawWitness = await readOptional(witnessFile);
       let witness: MutationJournalIdentityWitness;
       if (rawWitness === null) {
-        witnessCreated = true;
         witness = {
-          schemaVersion: 2,
+          schemaVersion: 3,
+          state: "initializing",
           journalId: randomUUID(),
           apiBaseSha256: apiBaseSha256(input.apiUrl),
           appId: input.appId.toLowerCase(),
@@ -1357,6 +1381,7 @@ export class MutationJournal {
               : String(locksAnchor.identity.uid),
         };
         await atomicWrite(witnessFile, witness);
+        await input.onInitializationCheckpoint?.("identity_durable");
       } else {
         witness = parseIdentityWitness(rawWitness, witnessFile);
         if (
@@ -1403,7 +1428,14 @@ export class MutationJournal {
         witnessFile,
       );
       await journal.assertRootIdentity();
-      await journal.validateBinding(witnessCreated);
+      const initializing =
+        witness.schemaVersion === 3 && witness.state === "initializing";
+      await journal.validateBinding(initializing);
+      if (initializing) {
+        await input.onInitializationCheckpoint?.("binding_durable");
+        await journal.markIdentityReady();
+        await input.onInitializationCheckpoint?.("ready_durable");
+      }
       await journal.assertRootIdentity();
       rootAnchor = null;
       entriesAnchor = null;
@@ -1565,6 +1597,8 @@ export class MutationJournal {
     }
     const current = parseIdentityWitness(raw, this.witnessFile);
     if (
+      current.schemaVersion !== this.witness.schemaVersion ||
+      current.state !== this.witness.state ||
       current.journalId !== this.witness.journalId ||
       current.apiBaseSha256 !== this.witness.apiBaseSha256 ||
       current.appId.toLowerCase() !== this.witness.appId ||
@@ -1583,6 +1617,29 @@ export class MutationJournal {
         "The mutation journal identity witness changed; no request was started",
       );
     }
+  }
+
+  private async markIdentityReady(): Promise<void> {
+    if (
+      this.witness.schemaVersion !== 3 ||
+      this.witness.state !== "initializing"
+    ) {
+      return;
+    }
+    await this.assertAnchoredRootIdentity();
+    await this.assertJournalDirectoryIdentities(true);
+    await this.assertIdentityWitness();
+    await this.assertRootIdentity();
+    const readyWitness: MutationJournalIdentityWitness = {
+      ...this.witness,
+      state: "ready",
+    };
+    await atomicWrite(this.witnessFile, readyWitness);
+    this.witness = readyWitness;
+    await this.assertIdentityWitness();
+    await this.assertAnchoredRootIdentity();
+    await this.assertJournalDirectoryIdentities(true);
+    await this.assertRootIdentity();
   }
 
   private async validateBinding(

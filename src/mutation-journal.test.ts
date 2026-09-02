@@ -316,6 +316,147 @@ describe("mutation journal", () => {
     ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_BINDING_MISMATCH" });
   });
 
+  it("treats a legacy schema-2 identity witness as already ready", async () => {
+    const root = await temporaryDirectory();
+    const directory = path.join(root, "journal");
+    const witnessFile = path.join(
+      root,
+      ".journal.mutation-journal-identity.json",
+    );
+    await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const legacyWitness = JSON.parse(await readFile(witnessFile, "utf8"));
+    legacyWitness.schemaVersion = 2;
+    delete legacyWitness.state;
+    await writeFile(witnessFile, `${JSON.stringify(legacyWitness)}\n`, {
+      mode: 0o600,
+    });
+
+    await expect(
+      MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID }),
+    ).resolves.toBeInstanceOf(MutationJournal);
+    await rm(path.join(directory, "binding.json"));
+    await expect(
+      MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID }),
+    ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_BINDING_MISMATCH" });
+  });
+
+  it("cold-resumes one initializing identity across durable crash prefixes", async () => {
+    for (const crashAt of [
+      "identity_durable",
+      "binding_durable",
+      "ready_durable",
+    ] as const) {
+      const root = await temporaryDirectory();
+      const directory = path.join(root, "journal");
+      const witnessFile = path.join(
+        root,
+        ".journal.mutation-journal-identity.json",
+      );
+      await expect(
+        MutationJournal.open({
+          directory,
+          apiUrl: API_URL,
+          appId: APP_ID,
+          onInitializationCheckpoint(checkpoint) {
+            if (checkpoint === crashAt) {
+              throw new Error(`fault after ${checkpoint}`);
+            }
+          },
+        }),
+      ).rejects.toThrow(`fault after ${crashAt}`);
+
+      const initializingWitness = JSON.parse(
+        await readFile(witnessFile, "utf8"),
+      );
+      expect(initializingWitness).toMatchObject({
+        schemaVersion: 3,
+        state: crashAt === "ready_durable" ? "ready" : "initializing",
+        appId: APP_ID,
+      });
+      if (crashAt === "identity_durable") {
+        await expect(
+          readFile(path.join(directory, "binding.json"), "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        expect(
+          JSON.parse(
+            await readFile(path.join(directory, "binding.json"), "utf8"),
+          ),
+        ).toMatchObject({ journalId: initializingWitness.journalId });
+      }
+
+      await expect(
+        MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID }),
+      ).resolves.toBeInstanceOf(MutationJournal);
+      const readyWitness = JSON.parse(await readFile(witnessFile, "utf8"));
+      const binding = JSON.parse(
+        await readFile(path.join(directory, "binding.json"), "utf8"),
+      );
+      expect(readyWitness).toMatchObject({
+        schemaVersion: 3,
+        state: "ready",
+        journalId: initializingWitness.journalId,
+      });
+      expect(binding).toMatchObject({
+        journalId: initializingWitness.journalId,
+        appId: APP_ID,
+      });
+      expect(await readdir(path.join(directory, "entries"))).toEqual([]);
+    }
+  });
+
+  it("serializes concurrent first opens onto one durable identity", async () => {
+    const root = await temporaryDirectory();
+    const directory = path.join(root, "journal");
+    let releaseIdentity!: () => void;
+    const identityGate = new Promise<void>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    let identityDurable!: () => void;
+    const identityObserved = new Promise<void>((resolve) => {
+      identityDurable = resolve;
+    });
+    let identityWrites = 0;
+    const first = MutationJournal.open({
+      directory,
+      apiUrl: API_URL,
+      appId: APP_ID,
+      async onInitializationCheckpoint(checkpoint) {
+        if (checkpoint !== "identity_durable") return;
+        identityWrites += 1;
+        identityDurable();
+        await identityGate;
+      },
+    });
+    await identityObserved;
+    const second = MutationJournal.open({
+      directory,
+      apiUrl: API_URL,
+      appId: APP_ID,
+      onInitializationCheckpoint(checkpoint) {
+        if (checkpoint === "identity_durable") identityWrites += 1;
+      },
+    });
+    releaseIdentity();
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+
+    const witness = JSON.parse(
+      await readFile(
+        path.join(root, ".journal.mutation-journal-identity.json"),
+        "utf8",
+      ),
+    );
+    const binding = JSON.parse(
+      await readFile(path.join(directory, "binding.json"), "utf8"),
+    );
+    expect(identityWrites).toBe(1);
+    expect(witness).toMatchObject({
+      schemaVersion: 3,
+      state: "ready",
+      journalId: binding.journalId,
+    });
+  });
+
   it.runIf(process.platform === "linux")(
     "rejects a strict runtime journal that is not a dedicated mountpoint",
     async () => {
@@ -593,15 +734,20 @@ describe("mutation journal", () => {
     const gate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
     let firstKey = "";
     const first = journal.run(spec, async (run) => {
       firstKey = run.idempotencyKey;
       await run.markAttempted();
+      firstEntered();
       await gate;
       await run.complete();
       return "first";
     });
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await entered;
     const second = journal.run(spec, async (run) => {
       expect(run.completed).toBe(true);
       expect(run.idempotencyKey).toBe(firstKey);

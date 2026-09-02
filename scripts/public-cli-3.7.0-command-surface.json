@@ -6,7 +6,7 @@
   "provenance": {
     "source": "recursive --help output from the release-candidate package build",
     "entrypoint": "node_modules/@opencloud/cli/dist/index.cjs",
-    "entrypointSha256": "3f67f4dc0bf98a8175326853b295ddf2469a03303ac38cf69f890ef092d61a05",
+    "entrypointSha256": "deb4979045482a8fb3329f1a334a01992cd212354724a968c0657790c60fd193",
     "rootUsage": "opencloud [options] [command]",
     "groupCount": 20,
     "leafCount": 113
