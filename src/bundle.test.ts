@@ -60,6 +60,68 @@ async function readArchivedManifest(
 }
 
 describe("bundle builder", () => {
+  it("defaults versionless manifests to publisher-versioned schema 3", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "opencloud.yaml"),
+      `
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  directory: frontend
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(bundle.manifest.schemaVersion).toBe(3);
+    expect(bundle.manifest).not.toHaveProperty("version");
+    expect(archived.schemaVersion).toBe(3);
+    expect(archived).not.toHaveProperty("version");
+  });
+
+  it("keeps implicit versioned manifests readable as schema 2", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "opencloud.yaml"),
+      `
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+version: legacy-1
+frontend:
+  directory: frontend
+`,
+    );
+
+    const bundle = await buildBundle(root);
+    expect(bundle.manifest).toMatchObject({
+      schemaVersion: 2,
+      version: "legacy-1",
+    });
+  });
+
+  it("rejects a release version embedded in schema 3", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeFile(
+      path.join(root, "opencloud.yaml"),
+      `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+version: forbidden
+frontend:
+  directory: frontend
+`,
+    );
+
+    await expect(buildBundle(root)).rejects.toThrow(
+      /schema 3 removes the top-level version/,
+    );
+  });
+
   it("archives only manifest-reachable files in deterministic order", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend", "assets"), { recursive: true });

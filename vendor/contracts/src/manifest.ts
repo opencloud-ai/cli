@@ -524,84 +524,104 @@ export const manifestAlertRuleSchema = z
   })
   .strict();
 
-export const openCloudManifestSchema = z
+export const deploymentVersionSchema = z
+  .string()
+  .min(1)
+  .max(80)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+
+const openCloudManifestFields = {
+  frontend: z
+    .object({
+      directory: relativePath,
+      spa: z.boolean().default(true),
+    })
+    .strict(),
+  runtime: z
+    .object({
+      sdk: z
+        .object({
+          version: sdkVersionSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+  files: z
+    .object({
+      access: filesAccessSchema.default("user"),
+      maxUploadBytes: z
+        .number()
+        .int()
+        .min(1)
+        .max(100 * 1024 * 1024)
+        .default(50 * 1024 * 1024),
+    })
+    .strict()
+    .optional(),
+  migrations: z.array(migrationSchema).max(500).default([]),
+  functions: z.array(functionSchema).max(100).default([]),
+  cron: z.array(cronSchema).max(100).default([]),
+  queues: z.array(queueSchema).max(50).default([]),
+  email: z
+    .object({
+      addresses: z.array(emailAddressSchema).max(25).default([]),
+    })
+    .strict()
+    .optional(),
+  notifications: z
+    .object({
+      webPush: z.literal(true),
+      icon: sameOriginAbsolutePath.optional(),
+    })
+    .strict()
+    .optional(),
+  health: z
+    .object({ path: z.string().startsWith("/").max(200).default("/") })
+    .strict()
+    .default({ path: "/" }),
+  secrets: z
+    .record(secretNameSchema, secretModeSchema)
+    .refine((secrets) => Object.keys(secrets).length <= 100, {
+      message: "apps may declare at most 100 secrets",
+    })
+    .default({}),
+  integrations: z
+    .record(integrationNameSchema, integrationDefinitionSchema)
+    .refine((integrations) => Object.keys(integrations).length <= 20, {
+      message: "apps may declare at most 20 integrations",
+    })
+    .default({}),
+  observability: z
+    .object({
+      metrics: z.array(customMetricDefinitionSchema).max(20).default([]),
+      alertRules: z.array(manifestAlertRuleSchema).max(20).optional(),
+    })
+    .strict()
+    .optional(),
+};
+
+export const openCloudManifestV2Schema = z
   .object({
     schemaVersion: z.literal(2),
     appId: z.uuid(),
-    version: z
-      .string()
-      .min(1)
-      .max(80)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    frontend: z
-      .object({
-        directory: relativePath,
-        spa: z.boolean().default(true),
-      })
-      .strict(),
-    runtime: z
-      .object({
-        sdk: z
-          .object({
-            version: sdkVersionSchema,
-          })
-          .strict(),
-      })
-      .strict(),
-    files: z
-      .object({
-        access: filesAccessSchema.default("user"),
-        maxUploadBytes: z
-          .number()
-          .int()
-          .min(1)
-          .max(100 * 1024 * 1024)
-          .default(50 * 1024 * 1024),
-      })
-      .strict()
-      .optional(),
-    migrations: z.array(migrationSchema).max(500).default([]),
-    functions: z.array(functionSchema).max(100).default([]),
-    cron: z.array(cronSchema).max(100).default([]),
-    queues: z.array(queueSchema).max(50).default([]),
-    email: z
-      .object({
-        addresses: z.array(emailAddressSchema).max(25).default([]),
-      })
-      .strict()
-      .optional(),
-    notifications: z
-      .object({
-        webPush: z.literal(true),
-        icon: sameOriginAbsolutePath.optional(),
-      })
-      .strict()
-      .optional(),
-    health: z
-      .object({ path: z.string().startsWith("/").max(200).default("/") })
-      .strict()
-      .default({ path: "/" }),
-    secrets: z
-      .record(secretNameSchema, secretModeSchema)
-      .refine((secrets) => Object.keys(secrets).length <= 100, {
-        message: "apps may declare at most 100 secrets",
-      })
-      .default({}),
-    integrations: z
-      .record(integrationNameSchema, integrationDefinitionSchema)
-      .refine((integrations) => Object.keys(integrations).length <= 20, {
-        message: "apps may declare at most 20 integrations",
-      })
-      .default({}),
-    observability: z
-      .object({
-        metrics: z.array(customMetricDefinitionSchema).max(20).default([]),
-        alertRules: z.array(manifestAlertRuleSchema).max(20).optional(),
-      })
-      .strict()
-      .optional(),
+    version: deploymentVersionSchema,
+    ...openCloudManifestFields,
   })
-  .strict()
+  .strict();
+
+export const openCloudManifestV3Schema = z
+  .object({
+    schemaVersion: z.literal(3),
+    appId: z.uuid(),
+    ...openCloudManifestFields,
+  })
+  .strict();
+
+export const openCloudManifestSchema = z
+  .discriminatedUnion("schemaVersion", [
+    openCloudManifestV2Schema,
+    openCloudManifestV3Schema,
+  ])
   .superRefine((manifest, context) => {
     if (
       manifest.notifications?.webPush &&
@@ -610,16 +630,15 @@ export const openCloudManifestSchema = z
       context.addIssue({
         code: "custom",
         path: ["notifications", "webPush"],
-        message: "Web Push notifications require runtime SDK version 2.1.0 or later",
+        message:
+          "Web Push notifications require runtime SDK version 2.1.0 or later",
       });
     }
     for (const [name, integration] of Object.entries(manifest.integrations)) {
       if (
-        [
-          "google-analytics",
-          "google-search-console",
-          "google-ads",
-        ].includes(integration.provider) &&
+        ["google-analytics", "google-search-console", "google-ads"].includes(
+          integration.provider,
+        ) &&
         (manifest.runtime.sdk.version === "2.0.0" ||
           manifest.runtime.sdk.version === "2.1.0")
       ) {
@@ -819,6 +838,8 @@ export const openCloudManifestSchema = z
   });
 
 export type OpenCloudManifest = z.infer<typeof openCloudManifestSchema>;
+export type OpenCloudManifestV2 = z.infer<typeof openCloudManifestV2Schema>;
+export type OpenCloudManifestV3 = z.infer<typeof openCloudManifestV3Schema>;
 export type OpenCloudMigration = z.infer<typeof migrationSchema>;
 export type FilesAccess = z.infer<typeof filesAccessSchema>;
 export type FunctionAccess = z.infer<typeof functionAccessSchema>;

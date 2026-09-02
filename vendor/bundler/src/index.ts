@@ -78,11 +78,12 @@ export interface BundleWarning {
 }
 
 export interface BundleOptions {
+  /** Legacy schema-2 compatibility override. Schema 3 is publisher-versioned. */
   version?: string;
 }
 
 export function serializeBundleManifest(manifest: OpenCloudManifest): string {
-  const archiveManifest: Partial<OpenCloudManifest> = { ...manifest };
+  const archiveManifest: Record<string, unknown> = { ...manifest };
   // Queue-free schema-2 apps keep the archive shape accepted by older
   // platform releases while declared queues remain canonical bundle input.
   if (manifest.queues.length === 0) delete archiveManifest.queues;
@@ -128,8 +129,20 @@ export async function buildBundle(
   const raw = (
     manifestFile.endsWith(".json") ? JSON.parse(source) : YAML.parse(source)
   ) as AuthorManifest;
-  if (options.version) raw.version = options.version;
-  raw.schemaVersion ??= 2;
+  raw.schemaVersion ??= raw.version || options.version ? 2 : 3;
+  if (raw.schemaVersion === 3 && raw.version !== undefined) {
+    throw new Error(
+      "Manifest schema 3 removes the top-level version; OpenCloud assigns the release version during promotion",
+    );
+  }
+  if (options.version) {
+    if (raw.schemaVersion !== 2) {
+      throw new Error(
+        "A version override is supported only for legacy schema-2 manifests",
+      );
+    }
+    raw.version = options.version;
+  }
   raw.runtime ??= {};
   raw.runtime.sdk ??= {};
   raw.runtime.sdk.version ??= OPEN_CLOUD_SDK_VERSION;
