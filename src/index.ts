@@ -8,6 +8,7 @@ import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import {
   OPEN_CLOUD_FAVICON_DATA_URI,
   OPEN_CLOUD_LOGO_DATA_URI,
+  appOperationsPageQuerySchema,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
 import { ApiError, OpenCloudClient } from "./api-client.js";
@@ -40,7 +41,7 @@ import {
   emailHistoryQuery,
 } from "./email.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
-import { devNotificationCaptureLimit } from "./notifications.js";
+import { devNotificationCaptureLimit, notificationHistoryQuery } from "./notifications.js";
 import {
   deleteSession,
   loadSession,
@@ -83,7 +84,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.7.0";
+const CLI_VERSION = "3.8.0";
 
 const program = new Command()
   .name("opencloud")
@@ -3752,6 +3753,36 @@ program
     });
   });
 
+const appNotifications = app
+  .command("notifications")
+  .description("Inspect retained production Web Push history");
+
+appNotifications
+  .command("list")
+  .argument("<app-id>")
+  .description("Read one filtered page of Web Push messages (30-day retention)")
+  .option("--cursor <cursor>", "nextCursor from the preceding page")
+  .option("--limit <number>", "page size, 1–200", "100")
+  .option("--user-id <user-id>", "recipient user ID")
+  .addOption(new Option("--status <status>").choices(["queued", "no_subscribers", "accepted", "partial", "failed"]))
+  .option("--from <timestamp>", "inclusive ISO 8601 start")
+  .option("--to <timestamp>", "inclusive ISO 8601 end")
+  .action(async (appId, options) => {
+    output(await client().call("listWebPushMessages", {
+      appId,
+      query: notificationHistoryQuery(options),
+    }));
+  });
+
+appNotifications
+  .command("get")
+  .argument("<app-id>")
+  .argument("<message-id>")
+  .description("Read a retained Web Push payload and anonymous delivery outcomes")
+  .action(async (appId, messageId) => {
+    output(await client().call("getWebPushMessage", { appId, messageId }));
+  });
+
 const operation = program
   .command("operation")
   .description("Inspect durable operations");
@@ -3782,7 +3813,19 @@ operation
   .command("list")
   .argument("<app-id>")
   .option("--limit <number>", "result limit", "50")
+  .option("--page", "return a cursor page with asOf, operations, and nextCursor")
+  .option("--cursor <cursor>", "continue a page with the same filters and limit")
+  .option("--type <type>", "filter a cursor page by operation type")
+  .option("--state <state>", "filter a cursor page by operation state")
   .action(async (appId, options) => {
+    if (options.page || options.cursor !== undefined || options.type !== undefined || options.state !== undefined) {
+      const query = appOperationsPageQuerySchema.parse({
+        limit: options.limit, cursor: options.cursor,
+        type: options.type, state: options.state,
+      });
+      output(await client().call("listAppOperationsPage", { appId, query }));
+      return;
+    }
     const limit = parseBoundedNumber(options.limit, "--limit", 1, 100);
     output(
       await client().get(
