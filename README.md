@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.7.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.8.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.7.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.7.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.8.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.8.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -282,6 +282,20 @@ captured instead of delivered; `app dev email inject` accepts only reserved
 relative to the app directory.
 
 ## Web Push notifications
+
+Read retained production history with `app notifications list <app-id>` and
+inspect a payload with `app notifications get <app-id> <message-id>`. Listing
+supports `--cursor`, `--limit` (1–200), `--user-id`, `--status`, `--from`, and
+`--to`. Supply the same filters and limit when continuing with `nextCursor`.
+History is retained for 30 days. `accepted` means provider acceptance, not
+device receipt, display, or engagement. Results omit subscription and provider
+target identifiers. These commands do not send notifications.
+
+For paginated durable operations, use
+`operation list <app-id> --page --limit 50 --type deploy --state succeeded`.
+Continue with `--cursor <nextCursor>` and the same filters and limit. Page
+results contain `asOf`, `operations`, and `nextCursor`. Without `--page`,
+`--cursor`, `--type`, or `--state`, the original array result is preserved.
 
 Declare `notifications.webPush: true` with runtime SDK `2.1.0`, then use
 `opencloud.notifications.status()`, `.subscribe()`, and `.unsubscribe()` in the

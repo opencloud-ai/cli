@@ -1,3 +1,16 @@
+import { appWebPushHistoryQuerySchema } from "@opencloud/contracts";
+
+export function notificationHistoryQuery(options: {
+  cursor?: string;
+  limit?: string | number;
+  userId?: string;
+  status?: string;
+  from?: string;
+  to?: string;
+}) {
+  return appWebPushHistoryQuerySchema.parse(options);
+}
+
 export function devNotificationCaptureLimit(
   value: string | number | undefined,
 ): number {

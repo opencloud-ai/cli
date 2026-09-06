@@ -20,6 +20,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
+      - run: npm run test:contract
+      - run: npm run test:package
       - run: npm run verify:version -- "$GITHUB_REF_NAME"
       - run: npm pack
       - run: sha256sum opencloud-cli-*.tgz > checksums.txt

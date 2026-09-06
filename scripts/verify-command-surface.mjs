@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const binary = path.join(root, "dist", "index.cjs");
-const contract = JSON.parse(
-  await readFile(
-    path.join(import.meta.dirname, "public-cli-3.7.0-command-surface.json"),
-    "utf8",
-  ),
-);
+const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
+const snapshot = path.join(import.meta.dirname, `public-cli-${packageJson.version}-command-surface.json`);
+const writing = process.argv.includes("--write");
+const contract = writing ? {
+  schemaVersion: 1, package: packageJson.name, version: packageJson.version,
+  sourceRepository: "https://github.com/opencloud-ai/cli",
+  provenance: { source: "recursive --help output from the release-candidate package build",
+    entrypoint: "node_modules/@opencloud/cli/dist/index.cjs", rootUsage: "opencloud [options] [command]" },
+} : JSON.parse(await readFile(snapshot, "utf8"));
 
 const version = spawnSync(process.execPath, [binary, "--cli-version"], {
   cwd: root,
@@ -65,6 +68,15 @@ const visit = (parts) => {
   for (const child of children) visit([...parts, child]);
 };
 visit([]);
+
+if (writing) {
+  contract.provenance.entrypointSha256 = createHash("sha256").update(await readFile(binary)).digest("hex");
+  contract.provenance.groupCount = groups.length;
+  contract.provenance.leafCount = commands.length;
+  contract.groups = groups;
+  contract.commands = commands;
+  await writeFile(snapshot, JSON.stringify(contract, null, 2) + "\n");
+}
 
 const sorted = (values) =>
   [...values].sort((left, right) => left.localeCompare(right));

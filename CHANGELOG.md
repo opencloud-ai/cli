@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.8.0
+
+- Add `app notifications list` and `app notifications get` for retained,
+  app-scoped production Web Push history and anonymous delivery outcomes.
+  Listing supports cursor pagination, recipient, status, and bounded date filters.
+- Add `operation list --page` with cursor, type, and state filters. Existing
+  unfiltered calls retain their array response and legacy endpoint.
+- Snapshot the matching public read contracts and verify the command routes,
+  query validation, structured output, and cross-app denials.
+
 ## 3.7.0
 
 - Add a crash-safe, exact-app mutation journal with stable idempotency reuse,
