@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.8.1
+
+- Reload the exact-app runtime session before each API request so an active
+  command can follow its operation across credential rotation. Reject a changed
+  API, app, root run, or credential family before sending another request.
+
 ## 3.8.0
 
 - Add `app notifications list` and `app notifications get` for retained,
