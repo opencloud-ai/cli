@@ -1,5 +1,7 @@
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
+import { lookup } from "node:dns";
+import type { LookupFunction } from "node:net";
 import WebSocket from "ws";
 
 export interface EdgeResponse {
@@ -47,8 +49,17 @@ function publicTarget(publicOrigin: string, pathname: string): {
 
 export class EdgeTransport {
   private readonly adapterUrl: URL | undefined;
+  private readonly lookup: LookupFunction | undefined;
 
-  constructor(adapter?: string) {
+  constructor(adapter?: string, publicEdgeHost?: string) {
+    if (publicEdgeHost) {
+      if (adapter || !/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/i.test(publicEdgeHost)) {
+        throw new Error("Public edge host must be a hostname without an edge adapter");
+      }
+      // Change only address resolution. Keep the canonical Host, TLS SNI,
+      // certificate hostname verification, protocol, and port intact.
+      this.lookup = (_hostname, options, callback) => lookup(publicEdgeHost, options, callback);
+    }
     if (adapter) {
       this.adapterUrl = new URL(adapter);
       assertHttpUrl(this.adapterUrl, "Edge adapter URL");
@@ -77,6 +88,7 @@ export class EdgeTransport {
         {
           method: options.method ?? "GET",
           headers,
+          ...(this.lookup ? { lookup: this.lookup } : {}),
         },
         (response) => {
           const chunks: Buffer[] = [];
@@ -117,6 +129,7 @@ export class EdgeTransport {
       : resolved.target;
     target.protocol = target.protocol === "https:" ? "wss:" : "ws:";
     return new WebSocket(target, {
+      ...(this.lookup ? { lookup: this.lookup } : {}),
       headers: {
         ...headers,
         ...(this.adapterUrl ? { host: resolved.origin.host } : {}),

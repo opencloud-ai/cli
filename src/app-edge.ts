@@ -59,6 +59,7 @@ export async function requestApp(
   requestPath = "/",
   options: {
     edgeUrl?: string;
+    publicEdgeHost?: string;
     method?: "GET" | "HEAD";
     transport?: EdgeTransport;
   } = {},
@@ -66,7 +67,7 @@ export async function requestApp(
   const app = appEdgeRecordSchema.parse(rawApp);
   const target = appTarget(app, requestPath);
   const method = options.method ?? "GET";
-  const transport = options.transport ?? new EdgeTransport(options.edgeUrl);
+  const transport = options.transport ?? new EdgeTransport(options.edgeUrl, options.publicEdgeHost);
   const response = await transport.request(
     app.appUrl,
     `${target.pathname}${target.search}`,
@@ -88,6 +89,7 @@ export async function smokeApp(
   rawApp: unknown,
   options: {
     edgeUrl?: string;
+    publicEdgeHost?: string;
     transport?: EdgeTransport;
   } = {},
 ): Promise<AppSmokeSummary> {
@@ -102,7 +104,7 @@ export async function smokeApp(
         : "The app does not have an active deployment.",
   });
 
-  const transport = options.transport ?? new EdgeTransport(options.edgeUrl);
+  const transport = options.transport ?? new EdgeTransport(options.edgeUrl, options.publicEdgeHost);
   const response = await transport.request(app.appUrl, "/");
   if (app.visibility === "public") {
     checks.push({

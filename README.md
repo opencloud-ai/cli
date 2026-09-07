@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.8.1` in
+OpenCloud application skills pin an exact CLI release. To install `v3.8.2` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.8.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.8.1.tgz"
+OPENCLOUD_CLI_VERSION="v3.8.2"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.8.2.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -350,6 +350,12 @@ Custom metrics and rules are bounded platform contracts. Alerts inform an
 agent; they do not authorize automatic rollback or destructive repair.
 
 ## Verification
+
+Installation-managed runtimes can set `OPENCLOUD_PUBLIC_EDGE_HOST` to route
+`app request` through a local public-edge bridge when public-address loopback
+is unavailable. This changes address resolution only: the canonical HTTP Host,
+TLS server name, and certificate checks remain active. It cannot be combined
+with the separate `OPENCLOUD_EDGE_URL` test adapter.
 
 `app verify` is the authoritative durable release gate. OpenCloud runs health,
 exact runtime metadata, SDK-pin, HTTPS, Chromium diagnostics, and the
