@@ -32,6 +32,7 @@ import {
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
+import { runtimeSessionTokenProvider } from "./runtime-session-token.js";
 import { doctorDiagnostics } from "./doctor.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
 import {
@@ -84,7 +85,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.8.0";
+const CLI_VERSION = "3.8.1";
 
 const program = new Command()
   .name("opencloud")
@@ -189,7 +190,12 @@ function client(cwd?: string): OpenCloudClient {
     ) {
       throw new Error("The legacy session belongs to a different API URL.");
     }
-    return new OpenCloudClient({ apiUrl: legacy.apiUrl, token: legacy.token });
+    return new OpenCloudClient({
+      apiUrl: legacy.apiUrl,
+      ...(legacy.schemaVersion === 2 && legacy.authorityMode === "app_owner_v1"
+        ? { tokenProvider: runtimeSessionTokenProvider(legacy, availableSession) }
+        : { token: legacy.token }),
+    });
   }
   throw new Error(
     legacy?.state === "awaiting_email_verification"
@@ -215,7 +221,12 @@ async function managementClient(): Promise<OpenCloudClient> {
   if (availableWorkspace()) return client();
   const legacy = availableSession();
   if (legacy?.state === "ready") {
-    return new OpenCloudClient({ apiUrl: legacy.apiUrl, token: legacy.token });
+    return new OpenCloudClient({
+      apiUrl: legacy.apiUrl,
+      ...(legacy.schemaVersion === 2 && legacy.authorityMode === "app_owner_v1"
+        ? { tokenProvider: runtimeSessionTokenProvider(legacy, availableSession) }
+        : { token: legacy.token }),
+    });
   }
   throw new Error("No OpenCloud account login was found. Run opencloud login.");
 }
@@ -263,7 +274,7 @@ async function exactAppMutationContext(
           familyId: legacy.familyId,
           appId: legacy.appId,
           apiUrl: legacy.apiUrl,
-          token: legacy.token,
+          session: legacy,
         }
       : undefined;
   const configuredToken = program.opts<{ token?: string }>().token;
@@ -339,7 +350,7 @@ async function exactAppMutationContext(
   const control = runtimeAuthority
     ? new OpenCloudClient({
         apiUrl: runtimeAuthority.apiUrl,
-        token: runtimeAuthority.token,
+        tokenProvider: runtimeSessionTokenProvider(runtimeAuthority.session, availableSession),
       })
     : client(cwd);
   await assertMutationJournalCompatibility(control);
