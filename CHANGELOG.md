@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.8.2
+
+- Let `app request` use the installation's `OPENCLOUD_PUBLIC_EDGE_HOST` route
+  when public-address loopback is unavailable. Preserve the canonical HTTP
+  Host, TLS server name, certificate verification, and same-origin path checks.
+
 ## 3.8.1
 
 - Reload the exact-app runtime session before each API request so an active

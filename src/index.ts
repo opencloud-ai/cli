@@ -85,7 +85,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.8.1";
+const CLI_VERSION = "3.8.2";
 
 const program = new Command()
   .name("opencloud")
@@ -2749,10 +2749,12 @@ app
   .action(async (appId, requestPath, options) => {
     const value = await client().get(`/v1/apps/${appId}`);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
+    const publicEdgeHost = process.env.OPENCLOUD_PUBLIC_EDGE_HOST;
     output(
       await requestApp(value, requestPath, {
         method: options.method as "GET" | "HEAD",
         ...(edgeUrl ? { edgeUrl } : {}),
+        ...(publicEdgeHost ? { publicEdgeHost } : {}),
       }),
     );
   });

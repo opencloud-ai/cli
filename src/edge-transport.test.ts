@@ -1,4 +1,9 @@
 import { createServer, type Server } from "node:http";
+import { createServer as createHttpsServer, globalAgent } from "node:https";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { requestApp, smokeApp } from "./app-edge.js";
@@ -51,6 +56,51 @@ function appRecord(
 }
 
 describe("edge transport", () => {
+  it("routes the connection while enforcing the canonical TLS identity and Host", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-edge-tls-"));
+    const originalCa = globalAgent.options.ca;
+    try {
+      const keyPath = path.join(directory, "test-key.pem");
+      const certPath = path.join(directory, "test-cert.pem");
+      execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        "-subj", "/CN=app.bridge.test", "-addext", "subjectAltName=DNS:app.bridge.test",
+        "-keyout", keyPath, "-out", certPath], { stdio: "ignore" });
+      const cert = await readFile(certPath);
+      let receivedHost = "";
+      let receivedServername = "";
+      const edge = createHttpsServer({ key: await readFile(keyPath), cert }, (request, response) => {
+        receivedHost = request.headers.host ?? "";
+        receivedServername = (request.socket as import("node:tls").TLSSocket).servername ?? "";
+        response.writeHead(302, { location: "https://auth.bridge.test/login" });
+        response.end();
+      });
+      servers.push(edge);
+      await new Promise<void>(resolve => edge.listen(0, "127.0.0.1", resolve));
+      const port = (edge.address() as AddressInfo).port;
+      const app = appRecord({ appUrl: `https://app.bridge.test:${port}`, visibility: "private" });
+      await expect(requestApp(app, "/", { method: "HEAD", publicEdgeHost: "127.0.0.1" })).rejects.toThrow(/self-signed|certificate/i);
+      globalAgent.options.ca = cert;
+      const result = await requestApp(app, "/", { method: "HEAD", publicEdgeHost: "127.0.0.1" });
+      expect(result).toMatchObject({ status: 302, method: "HEAD", bodyBytes: 0, url: `https://app.bridge.test:${port}/` });
+      expect(receivedHost).toBe(`app.bridge.test:${port}`);
+      expect(receivedServername).toBe("app.bridge.test");
+      await expect(requestApp(appRecord({ appUrl: `https://other.bridge.test:${port}` }), "/", {
+        publicEdgeHost: "127.0.0.1",
+      })).rejects.toThrow(/Hostname\/IP does not match|certificate.*altnames/i);
+      expect(JSON.stringify(result)).not.toContain("127.0.0.1");
+    } finally {
+      globalAgent.options.ca = originalCa;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects ambiguous or non-hostname connection overrides", () => {
+    expect(() => new EdgeTransport("http://adapter.test", "bridge.test")).toThrow(/hostname/);
+    for (const host of ["https://bridge.test", "bridge.test:443", "bridge.test/path", "user@bridge.test"]) {
+      expect(() => new EdgeTransport(undefined, host)).toThrow(/hostname/);
+    }
+  });
+
   it("uses the adapter while preserving the canonical Host header", async () => {
     let receivedHost = "";
     let receivedPath = "";
