@@ -1,5 +1,41 @@
 import { z } from "zod";
 import { CronExpressionParser } from "cron-parser";
+import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest, AppRouteError } from "./app-routes.js";
+import {
+  alertAggregationSchema,
+  alertOperatorSchema,
+  alertRuleIdSchema,
+  alertSeveritySchema,
+  alertWindowSchema,
+  customMetricNameSchema,
+  manifestAlertRuleSchema,
+} from "./api-core.js";
+import {
+  integrationAccountSchema,
+  integrationCapabilitySchema,
+  integrationCardinalitySchema,
+  integrationDefinitionSchema,
+  integrationEventsSchema,
+  integrationProviderSchema,
+} from "./integration-manifest.js";
+
+export {
+  alertAggregationSchema,
+  alertOperatorSchema,
+  alertRuleIdSchema,
+  alertSeveritySchema,
+  alertWindowSchema,
+  customMetricNameSchema,
+  manifestAlertRuleSchema,
+} from "./api-core.js";
+export {
+  integrationAccountSchema,
+  integrationCapabilitySchema,
+  integrationCardinalitySchema,
+  integrationDefinitionSchema,
+  integrationEventsSchema,
+  integrationProviderSchema,
+};
 
 const relativePath = z
   .string()
@@ -27,11 +63,52 @@ const sameOriginAbsolutePath = z
     "path must be a same-origin absolute path",
   );
 
+const appHealthPath = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine(
+    (value) => isAppOwnedHealthPath(value),
+    "health path must be a same-origin app path outside the reserved /_opencloud namespace",
+  );
+
+function isAppOwnedHealthPath(value: string): boolean {
+  const origin = "https://opencloud-app-health.invalid";
+  try {
+    const target = new URL(value, `${origin}/`);
+    if (
+      target.origin !== origin ||
+      !value.startsWith("/") ||
+      value.startsWith("//") ||
+      value.includes("\\") ||
+      target.hash ||
+      /[\u0000-\u001f\u007f]/.test(value)
+    ) {
+      return false;
+    }
+    let pathname = target.pathname;
+    for (let pass = 0; pass < 4; pass += 1) {
+      const decoded = decodeURIComponent(pathname);
+      if (decoded === pathname) break;
+      pathname = decoded;
+    }
+    if (pathname.split("/").some((part) => part === "." || part === "..")) {
+      return false;
+    }
+    const normalized = pathname.toLowerCase();
+    return (
+      normalized !== "/_opencloud" && !normalized.startsWith("/_opencloud/")
+    );
+  } catch {
+    return false;
+  }
+}
+
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0"], {
-  error: "expected an installed SDK version: 2.0.0, 2.1.0, or 2.2.0",
+export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0", "2.3.0"], {
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, or 2.3.0",
 });
 
 export const migrationSchema = z
@@ -82,329 +159,6 @@ export const filesAccessSchema = z.enum(["user", "app"]);
 
 export const secretModeSchema = z.enum(["generated", "required", "optional"]);
 
-export const integrationAccountSchema = z.enum(["app", "calling_user"]);
-
-export const integrationCardinalitySchema = z.enum(["one", "many"]);
-
-export const integrationCapabilitySchema = z.enum([
-  "calendar.events.read",
-  "calendar.events.create",
-  "drive.files.read",
-  "drive.files.write",
-  "sheets.spreadsheets.read",
-  "sheets.spreadsheets.write",
-  "docs.documents.read",
-  "docs.documents.write",
-  "slides.presentations.read",
-  "slides.presentations.write",
-  "analytics.reports.read",
-  "search.performance.read",
-  "ads.reporting.read",
-  "bank.accounts.read",
-  "bank.balances.read",
-  "bank.transactions.read",
-  "payments.received.reconcile",
-  "transfers.sent.read",
-  "slack.messages.send",
-  "slack.messages.receive",
-  "telegram.messages.send",
-  "telegram.messages.receive",
-  "asana.tasks.read",
-  "asana.tasks.create",
-  "asana.tasks.update",
-  "asana.assignees.read",
-  "asana.assignees.write",
-  "asana.sections.read",
-  "asana.sections.move_tasks",
-  "asana.custom_fields.read",
-  "asana.custom_field_values.write",
-  "asana.attachments.read",
-  "asana.attachments.write",
-  "asana.stories.read",
-  "asana.comments.write",
-  "asana.events.receive",
-  "crm.contacts.read",
-  "crm.contacts.write",
-  "crm.companies.read",
-  "crm.companies.write",
-  "crm.deals.read",
-  "crm.deals.write",
-  "crm.owners.read",
-  "crm.pipelines.read",
-  "crm.notes.write",
-  "crm.associations.write",
-]);
-
-export const integrationProviderSchema = z.enum([
-  "google-calendar",
-  "google-drive",
-  "google-sheets",
-  "google-docs",
-  "google-slides",
-  "google-analytics",
-  "google-search-console",
-  "google-ads",
-  "gocardless-bank-account-data",
-  "wise-balance-webhook",
-  "slack",
-  "telegram",
-  "asana",
-  "hubspot-crm",
-]);
-
-const capabilitiesForProvider: Record<
-  z.infer<typeof integrationProviderSchema>,
-  ReadonlySet<z.infer<typeof integrationCapabilitySchema>>
-> = {
-  "google-calendar": new Set([
-    "calendar.events.read",
-    "calendar.events.create",
-  ]),
-  "google-drive": new Set(["drive.files.read", "drive.files.write"]),
-  "google-sheets": new Set([
-    "sheets.spreadsheets.read",
-    "sheets.spreadsheets.write",
-  ]),
-  "google-docs": new Set(["docs.documents.read", "docs.documents.write"]),
-  "google-slides": new Set([
-    "slides.presentations.read",
-    "slides.presentations.write",
-  ]),
-  "google-analytics": new Set(["analytics.reports.read"]),
-  "google-search-console": new Set(["search.performance.read"]),
-  "google-ads": new Set(["ads.reporting.read"]),
-  "gocardless-bank-account-data": new Set([
-    "bank.accounts.read",
-    "bank.balances.read",
-    "bank.transactions.read",
-  ]),
-  "wise-balance-webhook": new Set([
-    "payments.received.reconcile",
-    "transfers.sent.read",
-  ]),
-  slack: new Set(["slack.messages.send", "slack.messages.receive"]),
-  telegram: new Set(["telegram.messages.send", "telegram.messages.receive"]),
-  asana: new Set([
-    "asana.tasks.read",
-    "asana.tasks.create",
-    "asana.tasks.update",
-    "asana.assignees.read",
-    "asana.assignees.write",
-    "asana.sections.read",
-    "asana.sections.move_tasks",
-    "asana.custom_fields.read",
-    "asana.custom_field_values.write",
-    "asana.attachments.read",
-    "asana.attachments.write",
-    "asana.stories.read",
-    "asana.comments.write",
-    "asana.events.receive",
-  ]),
-  "hubspot-crm": new Set([
-    "crm.contacts.read",
-    "crm.contacts.write",
-    "crm.companies.read",
-    "crm.companies.write",
-    "crm.deals.read",
-    "crm.deals.write",
-    "crm.owners.read",
-    "crm.pipelines.read",
-    "crm.notes.write",
-    "crm.associations.write",
-  ]),
-};
-
-const integrationEventFunctionSchema = z
-  .object({
-    function: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
-  })
-  .strict();
-
-export const integrationEventsSchema = z
-  .object({
-    message: integrationEventFunctionSchema.optional(),
-    function: z
-      .string()
-      .regex(/^[a-z][a-z0-9-]{0,62}$/)
-      .optional(),
-  })
-  .strict();
-
-export const integrationDefinitionSchema = z
-  .object({
-    provider: integrationProviderSchema,
-    account: integrationAccountSchema,
-    cardinality: integrationCardinalitySchema.default("one"),
-    capabilities: z
-      .array(integrationCapabilitySchema)
-      .min(1)
-      .max(20)
-      .refine(
-        (capabilities) => new Set(capabilities).size === capabilities.length,
-        "integration capabilities must be unique",
-      ),
-    events: integrationEventsSchema.optional(),
-  })
-  .strict()
-  .superRefine((definition, context) => {
-    const allowed = capabilitiesForProvider[definition.provider];
-    definition.capabilities.forEach((capability, index) => {
-      if (!allowed.has(capability)) {
-        context.addIssue({
-          code: "custom",
-          path: ["capabilities", index],
-          message: `${capability} is not supported by ${definition.provider}`,
-        });
-      }
-    });
-    if (
-      definition.provider === "wise-balance-webhook" &&
-      definition.account !== "app"
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["account"],
-        message: "wise-balance-webhook integrations must use the app account",
-      });
-    }
-    if (
-      [
-        "slack",
-        "telegram",
-        "hubspot-crm",
-        "google-analytics",
-        "google-search-console",
-        "google-ads",
-      ].includes(definition.provider)
-    ) {
-      if (definition.account !== "app") {
-        context.addIssue({
-          code: "custom",
-          path: ["account"],
-          message: `${definition.provider} integrations must use the app account`,
-        });
-      }
-    }
-    if (
-      definition.provider === "hubspot-crm" &&
-      definition.capabilities.includes("crm.associations.write") &&
-      !definition.capabilities.some((capability) =>
-        [
-          "crm.contacts.write",
-          "crm.companies.write",
-          "crm.deals.write",
-          "crm.notes.write",
-        ].includes(capability),
-      )
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["capabilities"],
-        message:
-          "crm.associations.write requires at least one CRM record write capability",
-      });
-    }
-    if (["slack", "telegram"].includes(definition.provider)) {
-      const receivesMessages = definition.capabilities.includes(
-        definition.provider === "slack"
-          ? "slack.messages.receive"
-          : "telegram.messages.receive",
-      );
-      if (receivesMessages && !definition.events?.message) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", "message"],
-          message: `${definition.provider}.messages.receive requires an events.message system Function`,
-        });
-      } else if (!receivesMessages && definition.events?.message) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", "message"],
-          message: `events.message requires the ${definition.provider}.messages.receive capability`,
-        });
-      }
-      if (definition.events?.function) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", "function"],
-          message: "events.function is supported only by asana integrations",
-        });
-      }
-    } else if (definition.provider === "asana") {
-      const receivesAsanaEvents = definition.capabilities.includes(
-        "asana.events.receive",
-      );
-      const taskStateMutation = [
-        "asana.tasks.create",
-        "asana.tasks.update",
-        "asana.assignees.write",
-        "asana.sections.move_tasks",
-        "asana.custom_field_values.write",
-      ].find((capability) =>
-        definition.capabilities.includes(
-          capability as z.infer<typeof integrationCapabilitySchema>,
-        ),
-      );
-      if (
-        taskStateMutation &&
-        !definition.capabilities.includes("asana.tasks.read")
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["capabilities"],
-          message: `${taskStateMutation} requires asana.tasks.read because task mutations return normalized current task state`,
-        });
-      }
-      if (receivesAsanaEvents && definition.account !== "app") {
-        context.addIssue({
-          code: "custom",
-          path: ["account"],
-          message: "asana event integrations must use the app account",
-        });
-      }
-      if (receivesAsanaEvents && !definition.events?.function) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", "function"],
-          message: "asana.events.receive requires an events.function handler",
-        });
-      }
-      if (definition.events?.function && !receivesAsanaEvents) {
-        context.addIssue({
-          code: "custom",
-          path: ["capabilities"],
-          message: "events.function requires asana.events.receive",
-        });
-      }
-      if (
-        receivesAsanaEvents &&
-        !definition.capabilities.includes("asana.tasks.read")
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["capabilities"],
-          message:
-            "asana.events.receive requires asana.tasks.read so OpenCloud can deliver current task state",
-        });
-      }
-      if (definition.events?.message) {
-        context.addIssue({
-          code: "custom",
-          path: ["events", "message"],
-          message:
-            "events.message is supported only by slack and telegram integrations",
-        });
-      }
-    } else if (definition.events) {
-      context.addIssue({
-        code: "custom",
-        path: ["events"],
-        message:
-          "integration events are currently supported only by slack, telegram, and asana",
-      });
-    }
-  });
-
 const integrationNameSchema = z
   .string()
   .min(1)
@@ -439,12 +193,6 @@ export const emailAddressSchema = z
       .optional(),
   })
   .strict();
-
-export const customMetricNameSchema = z
-  .string()
-  .min(1)
-  .max(63)
-  .regex(/^[a-z][a-z0-9_]*$/, "metric names must use lowercase snake_case");
 
 export const customMetricDimensionNameSchema = z
   .string()
@@ -488,39 +236,6 @@ export const customMetricDefinitionSchema = z
         message: "custom metrics may declare at most three dimensions",
       })
       .default({}),
-  })
-  .strict();
-
-const alertRuleIdSchema = z
-  .string()
-  .min(1)
-  .max(63)
-  .regex(/^[a-z][a-z0-9-]*$/);
-
-const alertAggregationSchema = z.enum([
-  "sum",
-  "rate",
-  "latest",
-  "min",
-  "max",
-  "avg",
-]);
-const alertOperatorSchema = z.enum(["gt", "gte", "lt", "lte", "eq"]);
-const alertWindowSchema = z.enum(["5m", "15m", "1h", "24h"]);
-const alertSeveritySchema = z.enum(["info", "warning", "critical"]);
-
-export const manifestAlertRuleSchema = z
-  .object({
-    id: alertRuleIdSchema,
-    name: z.string().trim().min(1).max(120),
-    metric: customMetricNameSchema,
-    aggregation: alertAggregationSchema,
-    operator: alertOperatorSchema,
-    threshold: z.number().finite().min(-1e15).max(1e15),
-    window: alertWindowSchema,
-    minimumSamples: z.number().int().min(1).max(100_000).default(1),
-    severity: alertSeveritySchema.default("warning"),
-    enabled: z.boolean().default(true),
   })
   .strict();
 
@@ -576,7 +291,7 @@ const openCloudManifestFields = {
     .strict()
     .optional(),
   health: z
-    .object({ path: z.string().startsWith("/").max(200).default("/") })
+    .object({ path: appHealthPath.default("/") })
     .strict()
     .default({ path: "/" }),
   secrets: z
@@ -614,6 +329,7 @@ export const openCloudManifestV3Schema = z
     schemaVersion: z.literal(3),
     appId: z.uuid(),
     ...openCloudManifestFields,
+    routes: appRoutesSchema.optional(),
   })
   .strict();
 
@@ -623,6 +339,32 @@ export const openCloudManifestSchema = z
     openCloudManifestV3Schema,
   ])
   .superRefine((manifest, context) => {
+    if (manifest.schemaVersion === 3 && manifest.routes) {
+      manifest.routes.forEach((route, index) => {
+        if (!("function" in route)) return;
+        const target = manifest.functions.find((definition) => definition.name === route.function);
+        if (!target || target.access === "system") {
+          context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Route must reference a declared user or public Function" });
+        }
+        if (manifest.runtime.sdk.version !== "2.3.0") {
+          context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Function routes require runtime SDK version 2.3.0 or later" });
+        }
+        try {
+          const healthUrl = new URL(manifest.health.path, "https://opencloud-health.invalid");
+          const health = parseAppRouteRequest(`${healthUrl.pathname}${healthUrl.search}`, "GET");
+          const matched = matchAppRoute(compileAppRoutes([route]), health);
+          if (matched.kind === "matched" || matched.kind === "method-not-allowed") {
+            context.addIssue({ code: "custom", path: ["routes", index, "path"], message: "Function routes must not match the manifest health path" });
+          }
+        } catch (error) {
+          if (!(error instanceof AppRouteError)) throw error;
+          // Old health paths keep their accepted normalization contract. New
+          // route patterns have already received indexed schema validation.
+          if (error.code === "INVALID_ROUTE_REQUEST") return;
+          context.addIssue({ code: "custom", path: ["routes", index, ...error.path], message: error.message });
+        }
+      });
+    }
     if (
       manifest.notifications?.webPush &&
       manifest.runtime.sdk.version === "2.0.0"

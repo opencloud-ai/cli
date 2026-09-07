@@ -19,6 +19,7 @@ await build({
   legalComments: "none",
   external: ["@napi-rs/keyring"],
   alias: {
+    "@opencloud/contracts/control-plane": path.join(root, "vendor/contracts/src/control-plane.ts"),
     "@opencloud/contracts": path.join(
       root,
       "vendor",

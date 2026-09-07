@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.8.2` in
+OpenCloud application skills pin an exact CLI release. To install `v3.9.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.8.2"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.8.2.tgz"
+OPENCLOUD_CLI_VERSION="v3.9.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.9.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -368,6 +368,50 @@ app-declared interaction contract on the server:
 CLI v3 has one release-verification command. The former local smoke, Chromium,
 session, and verification-contract commands were removed so agents cannot
 mistake a partial diagnostic for the authoritative gate.
+
+## Custom domains and routes
+
+Owners can configure one hostname per app, including an apex domain such as
+`example.com` or a subdomain such as `app.example.com`:
+
+```bash
+opencloud app domain add APP_ID example.com
+opencloud app domain get APP_ID
+opencloud app domain check APP_ID
+opencloud app domain remove APP_ID
+```
+
+Add returns the installation's exact TXT ownership challenge and traffic DNS
+instructions. Configure those records, then run check to refresh verification and
+HTTPS status. Cloudflare proxying may be enabled from the start. Each hostname
+must be configured separately. Mutations use the normal persistent retry journal;
+`--idempotency-key` overrides its stable key when needed. Read with get to inspect
+status without starting a new check.
+
+Schema 3 apps can declare routes alongside Functions and frontend configuration:
+
+```yaml
+routes:
+  - id: favicon
+    path: /favicon.png
+    asset: icon.png
+    access: public
+  - id: apple
+    path: /apple-icon.png
+    asset: icon.png
+    access: public
+  - id: pixel
+    path: /pixel{.:ext}
+    function: pixel
+    methods: [GET, HEAD]
+```
+
+Assets are regular files relative to `frontend.directory`. Public asset access
+allows these icons to load for a private app without exposing other app content.
+Function routes require SDK 2.3. Path parameters use `:name`, optional groups use
+braces (`/users{/:id}`), and named wildcards use `*path`. Query strings remain
+request data: `/pixel.jpg?param1=test123` matches `/pixel.jpg`; do not put the query
+string in the route pattern. Existing schema 2 artifacts remain readable.
 
 ## Develop
 

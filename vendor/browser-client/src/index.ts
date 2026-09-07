@@ -6,7 +6,7 @@
  * HTTP responses deliberately stay behind this module.
  */
 
-export const OPEN_CLOUD_SDK_VERSION = "2.2.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.3.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 export type OpenCloudVisibility = "public" | "private";
@@ -2181,6 +2181,7 @@ class RealtimeChannel {
       const value = { event: message.payload.event, payload: message.payload.payload };
       for (const handler of this.handlers) handler(value);
     }
+    if (message.event === "phx_close" || message.event === "phx_error") socket.close();
   }
 
   private scheduleReconnect(): void {

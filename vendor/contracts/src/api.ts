@@ -1,94 +1,62 @@
 import { z } from "zod";
+import {
+  alertAggregationSchema,
+  alertOperatorSchema,
+  alertRuleIdSchema,
+  alertSeveritySchema,
+  alertWindowSchema,
+  appAccessTokenDeliverySchema,
+  appAiCredentialSourceSchema,
+  appSlugSchema,
+  appStateSchema,
+  appVisibilitySchema,
+  assignAppIdentityRequestSchema,
+  assignAppIdentityLegacyRequestSchema,
+  assignAppIdentityActivationRequestSchema,
+  resolveAppIdentityActivationRequestSchema,
+  resolveAppIdentityActivationResponseSchema,
+  completeAgentOnboardingRequestSchema,
+  createAppAccessTokenRequestSchema,
+  createAppRequestSchema,
+  createCredentialRequestSchema,
+  createPendingAppRequestSchema,
+  deploymentStateSchema,
+  operationStateSchema,
+  operatorCreateAppRequestSchema,
+  requestAppAccessTokenApprovalSchema,
+  startAgentOnboardingRequestSchema,
+  upsertAlertRuleRequestSchema,
+} from "./api-core.js";
 import { openCloudManifestSchema } from "./manifest.js";
 
-export const appVisibilitySchema = z.enum(["public", "private"]);
-const appSlugSchema = z
-  .string()
-  .min(3)
-  .max(63)
-  .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
-  .refine((slug) => !["api", "auth", "www"].includes(slug), {
-    message: "slug is reserved by OpenCloud",
-  });
-export const appStateSchema = z.enum([
-  "draft",
-  "provisioning",
-  "deploying",
-  "active",
-  "failed",
-  "rolling_back",
-  "archived",
-  "deleting",
-  "deleted",
-]);
-export const deploymentStateSchema = z.enum([
-  "queued",
-  "validating",
-  "deploying",
-  "active",
-  "superseded",
-  "failed",
-  "rolled_back",
-  "deleted",
-]);
-export const operationStateSchema = z.enum([
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
-
-export const createAppRequestSchema = z.object({
-  name: z.string().min(1).max(120),
-  visibility: appVisibilitySchema.default("private"),
-});
-
-export const operatorCreateAppRequestSchema = createAppRequestSchema.extend({
-  slug: appSlugSchema.optional(),
-  ownerUserId: z.uuid().optional(),
-});
-
-export const createCredentialRequestSchema = z.object({
-  name: z.string().min(1).max(120),
-  expiresInHours: z.coerce.number().int().min(1).max(168).default(24),
-  scopes: z
-    .array(
-      z.enum([
-        "app:read",
-        "app:deploy",
-        "app:configure",
-        "app:observe",
-        "app:rollback",
-        "app:restart",
-      ]),
-    )
-    .min(1),
-});
-
-export const appAccessTokenDeliverySchema = z.enum(["response", "reveal_link"]);
-
-export const createAppAccessTokenRequestSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  expiresInDays: z.coerce.number().int().min(1).max(365).default(90),
-  delivery: appAccessTokenDeliverySchema.default("response"),
-});
-
-export const requestAppAccessTokenApprovalSchema =
-  createAppAccessTokenRequestSchema.pick({
-    name: true,
-    expiresInDays: true,
-  });
-
-export const startAgentOnboardingRequestSchema = z.object({
-  email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
-  projectName: z.string().trim().min(1).max(120),
-  visibility: appVisibilitySchema.default("private"),
-});
-
-export const completeAgentOnboardingRequestSchema = z.object({
-  completionToken: z.string().min(32).max(512),
-});
+export {
+  alertAggregationSchema,
+  alertOperatorSchema,
+  alertRuleIdSchema,
+  alertSeveritySchema,
+  alertWindowSchema,
+  appAccessTokenDeliverySchema,
+  appAiCredentialSourceSchema,
+  appSlugSchema,
+  appStateSchema,
+  appVisibilitySchema,
+  assignAppIdentityRequestSchema,
+  assignAppIdentityLegacyRequestSchema,
+  assignAppIdentityActivationRequestSchema,
+  resolveAppIdentityActivationRequestSchema,
+  resolveAppIdentityActivationResponseSchema,
+  completeAgentOnboardingRequestSchema,
+  createAppAccessTokenRequestSchema,
+  createAppRequestSchema,
+  createCredentialRequestSchema,
+  createPendingAppRequestSchema,
+  deploymentStateSchema,
+  operationStateSchema,
+  operatorCreateAppRequestSchema,
+  requestAppAccessTokenApprovalSchema,
+  startAgentOnboardingRequestSchema,
+  upsertAlertRuleRequestSchema,
+} from "./api-core.js";
 
 export const customMetricDimensionsSchema = z.record(
   z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
@@ -115,23 +83,6 @@ export const ingestCustomMetricsRequestSchema = z.object({
   measurements: z.array(customMetricMeasurementSchema).min(1).max(20),
 });
 
-export const alertRuleIdSchema = z
-  .string()
-  .min(1)
-  .max(63)
-  .regex(/^[a-z][a-z0-9-]*$/);
-
-export const alertAggregationSchema = z.enum([
-  "sum",
-  "rate",
-  "latest",
-  "min",
-  "max",
-  "avg",
-]);
-export const alertOperatorSchema = z.enum(["gt", "gte", "lt", "lte", "eq"]);
-export const alertWindowSchema = z.enum(["5m", "15m", "1h", "24h"]);
-export const alertSeveritySchema = z.enum(["info", "warning", "critical"]);
 export const alertStateSchema = z.enum([
   "ok",
   "firing",
@@ -140,34 +91,40 @@ export const alertStateSchema = z.enum([
   "invalid",
 ]);
 
-export const upsertAlertRuleRequestSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  metric: z
-    .string()
-    .min(1)
-    .max(63)
-    .regex(/^[a-z][a-z0-9_]*$/),
-  aggregation: alertAggregationSchema,
-  operator: alertOperatorSchema,
-  threshold: z.number().finite().min(-1e15).max(1e15),
-  window: alertWindowSchema,
-  minimumSamples: z.number().int().min(1).max(100_000).default(1),
-  severity: alertSeveritySchema.default("warning"),
-  enabled: z.boolean().default(true),
-});
-
 export const deploymentSubmissionSchema = z.object({
   manifest: openCloudManifestSchema,
   artifactSha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
 export type AppVisibility = z.infer<typeof appVisibilitySchema>;
+export type AppAiCredentialSource = z.infer<typeof appAiCredentialSourceSchema>;
 export type AppState = z.infer<typeof appStateSchema>;
 export type DeploymentState = z.infer<typeof deploymentStateSchema>;
 export type OperationState = z.infer<typeof operationStateSchema>;
 export type CreateAppRequest = z.infer<typeof createAppRequestSchema>;
+export type CreatePendingAppRequest = z.infer<
+  typeof createPendingAppRequestSchema
+>;
+export type AssignAppIdentityRequest = z.infer<
+  typeof assignAppIdentityRequestSchema
+>;
+export type AssignAppIdentityLegacyRequest = z.infer<
+  typeof assignAppIdentityLegacyRequestSchema
+>;
+export type AssignAppIdentityActivationRequest = z.infer<
+  typeof assignAppIdentityActivationRequestSchema
+>;
+export type ResolveAppIdentityActivationRequest = z.infer<
+  typeof resolveAppIdentityActivationRequestSchema
+>;
+export type ResolveAppIdentityActivationResponse = z.infer<
+  typeof resolveAppIdentityActivationResponseSchema
+>;
 export type CreateCredentialRequest = z.infer<
   typeof createCredentialRequestSchema
+>;
+export type CreateAppAccessTokenRequest = z.infer<
+  typeof createAppAccessTokenRequestSchema
 >;
 export type StartAgentOnboardingRequest = z.infer<
   typeof startAgentOnboardingRequestSchema
@@ -186,14 +143,13 @@ export type AlertOperator = z.infer<typeof alertOperatorSchema>;
 export type AlertWindow = z.infer<typeof alertWindowSchema>;
 export type AlertSeverity = z.infer<typeof alertSeveritySchema>;
 export type AlertState = z.infer<typeof alertStateSchema>;
+export type AlertRuleOrigin = "manifest" | "operational_override";
 export type UpsertAlertRuleRequest = z.infer<
   typeof upsertAlertRuleRequestSchema
 >;
 
 export type AgentOnboardingState =
-  | "awaiting_email_verification"
-  | "provisional_ready"
-  | "ready";
+  "awaiting_email_verification" | "provisional_ready" | "ready";
 
 export interface AgentOnboardingResponse {
   onboardingId: string;
@@ -218,12 +174,14 @@ export interface AgentOnboardingResponse {
 
 export interface AppRecord {
   id: string;
-  name: string;
-  slug: string;
-  appUrl: string;
+  identityStatus: "pending" | "assigned";
+  name: string | null;
+  slug: string | null;
+  appUrl: string | null;
   authUrl: string;
   apiUrl: string;
   visibility: AppVisibility;
+  aiCredentialSource: AppAiCredentialSource;
   state: AppState;
   backupSchedule?: "none" | "daily" | "weekly";
   ownerUserId: string;
@@ -231,6 +189,22 @@ export interface AppRecord {
   activeDeploymentId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AppDeploymentTruth {
+  schemaVersion: 1;
+  appId: string;
+  appState: AppState;
+  canonicalUrl: string | null;
+  activeDeployment: {
+    id: string;
+    version: string;
+    artifactSha256: string;
+    state: DeploymentState;
+    activatedAt: string | null;
+    activationOperationId: string | null;
+    activatedByAgentRootRunId: string | null;
+  } | null;
 }
 
 export interface CronInvocationRecord {
@@ -247,12 +221,14 @@ export interface CronInvocationRecord {
   error: Record<string, unknown> | null;
 }
 
+export interface CronInvocationsPage {
+  asOf: string;
+  invocations: CronInvocationRecord[];
+  nextCursor: string | null;
+}
+
 export type BackgroundJobState =
-  | "queued"
-  | "running"
-  | "retry_wait"
-  | "succeeded"
-  | "dead_lettered";
+  "queued" | "running" | "retry_wait" | "succeeded" | "dead_lettered";
 
 export interface BackgroundJobRecord {
   id: string;
@@ -318,6 +294,12 @@ export interface DeploymentRecord {
   activatedAt: string | null;
 }
 
+export interface DeploymentsPage {
+  asOf: string;
+  deployments: DeploymentRecord[];
+  nextCursor: string | null;
+}
+
 export interface OperationStep {
   id: string;
   name: string;
@@ -344,6 +326,26 @@ export interface OperationRecord {
   steps?: OperationStep[];
 }
 
+export interface OperationsPage {
+  asOf: string;
+  operations: OperationRecord[];
+  nextCursor: string | null;
+}
+
+export interface AppLogEntry {
+  id: string;
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  surface: string;
+  message: string;
+  requestId: string | null;
+}
+
+export interface AppLogsPage {
+  entries: AppLogEntry[];
+  nextCursor: string | null;
+}
+
 export interface ErrorResponse {
   statusCode: number;
   code: string;
@@ -361,8 +363,32 @@ export interface CustomMetricIngestResponse {
 export interface AlertRuleRecord extends UpsertAlertRuleRequest {
   id: string;
   appId: string;
+  origin: AlertRuleOrigin;
   createdAt: string;
   updatedAt: string;
+}
+
+export type AlertFireDeliveryState = "pending" | "retry_wait" | "delivered";
+
+export interface AlertFireDeliveryRecord {
+  fireId: string;
+  state: AlertFireDeliveryState;
+  attempts: number;
+  observedAt: string;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  deliveredAt: string | null;
+  lastError: string | null;
+  incidentId: string | null;
+  runId: string | null;
+}
+
+export interface AlertRuleStatusRecord extends AlertRuleRecord {
+  state: Exclude<AlertState, "resolved">;
+  samples: number;
+  lastEvaluatedAt: string | null;
+  lastTransitionAt: string | null;
+  delivery: AlertFireDeliveryRecord | null;
 }
 
 export interface AgentFeedSignal {

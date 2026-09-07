@@ -45,7 +45,6 @@ interface AuthorManifest {
   queues?: unknown[];
   cron?: unknown[];
   email?: unknown;
-  notifications?: unknown;
   health?: unknown;
   secrets?: Record<string, unknown>;
   integrations?: Record<string, unknown>;
@@ -82,19 +81,6 @@ export interface BundleOptions {
   version?: string;
 }
 
-export function serializeBundleManifest(manifest: OpenCloudManifest): string {
-  const archiveManifest: Record<string, unknown> = { ...manifest };
-  // Queue-free schema-2 apps keep the archive shape accepted by older
-  // platform releases while declared queues remain canonical bundle input.
-  if (manifest.queues.length === 0) delete archiveManifest.queues;
-  // Integration-free apps likewise retain the archive shape accepted by
-  // platform releases that predate declarative provider bindings.
-  if (Object.keys(manifest.integrations).length === 0) {
-    delete archiveManifest.integrations;
-  }
-  return `${JSON.stringify(archiveManifest, null, 2)}\n`;
-}
-
 interface BundleSelection {
   files: Map<string, string>;
   directories: Set<string>;
@@ -129,7 +115,7 @@ export async function buildBundle(
   const raw = (
     manifestFile.endsWith(".json") ? JSON.parse(source) : YAML.parse(source)
   ) as AuthorManifest;
-  raw.schemaVersion ??= raw.version || options.version ? 2 : 3;
+  raw.schemaVersion ??= (raw.version || options.version) ? 2 : 3;
   if (raw.schemaVersion === 3 && raw.version !== undefined) {
     throw new Error(
       "Manifest schema 3 removes the top-level version; OpenCloud assigns the release version during promotion",
@@ -176,6 +162,7 @@ export async function buildBundle(
   }
   const manifest = parseManifest(raw);
   const selection = await selectBundleFiles(root, manifest, manifestFile);
+  await validateAppRouteAssets(root, manifest);
   const e2eTest = await selectE2eTest(root, selection, manifestFile);
   if (e2eTest) {
     assertE2eTestOutsideFrontend(manifest.frontend.directory);
@@ -213,7 +200,7 @@ export async function buildBundle(
     }
     await writeFile(
       path.join(staging, "opencloud.json"),
-      serializeBundleManifest(manifest),
+      serializeArchiveManifest(manifest),
       { flag: "wx", mode: 0o644 },
     );
 
@@ -251,7 +238,45 @@ export async function buildBundle(
   }
 }
 
-export function assertE2eTestOutsideFrontend(frontendDirectory: string): void {
+export async function validateAppRouteAssets(
+  root: string,
+  manifest: OpenCloudManifest,
+): Promise<void> {
+  const frontend = resolveBundlePath(
+    root,
+    manifest.frontend.directory,
+    "Frontend directory",
+  );
+  for (const route of manifest.schemaVersion === 3 ? manifest.routes ?? [] : []) {
+    if (!("asset" in route)) continue;
+    const label = `Route ${route.id} asset ${route.asset}`;
+    const target = resolveBundlePath(frontend, route.asset, label);
+    assertNotLocalMetadataPath(root, target, label);
+    assertNotAuthorManifestInput(root, target, label);
+    await assertNoSymlinkComponents(root, target, label);
+    await assertFile(target, label);
+  }
+}
+
+function serializeArchiveManifest(manifest: OpenCloudManifest): string {
+  const serialized: Record<string, unknown> = { ...manifest };
+  // CLI v3.1.0 predates integrations. Preserve its canonical archive shape
+  // for apps that do not declare any so server-side revalidation does not
+  // change an otherwise identical bundle digest.
+  if (Object.keys(manifest.integrations).length === 0) {
+    delete serialized.integrations;
+  }
+  // Background queues were added after the original schema 2 archive shape.
+  // Keep queue-free apps byte-compatible with older public CLI releases.
+  if (manifest.queues.length === 0) {
+    delete serialized.queues;
+  }
+  return `${JSON.stringify(serialized, null, 2)}\n`;
+}
+
+export function assertE2eTestOutsideFrontend(
+  frontendDirectory: string,
+): void {
   const relative = path.posix.relative(
     frontendDirectory,
     OPEN_CLOUD_E2E_TEST_PATH,
@@ -477,7 +502,7 @@ async function inspectFunctionEntrypoints(
       /["'`]\/rest\/v1\//.test(content)
     ) {
       throw new Error(
-        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, ai, email, notifications, jobs, job, integrations, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
+        `Function entrypoint ${definition.entrypoint} uses unsupported direct platform backend access. Use defineFunction from @opencloud/server and its data, files, ai, email, jobs, job, integrations, secrets, log, requestId, and environment context instead of guessed SUPABASE_* or backend URL environment variables and direct /rest/v1 fetches.`,
       );
     }
     const usesServerBoundary =
@@ -512,7 +537,7 @@ async function findFrontendSdkWarnings(
       /fetch\s*\(\s*["'`]\/(?:rest|storage)\/v1(?:\/|["'`])/.test(content)
     ) {
       throw new Error(
-        `Frontend source ${relative} uses a removed or raw OpenCloud interface. Import { opencloud } from "/_opencloud/sdk.js" and use opencloud.data, opencloud.files, opencloud.functions, opencloud.notifications, and opencloud.realtime instead of client construction, raw REST or Storage requests, buckets, or object paths.`,
+        `Frontend source ${relative} uses a removed or raw OpenCloud interface. Import { opencloud } from "/_opencloud/sdk.js" and use opencloud.data, opencloud.files, opencloud.functions, and opencloud.realtime instead of client construction, raw REST or Storage requests, buckets, or object paths.`,
       );
     }
     if (

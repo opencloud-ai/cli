@@ -33,7 +33,7 @@ const runtimeConfig = {
   environment: "production",
   sdk: {
     package: "@opencloud/js",
-    version: "2.2.0",
+    version: "2.3.0",
     module: "/_opencloud/sdk.js",
     types: "/_opencloud/sdk.d.ts",
     docs: "https://docs.opencloud.ai/sdk/javascript/",
@@ -156,6 +156,8 @@ class FakeWebSocket {
     });
   }
 
+  serverEvent(event: string): void { this.emit("message", { data: JSON.stringify({ event }) }); }
+
   close(): void {
     if (this.readyState === 3) return;
     this.readyState = 3;
@@ -184,7 +186,7 @@ afterEach(() => {
 
 describe("@opencloud/js v2", () => {
   it("exports one stable singleton contract without legacy factories or raw namespaces", () => {
-    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.2.0");
+    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.3.0");
     expect("OPEN_CLOUD_JS_VERSION" in sdk).toBe(false);
     expect(opencloud).toMatchObject({
       app: { info: expect.any(Function) },
@@ -845,6 +847,25 @@ describe("@opencloud/js v2", () => {
     expect(messages).toEqual([{ event: "changed", payload: { id: "task-2" } }]);
     unsubscribe();
     expect(socket.readyState).toBe(3);
+  });
+
+  it.each(["phx_close", "phx_error"])("reconnects a custom-origin channel after %s and refreshes only that origin", async event => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const customOrigin = "https://customer.example";
+    vi.stubGlobal("location", { origin: customOrigin });
+    const fetchMock = standardFetch();
+    vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+    const unsubscribe = await opencloud.realtime.subscribe("tasks", () => {});
+    const first = FakeWebSocket.instances[0]!;
+    first.serverEvent(event);
+    expect(first.readyState).toBe(3);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(FakeWebSocket.instances[1]!.url).toBe("wss://customer.example/realtime/v1/websocket?vsn=1.0.0");
+    const calls = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+    expect(calls.every(url => url.origin === customOrigin)).toBe(true);
+    expect(calls.filter(url => url.pathname === "/_opencloud/session")).toHaveLength(2);
+    unsubscribe();
   });
 
   it("fails locally when a declared capability is unavailable", async () => {

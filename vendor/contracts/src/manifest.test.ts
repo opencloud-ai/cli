@@ -28,6 +28,50 @@ describe("OpenCloud manifest", () => {
     expect(parseManifest(valid)).not.toHaveProperty("files");
   });
 
+  it("keeps health checks on app-owned same-origin routes", () => {
+    expect(
+      parseManifest({
+        ...valid,
+        health: { path: "/functions/v1/health?deep=1" },
+      }).health,
+    ).toEqual({ path: "/functions/v1/health?deep=1" });
+
+    for (const path of [
+      "//attacker.test/health",
+      "/health#not-sent",
+      "/_opencloud",
+      "/_opencloud/sign-in",
+      "/health/../_opencloud/sign-in",
+      "/%5fopencloud/sign-in",
+      "/_opencloud%2fsign-in",
+      "/safe/%252e%252e/_opencloud/sign-in",
+    ]) {
+      expect(() => parseManifest({ ...valid, health: { path } })).toThrow(
+        /health path must be a same-origin app path/,
+      );
+    }
+  });
+
+  it("accepts a schema-3 manifest without an embedded deployment version", () => {
+    const { version: _legacyVersion, ...manifest } = valid;
+    const parsed = parseManifest({ ...manifest, schemaVersion: 3 });
+
+    expect(parsed.schemaVersion).toBe(3);
+    expect(parsed).not.toHaveProperty("version");
+  });
+
+  it("keeps schema 2 readable but rejects mixed version contracts", () => {
+    const { version: _legacyVersion, ...manifest } = valid;
+
+    expect(() => parseManifest(manifest)).toThrow();
+    expect(() =>
+      parseManifest({
+        ...valid,
+        schemaVersion: 3,
+      }),
+    ).toThrow(/Unrecognized key/);
+  });
+
   it("preserves the canonical shape when email is not declared", () => {
     const { email, ...withoutEmail } = valid;
     expect(email).toEqual({ addresses: [] });
@@ -64,7 +108,7 @@ describe("OpenCloud manifest", () => {
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, or 2\.2\.0/);
+      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, 2\.2\.0, or 2\.3\.0/);
     }
   });
 
@@ -639,7 +683,9 @@ describe("OpenCloud manifest", () => {
             },
           },
         }),
-      ).toThrow(new RegExp(`${provider} integrations must use the app account`));
+      ).toThrow(
+        new RegExp(`${provider} integrations must use the app account`),
+      );
     }
     expect(() =>
       parseManifest({
@@ -799,10 +845,7 @@ describe("OpenCloud manifest", () => {
           provider: "slack",
           account: "app",
           cardinality: "many",
-          capabilities: [
-            "slack.messages.send",
-            "slack.messages.receive",
-          ],
+          capabilities: ["slack.messages.send", "slack.messages.receive"],
           events: {
             message: { function: "receive-slack-message" },
           },
@@ -870,10 +913,7 @@ describe("OpenCloud manifest", () => {
         team_chat: {
           provider: "telegram",
           account: "app",
-          capabilities: [
-            "telegram.messages.send",
-            "telegram.messages.receive",
-          ],
+          capabilities: ["telegram.messages.send", "telegram.messages.receive"],
           events: {
             message: { function: "receive-telegram-message" },
           },
@@ -885,10 +925,7 @@ describe("OpenCloud manifest", () => {
       provider: "telegram",
       account: "app",
       cardinality: "one",
-      capabilities: [
-        "telegram.messages.send",
-        "telegram.messages.receive",
-      ],
+      capabilities: ["telegram.messages.send", "telegram.messages.receive"],
       events: {
         message: { function: "receive-telegram-message" },
       },

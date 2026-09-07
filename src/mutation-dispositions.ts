@@ -27,6 +27,21 @@ export interface MutationDispositionRecord {
  * call sites in the CLI entrypoint.
  */
 export const mutationDispositionRegistry = {
+  "opencloud app domain add": {
+    boundary: "exact_app",
+    recovery: "server_replay",
+    reason: "Domain ownership receipts replay the exact hostname claim using the retained idempotency key.",
+  },
+  "opencloud app domain check": {
+    boundary: "exact_app",
+    recovery: "server_replay",
+    reason: "Domain check receipts replay reconciliation scheduling without repeating the effect.",
+  },
+  "opencloud app domain remove": {
+    boundary: "exact_app",
+    recovery: "server_replay",
+    reason: "Domain removal receipts replay binding removal and cleanup status for the same key.",
+  },
   "opencloud app create": {
     boundary: "account_bootstrap",
     recovery: "bootstrap_explicit_server_replay",
