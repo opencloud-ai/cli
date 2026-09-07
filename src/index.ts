@@ -9,6 +9,7 @@ import {
   OPEN_CLOUD_FAVICON_DATA_URI,
   OPEN_CLOUD_LOGO_DATA_URI,
   appOperationsPageQuerySchema,
+  appDomainAddSchema,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
 import { ApiError, OpenCloudClient } from "./api-client.js";
@@ -85,7 +86,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.8.2";
+const CLI_VERSION = "3.9.0";
 
 const program = new Command()
   .name("opencloud")
@@ -977,11 +978,11 @@ async function persistOnboardingResponse(
   const { completionToken, credential, ...safe } = response;
   if (credential?.token && response.app) {
     await saveSession(file, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       state: "ready",
       apiUrl,
       appId: response.app.id,
-      appUrl: response.app.appUrl,
+      ...(response.app.appUrl ? { appUrl: response.app.appUrl } : {}),
       token: credential.token,
       credentialExpiresAt: credential.expiresAt,
     });
@@ -1354,6 +1355,46 @@ program
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
+
+const domain = app.command("domain").description("Manage the app's single custom apex domain or subdomain");
+
+domain.command("get").argument("<app-id>")
+  .description("Read domain setup and DNS instructions without starting checks")
+  .action(async (appId) => output(await client().call("getAppDomain", { appId })));
+
+domain.command("add").argument("<app-id>").argument("<hostname>")
+  .description("Claim one custom hostname and return TXT and traffic DNS instructions")
+  .option("--idempotency-key <key>", "override the journal's stable retry key")
+  .action(async (appId, hostname, options) => {
+    const body = appDomainAddSchema.parse({ hostname });
+    await outputReplayMutation({
+      commandId: "opencloud app domain add", appId,
+      safeScope: { appId }, safeRequest: body,
+      explicitIdempotencyKey: options.idempotencyKey,
+    }, (control, key) => control.call("addAppDomain", { appId, body }, { idempotencyKey: key }));
+  });
+
+domain.command("check").argument("<app-id>")
+  .description("Request an ownership, HTTPS and routing check; inspect current status")
+  .option("--idempotency-key <key>", "override the journal's stable retry key")
+  .action(async (appId, options) => {
+    await outputReplayMutation({
+      commandId: "opencloud app domain check", appId,
+      safeScope: { appId }, safeRequest: { action: "check-domain" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    }, (control, key) => control.call("checkAppDomain", { appId }, { idempotencyKey: key }));
+  });
+
+domain.command("remove").argument("<app-id>")
+  .description("Disconnect the custom domain and restore the canonical browser URL")
+  .option("--idempotency-key <key>", "override the journal's stable retry key")
+  .action(async (appId, options) => {
+    await outputReplayMutation({
+      commandId: "opencloud app domain remove", appId,
+      safeScope: { appId }, safeRequest: { action: "remove-domain" },
+      explicitIdempotencyKey: options.idempotencyKey,
+    }, (control, key) => control.call("removeAppDomain", { appId }, { idempotencyKey: key }));
+  });
 
 app
   .command("create")

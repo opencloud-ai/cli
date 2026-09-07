@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.9.0
+
+- Add `app domain get`, `add`, `check`, and `remove` with typed DNS/setup status
+  and the existing crash-safe, exact-app mutation journal. Support one apex or
+  subdomain per app with TXT verification and automatic HTTPS.
+- Bundle schema-3 static aliases and Function routes with named, optional and
+  wildcard parameters. Validate static targets and preserve route-free legacy
+  artifacts. Routed Functions use the paired SDK 2.3.0 HTTP context.
+- Refresh the required public contract, bundler and typed-client snapshots.
+
 ## 3.8.2
 
 - Let `app request` use the installation's `OPENCLOUD_PUBLIC_EDGE_HOST` route

@@ -1,21 +1,56 @@
 import { z } from "zod";
+import { appDomainAddSchema, appDomainSettingsSchema } from "./app-domains.js";
 import {
   alertAggregationSchema,
   alertOperatorSchema,
   alertRuleIdSchema,
   alertSeveritySchema,
   alertWindowSchema,
+  appAiCredentialSourceSchema,
   appStateSchema,
   appVisibilitySchema,
   completeAgentOnboardingRequestSchema,
+  createAppAccessTokenRequestSchema,
   createCredentialRequestSchema,
   operatorCreateAppRequestSchema,
   deploymentStateSchema,
   operationStateSchema,
-  requestAppAccessTokenApprovalSchema,
   startAgentOnboardingRequestSchema,
+  requestAppAccessTokenApprovalSchema,
   upsertAlertRuleRequestSchema,
-} from "./api.js";
+} from "./api-core.js";
+import {
+  accountIntegrationConnectionSchema,
+  aiAuthorizationSchema,
+  aiIntegrationOverviewSchema,
+  aiProviderConnectionSchema,
+  appAiAssignmentSchema,
+  appIntegrationBindingSchema,
+  appIntegrationsOutputSchema,
+  asanaProjectSchema,
+  bankAccountSummarySchema,
+  bankConnectionRequestSchema,
+  bankInstitutionSchema,
+  bindAppIntegrationRequestSchema,
+  createAiConnectionOutputSchema,
+  createAiConnectionRequestSchema,
+  dashboardIntegrationNameSchema,
+  googleAdsCustomerSchema,
+  googleAnalyticsPropertySchema,
+  googleCalendarResourceSchema,
+  googleSearchConsoleSiteSchema,
+  providerAuthorizationDestinationSchema,
+  providerOAuthRequestSchema,
+  slackChannelSchema,
+  telegramPairingDestinationSchema,
+  telegramPairingRequestSchema,
+  updateAiConnectionRequestSchema,
+  updateAppAiRequestSchema,
+} from "./dashboard-integrations.js";
+
+export * from "./dashboard-integrations.js";
+
+import { integrationDefinitionSchema } from "./integration-manifest.js";
 
 const uuid = z.uuid();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -32,6 +67,115 @@ const platformVersionOutput = z.object({
   }),
 });
 
+export const dashboardSessionProfileSchema = z.object({
+  email: z.email().nullable(),
+  displayName: z.string().max(160).nullable(),
+  avatarUrl: z.url().max(2_048).nullable(),
+});
+
+export const dashboardProfileUpdateSchema = z
+  .object({
+    displayName: z.string().trim().max(160),
+    email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
+    avatarUrl: z
+      .string()
+      .trim()
+      .max(2_048)
+      .refine((value) => {
+        if (!value) return true;
+        try {
+          return new URL(value).protocol === "https:";
+        } catch {
+          return false;
+        }
+      }, "Avatar must be an HTTPS URL"),
+  })
+  .strict();
+
+const dashboardPasswordValueSchema = z.string().min(8).max(72);
+
+export const dashboardPasswordUpdateSchema = z
+  .object({
+    password: dashboardPasswordValueSchema,
+    confirmPassword: dashboardPasswordValueSchema,
+  })
+  .strict()
+  .refine((value) => value.password === value.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"],
+  });
+
+export const accountMcpTokenLifetimeSchema = z.union([
+  z.literal(1),
+  z.literal(14),
+  z.literal(365),
+  z.literal("unlimited"),
+]);
+
+export const accountMcpTokenLifetimeOptionsSchema = z.tuple([
+  z.literal(1),
+  z.literal(14),
+  z.literal(365),
+  z.literal("unlimited"),
+]);
+
+export const accountMcpTokenCreateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    lifetimeDays: accountMcpTokenLifetimeSchema.default(365),
+  })
+  .strict();
+
+export const accountMcpTokenMetadataSchema = z.object({
+  id: uuid,
+  name: z.string().min(1).max(120),
+  prefix: z
+    .string()
+    .min(9)
+    .max(32)
+    .regex(/^oc_oauth_[A-Za-z0-9_-]+$/),
+  scopes: z.array(z.literal("mcp:tools")).length(1),
+  createdAt: z.iso.datetime({ offset: true }),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
+  lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
+  revokedAt: z.iso.datetime({ offset: true }).nullable(),
+});
+
+export const accountMcpTokensPageQuerySchema = z.object({
+  cursor: z.string().max(2_048).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+export const accountMcpTokensPageOutputSchema = z.object({
+  asOf: z.iso.datetime({ offset: true }),
+  mcpUrl: z.url(),
+  tokenLifetimeDays: z.literal(365),
+  tokenLifetimeOptions: accountMcpTokenLifetimeOptionsSchema,
+  tokens: z.array(accountMcpTokenMetadataSchema).max(100),
+  nextCursor: z.string().max(2_048).nullable(),
+});
+
+export type AccountMcpTokenMetadata = z.infer<
+  typeof accountMcpTokenMetadataSchema
+>;
+export type AccountMcpTokensPage = z.infer<
+  typeof accountMcpTokensPageOutputSchema
+>;
+
+
+const appIntegrationNameSchema = dashboardIntegrationNameSchema;
+const eligibleAppIntegrationConnectionSchema = z.object({
+  id: uuid,
+  accountLabel: z.string(),
+  status: z.literal("active"),
+  createdAt: z.string(),
+});
+const appIntegrationResourceSchema = z.object({
+  id: z.string().min(1).max(1_024),
+  label: z.string().min(1).max(160),
+  writable: z.boolean(),
+});
+
 const backupOutput = z.object({
   id: uuid,
   appId: uuid,
@@ -43,6 +187,35 @@ const backupOutput = z.object({
   immutableUntil: z.string().nullable(),
   createdAt: z.string(),
   completedAt: z.string().nullable(),
+});
+
+const appAccessPersonOutput = z.object({
+  userId: uuid,
+  email: z.email().nullable(),
+  displayName: z.string().max(160).nullable(),
+  role: z.enum(["owner", "builder", "app_user"]),
+  status: z
+    .enum(["pending_email_verification", "active", "expired_unverified"])
+    .nullable(),
+  createdAt: z.string(),
+});
+
+const appAccessPageQuery = z.object({
+  group: z.enum(["admins", "users"]).default("admins"),
+  cursor: z.string().max(2_048).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+const appAccessPageOutput = z.object({
+  appId: uuid,
+  group: z.enum(["admins", "users"]),
+  asOf: z.iso.datetime({ offset: true }),
+  people: z.array(appAccessPersonOutput).max(100),
+  counts: z.object({
+    admins: z.number().int().nonnegative(),
+    users: z.number().int().nonnegative(),
+  }),
+  nextCursor: z.string().max(2_048).nullable(),
 });
 
 const usageRollupOutput = z.object({
@@ -114,12 +287,14 @@ const visitorAnalyticsOutput = z.object({
 export const controlPlaneAppSchema = z
   .object({
     id: uuid,
-    name: z.string(),
-    slug: z.string(),
-    appUrl: z.url(),
+    identityStatus: z.enum(["pending", "assigned"]),
+    name: z.string().nullable(),
+    slug: z.string().nullable(),
+    appUrl: z.url().nullable(),
     authUrl: z.url(),
     apiUrl: z.url(),
     visibility: appVisibilitySchema,
+    aiCredentialSource: appAiCredentialSourceSchema.default("owner"),
     state: appStateSchema,
     backupSchedule: z.enum(["none", "daily", "weekly"]).optional(),
     ownerUserId: uuid,
@@ -129,6 +304,83 @@ export const controlPlaneAppSchema = z
     updatedAt: z.string(),
   })
   .passthrough();
+
+export const controlPlaneAppDeploymentTruthSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    appId: uuid,
+    appState: appStateSchema,
+    canonicalUrl: z.url().nullable(),
+    activeDeployment: z
+      .object({
+        id: uuid,
+        version: z.string(),
+        artifactSha256: sha256,
+        state: deploymentStateSchema,
+        activatedAt: z.string().nullable(),
+        activationOperationId: uuid.nullable(),
+        activatedByAgentRootRunId: uuid.nullable(),
+      })
+      .refine(
+        (deployment) =>
+          deployment.activatedByAgentRootRunId === null ||
+          deployment.activationOperationId !== null,
+        {
+          message: "Agent activation attribution requires an operation",
+          path: ["activatedByAgentRootRunId"],
+        },
+      )
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough();
+
+export const assignAppIdentityResponseSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    app: controlPlaneAppSchema,
+  })
+  .strict();
+export type AssignAppIdentityResponse = z.infer<
+  typeof assignAppIdentityResponseSchema
+>;
+
+export const appAccessTokenMetadataSchema = z.object({
+  id: uuid,
+  appId: uuid,
+  ownerUserId: uuid,
+  name: z.string(),
+  prefix: z.string(),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  lastUsedAt: z.string().nullable(),
+  revokedAt: z.string().nullable(),
+});
+
+const appAccessTokenPageQuery = z.object({
+  cursor: z.string().max(2_048).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+const appAccessTokenPageOutput = z.object({
+  appId: uuid,
+  asOf: z.iso.datetime({ offset: true }),
+  tokens: z.array(appAccessTokenMetadataSchema).max(100),
+  activeCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe("Current active-token count used for the owner capacity limit"),
+  maxActiveTokens: z.number().int().positive(),
+  nextCursor: z.string().max(2_048).nullable(),
+});
+
+const appAccessTokenCreationOutput = z.object({
+  token: appAccessTokenMetadataSchema,
+  accessToken: z.string().optional(),
+  revealUrl: z.url().optional(),
+  deliveryExpiresAt: z.string(),
+});
 
 export const controlPlaneOperationSchema = z
   .object({
@@ -407,11 +659,23 @@ export const injectDevEmailRequestSchema = z.object({
   from: syntheticEmailAddressSchema,
   fromName: z.string().min(1).max(120).optional(),
   subject: z.string().max(998).optional(),
-  text: z.string().max(512 * 1024).optional(),
-  html: z.string().max(512 * 1024).optional(),
+  text: z
+    .string()
+    .max(512 * 1024)
+    .optional(),
+  html: z
+    .string()
+    .max(512 * 1024)
+    .optional(),
   replyTo: syntheticEmailAddressSchema.optional(),
   headers: z
-    .array(z.string().min(1).max(2_000).regex(/^[^\r\n]+$/))
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(2_000)
+        .regex(/^[^\r\n]+$/),
+    )
     .max(100)
     .default([]),
   attachments: z
@@ -419,7 +683,10 @@ export const injectDevEmailRequestSchema = z.object({
       z.object({
         name: z.string().min(1).max(180),
         contentType: z.string().min(3).max(200),
-        contentBase64: z.string().min(1).max(512 * 1024),
+        contentBase64: z
+          .string()
+          .min(1)
+          .max(512 * 1024),
       }),
     )
     .max(10)
@@ -445,7 +712,10 @@ export const appEmailHistoryQuerySchema = z
   .object({
     cursor: z.string().max(512).optional(),
     limit: z.coerce.number().int().min(1).max(200).default(100),
-    alias: z.string().regex(/^[a-z][a-z0-9-]{0,29}$/).optional(),
+    alias: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,29}$/)
+      .optional(),
     direction: z.enum(["outbound", "inbound"]).optional(),
     from: z.iso.datetime({ offset: true }).optional(),
     to: z.iso.datetime({ offset: true }).optional(),
@@ -738,12 +1008,61 @@ const secretMetadataOutput = z
   })
   .passthrough();
 
+const secretMetadataPageQuery = z.object({
+  cursor: z.string().max(2_048).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+const secretMetadataPageOutput = z.object({
+  appId: uuid,
+  asOf: z.iso.datetime({ offset: true }),
+  activeDeploymentId: uuid.nullable(),
+  declarations: z
+    .array(
+      z.object({
+        name: secretName,
+        mode: z.enum(["generated", "required", "optional"]),
+        configured: z.boolean(),
+        updatedAt: z.string().nullable(),
+      }),
+    )
+    .max(100),
+  secrets: z.array(secretMetadataOutput.strip()).max(100),
+  nextCursor: z.string().max(2_048).nullable(),
+});
+
 const alertRuleOutput = upsertAlertRuleRequestSchema
   .extend({
     id: alertRuleIdSchema,
     appId: uuid,
+    origin: z.enum(["manifest", "operational_override"]),
     createdAt: z.string(),
     updatedAt: z.string(),
+  })
+  .passthrough();
+
+const alertFireDeliveryOutput = z
+  .object({
+    fireId: z.string().min(1).max(200),
+    state: z.enum(["pending", "retry_wait", "delivered"]),
+    attempts: z.number().int().nonnegative(),
+    observedAt: z.iso.datetime(),
+    lastAttemptAt: z.iso.datetime().nullable(),
+    nextAttemptAt: z.iso.datetime().nullable(),
+    deliveredAt: z.iso.datetime().nullable(),
+    lastError: z.string().max(500).nullable(),
+    incidentId: uuid.nullable(),
+    runId: uuid.nullable(),
+  })
+  .passthrough();
+
+const alertRuleStatusOutput = alertRuleOutput
+  .extend({
+    state: z.enum(["ok", "firing", "unknown", "invalid"]),
+    samples: z.number().int().nonnegative(),
+    lastEvaluatedAt: z.iso.datetime().nullable(),
+    lastTransitionAt: z.iso.datetime().nullable(),
+    delivery: alertFireDeliveryOutput.nullable(),
   })
   .passthrough();
 
@@ -754,6 +1073,39 @@ const metricSourceOutput = z.enum([
   "mixed",
   "none",
 ]);
+
+export const alertRuleDetailOutput = z
+  .object({
+    rule: alertRuleOutput,
+    metric: z
+      .object({
+        name: z.string(),
+        type: z.enum(["counter", "gauge"]),
+        unit: z.string().nullable(),
+        description: z.string().nullable(),
+      })
+      .nullable(),
+    evaluation: z.object({
+      state: z.enum(["ok", "firing", "unknown", "invalid"]),
+      value: z.number().nullable(),
+      samples: z.number().int().nonnegative(),
+      source: metricSourceOutput,
+      observedAt: z.iso.datetime(),
+      firstFiredAt: z.iso.datetime().nullable(),
+      resolvedAt: z.iso.datetime().nullable(),
+      lastEvaluatedAt: z.iso.datetime().nullable(),
+      lastTransitionAt: z.iso.datetime().nullable(),
+    }),
+    points: z.array(
+      z.object({
+        value: z.number(),
+        recordedAt: z.iso.datetime(),
+        source: z.enum(["browser", "authenticated", "function"]),
+      }),
+    ),
+    delivery: alertFireDeliveryOutput.nullable(),
+  })
+  .passthrough();
 
 const agentFeedSignalOutput = z
   .object({
@@ -775,12 +1127,7 @@ const agentFeedSignalOutput = z
   })
   .passthrough();
 
-const currentAlertStateOutput = z.enum([
-  "ok",
-  "firing",
-  "unknown",
-  "invalid",
-]);
+const currentAlertStateOutput = z.enum(["ok", "firing", "unknown", "invalid"]);
 
 const agentFeedAlertOutput = z
   .object({
@@ -898,6 +1245,86 @@ const cronInvocationOutput = z
   })
   .passthrough();
 
+export const cronInvocationsPageOutput = z.object({
+  asOf: z.string(),
+  invocations: z.array(cronInvocationOutput),
+  nextCursor: z.string().nullable(),
+});
+
+export const cursorPageQuerySchema = z.object({
+  cursor: z.string().max(2_048).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const deploymentsPageQuerySchema = cursorPageQuerySchema.extend({
+  state: deploymentStateSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+export const deploymentsPageOutput = z.object({
+  asOf: z.iso.datetime({ offset: true }),
+  deployments: z.array(controlPlaneDeploymentSchema),
+  nextCursor: z.string().nullable(),
+});
+
+export const operationTypeFilterSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .regex(/^[a-z][a-z0-9_.-]*$/);
+
+export const appOperationsPageQuerySchema = cursorPageQuerySchema.extend({
+  type: operationTypeFilterSchema.optional(),
+  state: operationStateSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+export const accountOperationsPageQuerySchema =
+  appOperationsPageQuerySchema.extend({ appId: uuid.optional() });
+
+export const appLogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
+
+export const appLogsPageRequestSchema = z
+  .object({
+    contains: z.string().max(200).optional(),
+    level: appLogLevelSchema.optional(),
+    surface: z.string().trim().min(1).max(200).optional(),
+    from: z.iso.datetime({ offset: true }),
+    to: z.iso.datetime({ offset: true }),
+    cursor: z.string().max(2_048).optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  })
+  .superRefine((value, context) => {
+    if (Date.parse(value.from) >= Date.parse(value.to)) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message: "log query to must be after from",
+      });
+    }
+  });
+
+export const appLogEntryOutput = z.object({
+  id: z.string().regex(/^[a-f0-9]{64}$/),
+  timestamp: z.string(),
+  level: appLogLevelSchema,
+  surface: z.string(),
+  message: z.string(),
+  requestId: z.string().nullable(),
+});
+
+export const appLogsPageOutput = z.object({
+  entries: z.array(appLogEntryOutput),
+  nextCursor: z.string().nullable(),
+});
+
+export const operationsPageOutput = z.object({
+  asOf: z.string(),
+  operations: z.array(controlPlaneOperationSchema),
+  nextCursor: z.string().nullable(),
+});
+
 export const backgroundJobStateSchema = z.enum([
   "queued",
   "running",
@@ -908,7 +1335,10 @@ export const backgroundJobStateSchema = z.enum([
 
 export const backgroundJobsQuerySchema = z
   .object({
-    queue: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/).optional(),
+    queue: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,62}$/)
+      .optional(),
     state: backgroundJobStateSchema.optional(),
     from: z.iso.datetime({ offset: true }).optional(),
     to: z.iso.datetime({ offset: true }).optional(),
@@ -976,7 +1406,60 @@ export const backgroundJobsPageOutput = z.object({
   nextCursor: z.string().nullable(),
 });
 
-export type ControlPlaneAuth = "none" | "bearer" | "user";
+export const productionDataColumnSchema = z.object({
+  name: z.string(),
+  dataType: z.string(),
+  nullable: z.boolean(),
+  hasDefault: z.boolean(),
+});
+
+export const productionDataTableSchema = z.object({
+  name: z.string(),
+  columns: z.array(productionDataColumnSchema),
+  primaryKey: z.array(z.string()),
+});
+
+export const productionDataMutationSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("create"),
+    values: jsonObject,
+  }),
+  z.object({
+    action: z.literal("createMany"),
+    values: z.array(jsonObject).min(1).max(100),
+  }),
+  z.object({
+    action: z.literal("updateById"),
+    id: z.string().min(1).max(512),
+    values: jsonObject,
+  }),
+  z.object({
+    action: z.literal("deleteById"),
+    id: z.string().min(1).max(512),
+  }),
+]);
+
+export const productionFunctionInvocationSchema = z.object({
+  input: jsonObject.default({}),
+});
+
+export const productionFileSchema = z.object({
+  id: uuid,
+  name: z.string(),
+  contentType: z.string(),
+  size: z.number().int().nonnegative(),
+  access: z.enum(["user", "app"]),
+  ownerUserId: uuid.nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export const productionFilesPageSchema = z.object({
+  files: z.array(productionFileSchema),
+  nextCursor: z.string().nullable(),
+});
+
+export type ControlPlaneAuth = "none" | "bearer" | "user" | "browser";
 
 export interface McpOperationMetadata {
   toolName: string;
@@ -1002,6 +1485,14 @@ export interface ControlPlaneOperation<
   output: TOutput;
   bodyKey?: "body";
   queryKey?: "query";
+  rawBody?: {
+    contentTypes: readonly string[];
+    description: string;
+  };
+  rawOutput?: {
+    contentType: string;
+    description: string;
+  };
   idempotency: "none" | "optional" | "required" | "intrinsic";
   mcp?: McpOperationMetadata;
 }
@@ -1016,37 +1507,485 @@ const appPath = z.object({ appId: uuid });
 const draftPath = appPath.extend({ draftId: uuid });
 const deploymentPath = appPath.extend({ deploymentId: uuid });
 const devSessionPath = appPath.extend({ sessionId: uuid });
-const appWebPushMessagePath = appPath.extend({ messageId: uuid });
 const appEmailCapturePath = appPath.extend({ messageId: uuid });
+const appWebPushMessagePath = appPath.extend({ messageId: uuid });
 const devEmailCapturePath = devSessionPath.extend({ messageId: uuid });
-
-export const cursorPageQuerySchema = z.object({
-  cursor: z.string().max(2_048).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+const productionDataTablePath = appPath.extend({
+  table: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/),
 });
-
-
-export const operationTypeFilterSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(80)
-  .regex(/^[a-z][a-z0-9_.-]*$/);
-
-export const appOperationsPageQuerySchema = cursorPageQuerySchema.extend({
-  type: operationTypeFilterSchema.optional(),
-  state: operationStateSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-});
-
-
-export const operationsPageOutput = z.object({
-  asOf: z.string(),
-  operations: z.array(controlPlaneOperationSchema),
-  nextCursor: z.string().nullable(),
-});
+const productionFilePath = appPath.extend({ fileId: uuid });
 
 export const controlPlaneOperations = {
+  getDashboardSession: operation({
+    method: "GET",
+    path: "/v1/auth/session",
+    summary: "Get the current dashboard account identity",
+    description:
+      "Returns the existing bounded, no-store browser session projection. Dashboard account aggregations consume only its user identifier.",
+    auth: "user",
+    scopes: [],
+    input: emptyBody,
+    output: z.object({
+      userId: uuid,
+      profile: dashboardSessionProfileSchema,
+      accessTokenExpiresAt: z.iso.datetime({ offset: true }),
+      refreshAfter: z.iso.datetime({ offset: true }),
+      sessionExpiresAt: z.iso.datetime({ offset: true }),
+      emailConfirmationRequired: z.boolean(),
+      emailConfirmationExpiresAt: z.iso.datetime({ offset: true }).nullable(),
+    }),
+    idempotency: "none",
+  }),
+  updateDashboardProfile: operation({
+    method: "PATCH",
+    path: "/v1/auth/profile",
+    summary: "Update dashboard profile preferences",
+    description:
+      "Updates the signed-in account's display name and HTTPS avatar immediately. A changed email remains pending until its separately delivered confirmation link is approved.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: dashboardProfileUpdateSchema }),
+    output: z.object({
+      profile: dashboardSessionProfileSchema,
+      emailChangePending: z.boolean(),
+      pendingEmail: z.email().nullable(),
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  updateDashboardPassword: operation({
+    method: "PATCH",
+    path: "/v1/auth/password",
+    summary: "Set or replace the dashboard account password",
+    description:
+      "Sets a password for the current browser account without disabling one-time email-link sign-in.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: dashboardPasswordUpdateSchema }),
+    output: z.object({ updated: z.literal(true) }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  listAccountMcpTokensPage: operation({
+    method: "GET",
+    path: "/v1/integrations/mcp/tokens/page",
+    summary: "List account MCP token metadata",
+    description:
+      "Returns one stable newest-first keyset page of hash-only account MCP credential metadata. Plaintext token values are never returned by this read.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ query: accountMcpTokensPageQuerySchema.optional() }),
+    output: accountMcpTokensPageOutputSchema,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  createAccountMcpToken: operation({
+    method: "POST",
+    path: "/v1/integrations/mcp/tokens",
+    summary: "Create an account MCP Bearer token",
+    description:
+      "Creates an MCP-resource-bound mcp:tools credential and returns its plaintext exactly once. The mutation is not replayable and must not be automatically retried.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: accountMcpTokenCreateSchema }),
+    output: z.object({
+      token: z
+        .string()
+        .min(10)
+        .max(128)
+        .regex(/^oc_oauth_[A-Za-z0-9_-]+$/),
+      tokenType: z.literal("Bearer"),
+      mcpUrl: z.url(),
+      tokenLifetimeDays: z.union([
+        z.literal(1),
+        z.literal(14),
+        z.literal(365),
+        z.null(),
+      ]),
+      tokenLifetimeOptions: accountMcpTokenLifetimeOptionsSchema,
+      credential: accountMcpTokenMetadataSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  revokeAccountMcpToken: operation({
+    method: "DELETE",
+    path: "/v1/integrations/mcp/tokens/{tokenId}",
+    summary: "Revoke an account MCP Bearer token",
+    description:
+      "Immediately revokes one MCP-resource-bound account credential owned by the current confirmed user.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ tokenId: uuid }),
+    output: z.object({
+      id: uuid,
+      revokedAt: z.iso.datetime({ offset: true }),
+    }),
+    idempotency: "none",
+  }),
+  listAccountIntegrationConnections: operation({
+    method: "GET",
+    path: "/v1/integrations/connections",
+    summary: "List reusable account integration connections",
+    description:
+      "Returns confirmed-user-owned provider connection metadata and app usage without provider credentials or raw provider responses.",
+    auth: "user",
+    scopes: [],
+    input: emptyBody,
+    output: z.array(accountIntegrationConnectionSchema).max(500),
+    idempotency: "none",
+  }),
+  beginGoogleIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/integrations/google/oauth",
+    summary: "Begin Google integration authorization",
+    description:
+      "Creates a short-lived server-bound Google OAuth attempt for the current confirmed user and returns only its provider destination.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: providerOAuthRequestSchema }),
+    output: providerAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  beginAsanaIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/integrations/asana/oauth",
+    summary: "Begin Asana integration authorization",
+    description:
+      "Creates a short-lived server-bound Asana OAuth attempt for the current confirmed user and returns only its provider destination.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: providerOAuthRequestSchema }),
+    output: providerAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  beginHubSpotIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/integrations/hubspot/oauth",
+    summary: "Begin HubSpot integration authorization",
+    description:
+      "Creates a short-lived server-bound HubSpot OAuth attempt for the current confirmed user and returns only its provider destination.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: providerOAuthRequestSchema }),
+    output: providerAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  beginSlackIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/integrations/slack/oauth",
+    summary: "Begin Slack integration authorization",
+    description:
+      "Creates a short-lived server-bound Slack OAuth attempt for the current confirmed user and returns only its provider destination.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: providerOAuthRequestSchema }),
+    output: providerAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  listBankIntegrationInstitutions: operation({
+    method: "GET",
+    path: "/v1/integrations/gocardless-bank-account-data/institutions",
+    summary: "List supported bank institutions",
+    description:
+      "Lists bounded public institution metadata for one country after the account confirmation gate.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      query: z
+        .object({ country: z.string().trim().length(2).default("GB") })
+        .optional(),
+    }),
+    output: z.array(bankInstitutionSchema).max(1_000),
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  beginBankIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/integrations/gocardless-bank-account-data/connect",
+    summary: "Begin bank account-data authorization",
+    description:
+      "Creates a short-lived bank-hosted consent attempt for one confirmed user and one selected institution.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: bankConnectionRequestSchema }),
+    output: providerAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  createWiseIntegrationConnection: operation({
+    method: "POST",
+    path: "/v1/integrations/wise/connections",
+    summary: "Create a Wise deposit-event connection",
+    description:
+      "Creates one confirmed-user-owned signed webhook destination without accepting or returning a Wise credential.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      body: z.object({ label: z.string().trim().min(1).max(160) }).strict(),
+    }),
+    output: z.object({ connectionId: uuid, webhookUrl: z.url() }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  renameWiseIntegrationConnection: operation({
+    method: "PATCH",
+    path: "/v1/integrations/wise/connections/{connectionId}",
+    summary: "Rename a Wise deposit-event connection",
+    description:
+      "Updates only the bounded display label of one confirmed-user-owned Wise connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      connectionId: uuid,
+      body: z.object({ label: z.string().trim().min(1).max(160) }).strict(),
+    }),
+    output: z.object({ connectionId: uuid, accountLabel: z.string().max(160) }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  listGoogleIntegrationCalendars: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/calendars",
+    summary: "List eligible Google calendars",
+    description:
+      "Returns bounded calendar summaries for one confirmed-user-owned Google connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(googleCalendarResourceSchema).max(1_000),
+    idempotency: "none",
+  }),
+  listGoogleAnalyticsProperties: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/analytics-properties",
+    summary: "List eligible Google Analytics properties",
+    description:
+      "Returns bounded Analytics property summaries for one confirmed-user-owned Google connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(googleAnalyticsPropertySchema).max(1_000),
+    idempotency: "none",
+  }),
+  listGoogleSearchConsoleSites: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/search-console-sites",
+    summary: "List eligible Search Console sites",
+    description:
+      "Returns bounded Search Console site summaries for one confirmed-user-owned Google connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(googleSearchConsoleSiteSchema).max(1_000),
+    idempotency: "none",
+  }),
+  listGoogleAdsCustomers: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/google-ads-customers",
+    summary: "List eligible Google Ads customers",
+    description:
+      "Returns bounded non-manager customer summaries for one confirmed-user-owned Google connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(googleAdsCustomerSchema).max(1_000),
+    idempotency: "none",
+  }),
+  listBankIntegrationAccounts: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/bank-accounts",
+    summary: "List eligible bank accounts",
+    description:
+      "Returns bounded account summaries for one confirmed-user-owned active bank consent.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(bankAccountSummarySchema).max(1_000),
+    idempotency: "none",
+  }),
+  listSlackIntegrationChannels: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/slack-channels",
+    summary: "List eligible Slack channels",
+    description:
+      "Returns bounded channel summaries for one confirmed-user-owned Slack workspace connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(slackChannelSchema).max(1_000),
+    idempotency: "none",
+  }),
+  listAsanaIntegrationProjects: operation({
+    method: "GET",
+    path: "/v1/integrations/connections/{connectionId}/asana-projects",
+    summary: "List eligible Asana projects",
+    description:
+      "Returns bounded project summaries for one confirmed-user-owned Asana connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.array(asanaProjectSchema).max(1_000),
+    idempotency: "none",
+  }),
+  disconnectAccountIntegrationConnection: operation({
+    method: "DELETE",
+    path: "/v1/integrations/connections/{connectionId}",
+    summary: "Disconnect an account integration connection",
+    description:
+      "Revokes one confirmed-user-owned provider connection and removes its app bindings.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.object({ connectionId: uuid, disconnected: z.literal(true) }),
+    idempotency: "none",
+  }),
+  removeAccountIntegrationBinding: operation({
+    method: "DELETE",
+    path: "/v1/integrations/connections/{connectionId}/bindings/{bindingId}",
+    summary: "Remove one app use of an account connection",
+    description:
+      "Removes exactly one binding owned through the current confirmed user's reusable connection.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid, bindingId: uuid }),
+    output: z.object({ bindingId: uuid, removed: z.literal(true) }),
+    idempotency: "none",
+  }),
+  beginTelegramIntegrationPairing: operation({
+    method: "POST",
+    path: "/v1/integrations/telegram/pairings",
+    summary: "Begin app Telegram pairing",
+    description:
+      "Creates one owner-authorized, ten-minute app-slot pairing and returns only HTTPS Telegram destinations.",
+    auth: "user",
+    scopes: ["owner"],
+    input: z.object({ body: telegramPairingRequestSchema }),
+    output: telegramPairingDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  getAiIntegrationOverview: operation({
+    method: "GET",
+    path: "/v1/ai-integrations",
+    summary: "Get account AI integration settings",
+    description:
+      "Returns safe AI provider, connection, model, owned-app assignment, and bounded usage metadata without credential material.",
+    auth: "user",
+    scopes: [],
+    input: emptyBody,
+    output: aiIntegrationOverviewSchema,
+    idempotency: "none",
+  }),
+  createAiIntegrationConnection: operation({
+    method: "POST",
+    path: "/v1/ai-integrations/connections",
+    summary: "Create an account AI connection",
+    description:
+      "Starts a provider authorization or accepts one one-time API key. Secret input is never returned and this operation must not be retried automatically.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: createAiConnectionRequestSchema }),
+    output: createAiConnectionOutputSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  getAiIntegrationAuthorization: operation({
+    method: "GET",
+    path: "/v1/ai-integrations/authorizations/{attemptId}",
+    summary: "Get an AI authorization attempt",
+    description:
+      "Returns bounded status and one-time provider instructions for an authorization owned by the current user.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ attemptId: uuid }),
+    output: aiAuthorizationSchema,
+    idempotency: "none",
+  }),
+  submitAiIntegrationAuthorizationCode: operation({
+    method: "POST",
+    path: "/v1/ai-integrations/authorizations/{attemptId}/code",
+    summary: "Submit a one-time AI authorization code",
+    description:
+      "Relays one bounded provider authorization code without retaining or returning it.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      attemptId: uuid,
+      body: z
+        .object({
+          schemaVersion: z.literal(1),
+          attemptId: uuid,
+          authorizationCode: z.string().trim().min(3).max(10_000),
+        })
+        .strict(),
+    }),
+    output: aiAuthorizationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  cancelAiIntegrationAuthorization: operation({
+    method: "DELETE",
+    path: "/v1/ai-integrations/authorizations/{attemptId}",
+    summary: "Cancel an AI authorization attempt",
+    description: "Cancels one pending authorization owned by the current user.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ attemptId: uuid }),
+    output: aiAuthorizationSchema,
+    idempotency: "none",
+  }),
+  updateAiIntegrationConnection: operation({
+    method: "PATCH",
+    path: "/v1/ai-integrations/connections/{connectionId}",
+    summary: "Update an account AI connection",
+    description:
+      "Renames one AI connection or makes it the account default without exposing credential state.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      connectionId: uuid,
+      body: updateAiConnectionRequestSchema,
+    }),
+    output: z.object({
+      schemaVersion: z.literal(1),
+      connection: aiProviderConnectionSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  disconnectAiIntegrationConnection: operation({
+    method: "DELETE",
+    path: "/v1/ai-integrations/connections/{connectionId}",
+    summary: "Disconnect an account AI connection",
+    description:
+      "Revokes one AI connection only when no owned app still selects it.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: aiProviderConnectionSchema,
+    idempotency: "none",
+  }),
+  updateAppAiIntegration: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/apps/{appId}",
+    summary: "Update app AI integration settings",
+    description:
+      "Selects the owner, user, or platform AI mode plus an eligible model, connection, and reasoning effort for one owned app.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ body: updateAppAiRequestSchema }),
+    output: z.object({
+      schemaVersion: z.literal(1),
+      assignment: appAiAssignmentSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
   getPlatformVersion: operation({
     method: "GET",
     path: "/version",
@@ -1164,12 +2103,109 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  getAppDomain: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/domains",
+    summary: "Get app custom domain settings",
+    description:
+      "Returns the app's custom domain binding, DNS instructions, HTTPS observations and cleanup status without starting checks or changing infrastructure.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: appDomainSettingsSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_app_domain",
+      title: "Get app custom domain",
+      description: "Inspect custom domain setup and serving status for an OpenCloud app.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  addAppDomain: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/domains",
+    summary: "Add an app custom domain",
+    description:
+      "An app owner claims an exact custom hostname and receives DNS instructions. Ownership and HTTPS checks must complete before the binding can serve traffic. Requires an idempotency key.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ body: appDomainAddSchema }),
+    output: appDomainSettingsSchema,
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "add_app_domain",
+      title: "Add app custom domain",
+      description: "Claim a custom hostname for the app owner and return its DNS setup instructions.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  checkAppDomain: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/domains/check",
+    summary: "Check an app custom domain",
+    description:
+      "Requests owner-authorized DNS, HTTPS and serving reconciliation for the current custom domain binding. Requires an idempotency key; a normal settings read does not trigger these effects.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: appDomainSettingsSchema,
+    idempotency: "required",
+    mcp: {
+      toolName: "check_app_domain",
+      title: "Check app custom domain",
+      description: "Recheck the app owner's custom domain ownership, HTTPS and serving readiness.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
+  removeAppDomain: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/domains",
+    summary: "Remove an app custom domain",
+    description:
+      "The app owner disables the custom hostname binding and starts removal of its ingress configuration. The canonical OpenCloud app URL remains available. Requires an idempotency key.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: appDomainSettingsSchema,
+    idempotency: "required",
+    mcp: {
+      toolName: "remove_app_domain",
+      title: "Remove app custom domain",
+      description: "Disconnect the app owner's custom hostname and inspect any pending ingress cleanup.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  getAppDeploymentTruth: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployment-truth",
+    summary: "Get authoritative app deployment truth",
+    description:
+      "Returns the app lifecycle state, canonical URL, and exact active deployment and activation provenance from one control-plane read.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: controlPlaneAppDeploymentTruthSchema,
+    idempotency: "none",
+  }),
   connectCliWorkspace: operation({
     method: "POST",
     path: "/v1/apps/{appId}/cli-connection",
     summary: "Connect a CLI workspace",
     description:
-      "Issues an expiring app-scoped credential linked to the authenticated CLI account login.",
+      "Account-login exchange that requires a current CLI account refresh family, authorizes its access to the target app, and issues an expiring app-scoped workspace credential.",
     auth: "bearer",
     scopes: ["app:read"],
     input: appPath,
@@ -1301,7 +2337,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}",
     summary: "Configure an app",
     description:
-      "Changes an app title or visibility. Generated addresses remain stable.",
+      "Changes app metadata or which connected Codex login its Functions use. Generated addresses remain stable.",
     auth: "bearer",
     scopes: ["app:configure"],
     input: appPath.extend({
@@ -1309,6 +2345,7 @@ export const controlPlaneOperations = {
         .object({
           name: z.string().min(1).max(120).optional(),
           visibility: appVisibilitySchema.optional(),
+          aiCredentialSource: appAiCredentialSourceSchema.optional(),
         })
         .refine((value) => Object.keys(value).length > 0),
     }),
@@ -1322,12 +2359,48 @@ export const controlPlaneOperations = {
       toolName: "configure_app",
       title: "Configure app",
       description:
-        "Replace the app title or public/private visibility, which can publish or revoke public access.",
+        "Replace the app title, public/private visibility, or owner-only AI credential source.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
+  }),
+  archiveApp: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/archive",
+    summary: "Archive an app",
+    description:
+      "Starts a durable operation that stops app traffic and scheduled work while retaining its release and configuration.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
+  unarchiveApp: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/unarchive",
+    summary: "Restore an archived app",
+    description:
+      "Starts a durable operation that resumes an archived app using its retained release and configuration.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
+  deleteApp: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}",
+    summary: "Delete an app",
+    description:
+      "Starts irreversible runtime and dashboard removal. The control plane retains a tombstone and policy-governed recovery artifacts.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
   }),
   createDraft: operation({
     method: "POST",
@@ -1520,7 +2593,12 @@ export const controlPlaneOperations = {
     scopes: ["app:deploy"],
     input: draftPath.extend({
       body: z.object({
-        version: z.string().min(1).max(120).optional(),
+        version: z
+          .string()
+          .min(1)
+          .max(120)
+          .optional()
+          .describe("Legacy schema-2 bundle override; omit for schema 3"),
       }),
     }),
     output: draftValidationOutput,
@@ -1984,7 +3062,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/verifications",
     summary: "Verify an app release",
     description:
-      "Starts one durable verification run covering control state, HTTPS health, SDK pinning, and Chromium.",
+      "Starts one durable, production-safe verification run covering the exact active artifact digest, SDK pin, and canonical HEAD response. Full browser journeys remain isolated to development.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath,
@@ -1996,7 +3074,8 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "verify_app",
       title: "Verify app",
-      description: "Run the complete OpenCloud release verification gate.",
+      description:
+        "Run the read-only production release gate after development verification.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -2043,6 +3122,19 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  listDeploymentsPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployments/page",
+    summary: "List an app's deployments page",
+    description:
+      "Returns a stable, newest-first keyset page of immutable deployments. Continue with nextCursor using the same app, state filter, and page size.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath.extend({ query: deploymentsPageQuerySchema.optional() }),
+    output: deploymentsPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+  }),
   getDeployment: operation({
     method: "GET",
     path: "/v1/apps/{appId}/deployments/{deploymentId}",
@@ -2083,21 +3175,6 @@ export const controlPlaneOperations = {
       openWorldHint: true,
     },
   }),
-  listAppOperationsPage: operation({
-    method: "GET",
-    path: "/v1/apps/{appId}/operations/page",
-    summary: "List an app's durable operations page",
-    description:
-      "Returns a stable, newest-first keyset page of app-scoped durable operations. Continue with nextCursor using the same app, filters, and page size.",
-    auth: "bearer",
-    scopes: ["app:read"],
-    input: appPath.extend({
-      query: appOperationsPageQuerySchema.optional(),
-    }),
-    output: operationsPageOutput,
-    queryKey: "query",
-    idempotency: "none",
-  }),
   getOperation: operation({
     method: "GET",
     path: "/v1/operations/{operationId}",
@@ -2117,6 +3194,34 @@ export const controlPlaneOperations = {
       idempotentHint: true,
       openWorldHint: false,
     },
+  }),
+  listAppOperationsPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/operations/page",
+    summary: "List an app's durable operations page",
+    description:
+      "Returns a stable, newest-first keyset page of app-scoped durable operations. Continue with nextCursor using the same app, filters, and page size.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath.extend({
+      query: appOperationsPageQuerySchema.optional(),
+    }),
+    output: operationsPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  listOwnedAppOperationsPage: operation({
+    method: "GET",
+    path: "/v1/account/operations/page",
+    summary: "List owned-app durable operations",
+    description:
+      "Returns a stable, newest-first keyset page across only the apps owned by the current browser account. Continue with nextCursor using the same account, filters, and page size.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ query: accountOperationsPageQuerySchema.optional() }),
+    output: operationsPageOutput,
+    queryKey: "query",
+    idempotency: "none",
   }),
   listSecrets: operation({
     method: "GET",
@@ -2138,6 +3243,19 @@ export const controlPlaneOperations = {
       idempotentHint: true,
       openWorldHint: false,
     },
+  }),
+  listSecretsPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/secrets/page",
+    summary: "List a page of secret metadata",
+    description:
+      "Returns a stable, name-ordered snapshot page of configured metadata plus bounded status for every active-release declaration. Secret values are never returned.",
+    auth: "bearer",
+    scopes: ["app:configure"],
+    input: appPath.extend({ query: secretMetadataPageQuery.optional() }),
+    output: secretMetadataPageOutput,
+    queryKey: "query",
+    idempotency: "none",
   }),
   putSecret: operation({
     method: "PUT",
@@ -2245,6 +3363,136 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  listAppIntegrations: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/integrations",
+    summary: "List app integration declarations and bindings",
+    description:
+      "Returns the exact app's declared integrations, current app-account bindings, and bounded eligible connection metadata. An app-owner credential never receives calling-user bindings, provider credentials, or the account-wide connection catalog.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath,
+    output: z.object({
+      declarations: z.record(
+        appIntegrationNameSchema,
+        integrationDefinitionSchema,
+      ),
+      bindings: z.array(appIntegrationBindingSchema),
+      eligibleConnections: z.record(
+        appIntegrationNameSchema,
+        z.array(eligibleAppIntegrationConnectionSchema).max(50),
+      ),
+    }),
+    idempotency: "none",
+  }),
+  listAppIntegrationResources: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/integrations/{integrationName}/connections/{connectionId}/resources",
+    summary: "List bindable resources for an app integration",
+    description:
+      "Returns at most 200 safe opaque resource IDs, labels, and writability flags for one eligible owner connection and one declared account:app integration slot. It never exposes provider tokens or raw provider responses.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      integrationName: appIntegrationNameSchema,
+      connectionId: uuid,
+    }),
+    output: z.object({
+      resources: z.array(appIntegrationResourceSchema).max(200),
+    }),
+    idempotency: "none",
+  }),
+  bindAppIntegration: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/integrations/{integrationName}/bindings",
+    summary: "Bind an app integration",
+    description:
+      "Compatibility endpoint that binds an eligible owner connection and provider resource to one declared app-account slot.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      integrationName: appIntegrationNameSchema,
+      body: z
+        .object({
+          connectionId: uuid,
+          resourceId: z.string().trim().min(1).max(1_024).optional(),
+          calendarId: z.string().trim().min(1).max(1_024).optional(),
+          label: z
+            .string()
+            .trim()
+            .min(1)
+            .max(160)
+            .default("Connected account"),
+          triggerMode: z
+            .enum(["mention", "directed", "all_messages"])
+            .optional(),
+        })
+        .strict(),
+    }),
+    output: appIntegrationBindingSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  unbindAppIntegration: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/integrations/{integrationName}/bindings/{bindingId}",
+    summary: "Remove an app integration binding",
+    description:
+      "Compatibility endpoint that removes one exact-app integration binding.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      integrationName: appIntegrationNameSchema,
+      bindingId: uuid,
+    }),
+    output: z.unknown(),
+    idempotency: "none",
+  }),
+  bindAppIntegrationOperation: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/integrations/{integrationName}/binding-operations",
+    summary: "Bind an app integration durably",
+    description:
+      "Creates a durable idempotent operation that binds one eligible owner connection and provider resource to a declared account:app slot.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      integrationName: appIntegrationNameSchema,
+      body: z
+        .object({
+          connectionId: uuid,
+          resourceId: z.string().trim().min(1).max(1_024).optional(),
+          label: z
+            .string()
+            .trim()
+            .min(1)
+            .max(160)
+            .default("Connected account"),
+          triggerMode: z
+            .enum(["mention", "directed", "all_messages"])
+            .optional(),
+        })
+        .strict(),
+    }),
+    output: controlPlaneOperationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  unbindAppIntegrationOperation: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/integrations/{integrationName}/bindings/{bindingId}/delete-operations",
+    summary: "Remove an app integration binding durably",
+    description:
+      "Creates a durable idempotent operation that removes one exact-app account binding and reconciles provider webhook state.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      integrationName: appIntegrationNameSchema,
+      bindingId: uuid,
+    }),
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
   listBackups: operation({
     method: "GET",
     path: "/v1/apps/{appId}/backups",
@@ -2253,7 +3501,7 @@ export const controlPlaneOperations = {
     auth: "bearer",
     scopes: ["app:read"],
     input: appPath,
-    output: z.array(backupOutput),
+    output: z.array(backupOutput).max(100),
     idempotency: "none",
     mcp: {
       toolName: "list_backups",
@@ -2264,6 +3512,18 @@ export const controlPlaneOperations = {
       idempotentHint: true,
       openWorldHint: false,
     },
+  }),
+  getBackup: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/backups/{backupId}",
+    summary: "Get one backup",
+    description:
+      "Returns exact app-scoped backup metadata even when it is older than the bounded backup list.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath.extend({ backupId: uuid }),
+    output: backupOutput,
+    idempotency: "none",
   }),
   createBackup: operation({
     method: "POST",
@@ -2362,6 +3622,207 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  listCronInvocationsPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/cron/invocations/page",
+    summary: "List a cron invocation page",
+    description:
+      "Returns a stable, newest-first keyset page of app-scoped cron invocation history. Continue with nextCursor using the same filters and page size.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: z
+        .object({
+          name: z.string().optional(),
+          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          after: z.iso.datetime({ offset: true }).optional(),
+          cursor: z.string().max(2_048).optional(),
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+        })
+        .optional(),
+    }),
+    output: cronInvocationsPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  listProductionDataTables: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/data/tables",
+    summary: "List production data tables",
+    description:
+      "Lists owner-visible tables and columns from the exact app's active production schema.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath,
+    output: z.object({ tables: z.array(productionDataTableSchema) }),
+    idempotency: "none",
+  }),
+  listProductionDataRows: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/data/{table}/rows",
+    summary: "List production data rows",
+    description:
+      "Returns a bounded cursor page from one table in the exact app's active production schema.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionDataTablePath.extend({
+      query: z
+        .object({
+          limit: z.number().int().min(1).max(100).default(50),
+          cursor: z.string().max(512).optional(),
+        })
+        .optional(),
+    }),
+    output: z.object({
+      rows: z.array(jsonObject),
+      nextCursor: z.string().nullable(),
+    }),
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  getProductionDataRow: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/data/{table}/rows/{rowId}",
+    summary: "Get a production data row",
+    description:
+      "Returns one id-addressed row from one table in the exact app's active production schema.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionDataTablePath.extend({
+      rowId: z.string().min(1).max(512),
+    }),
+    output: z.object({ row: jsonObject }),
+    idempotency: "none",
+  }),
+  mutateProductionData: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/data/{table}/mutations",
+    summary: "Mutate production data",
+    description:
+      "Queues one durable, idempotent create, create-many, update-by-id, or delete-by-id operation in the exact app's active production schema.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionDataTablePath.extend({
+      body: productionDataMutationSchema,
+    }),
+    output: controlPlaneOperationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  listProductionFiles: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/files",
+    summary: "List production files",
+    description:
+      "Lists a bounded cursor page of managed production files in the exact app.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      query: z
+        .object({
+          limit: z.number().int().min(1).max(100).default(50),
+          cursor: z.string().max(512).optional(),
+        })
+        .optional(),
+    }),
+    output: productionFilesPageSchema,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  getProductionFile: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/files/{fileId}",
+    summary: "Get production file metadata",
+    description: "Returns managed-file metadata from the exact app.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionFilePath,
+    output: productionFileSchema,
+    idempotency: "none",
+  }),
+  downloadProductionFile: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/files/{fileId}/content",
+    summary: "Download a production file",
+    description: "Streams managed-file bytes from the exact app.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionFilePath,
+    output: z.unknown(),
+    rawOutput: {
+      contentType: "application/octet-stream",
+      description: "The file's stored content type and bytes.",
+    },
+    idempotency: "none",
+  }),
+  uploadProductionFile: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/files",
+    summary: "Upload a production file",
+    description:
+      "Durably stages the request bytes and queues an idempotent managed-file upload. The name query parameter is the display file name.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      query: z.object({ name: z.string().min(1).max(255) }),
+    }),
+    output: controlPlaneOperationSchema,
+    queryKey: "query",
+    rawBody: {
+      contentTypes: ["application/octet-stream", "*/*"],
+      description: "Raw file bytes. Content-Type becomes the stored content type.",
+    },
+    idempotency: "required",
+  }),
+  replaceProductionFile: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/files/{fileId}",
+    summary: "Replace a production file",
+    description:
+      "Durably stages the request bytes and queues an idempotent replacement for one exact-app managed file.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionFilePath.extend({
+      query: z
+        .object({ name: z.string().min(1).max(255).optional() })
+        .optional(),
+    }),
+    output: controlPlaneOperationSchema,
+    queryKey: "query",
+    rawBody: {
+      contentTypes: ["application/octet-stream", "*/*"],
+      description: "Raw replacement bytes. Content-Type becomes the stored content type.",
+    },
+    idempotency: "required",
+  }),
+  deleteProductionFile: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/files/{fileId}",
+    summary: "Delete a production file",
+    description:
+      "Queues a durable idempotent deletion for one exact-app managed file.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: productionFilePath,
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
+  invokeProductionFunction: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/functions/{functionName}/invocations",
+    summary: "Invoke a production Function",
+    description:
+      "Queues a durable explicit invocation of one Function declared by the exact app's active production release.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({
+      functionName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+      body: productionFunctionInvocationSchema,
+    }),
+    output: controlPlaneOperationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
   listBackgroundJobs: operation({
     method: "GET",
     path: "/v1/apps/{appId}/jobs",
@@ -2439,6 +3900,22 @@ export const controlPlaneOperations = {
       openWorldHint: true,
     },
   }),
+  invokeCronOperation: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/cron/{name}/operations",
+    summary: "Invoke a cron job durably",
+    description:
+      "Creates a durable, idempotent operation that manually enqueues one enabled cron Function. The resulting background job uses the operation ID as its stable queue-job ID so worker redelivery cannot enqueue the Function twice.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: appPath.extend({
+      name: z.string().min(1).max(63),
+      body: z.object({ deploymentId: uuid }).strict().optional(),
+    }),
+    output: controlPlaneOperationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
   getAgentFeed: operation({
     method: "GET",
     path: "/v1/apps/{appId}/agent-feed",
@@ -2468,20 +3945,34 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  getAlertRule: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/alert-rules/{ruleId}",
+    summary: "Get custom metric alert rule detail",
+    description:
+      "Reads one effective alert rule with its stateless current evaluation, bounded metric points, and latest durable Alert Fire delivery metadata.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ ruleId: alertRuleIdSchema }),
+    output: alertRuleDetailOutput,
+    idempotency: "none",
+  }),
   listAlertRules: operation({
     method: "GET",
     path: "/v1/apps/{appId}/alert-rules",
     summary: "List custom metric alert rules",
-    description: "Lists the app's bounded fixed-threshold alert rules.",
+    description:
+      "Lists the app's effective bounded fixed-threshold alert rules with manifest or operational-override origin, stateless current evaluation, and latest durable Alert Fire delivery metadata.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath,
-    output: z.array(alertRuleOutput),
+    output: z.array(alertRuleStatusOutput),
     idempotency: "none",
     mcp: {
       toolName: "list_alert_rules",
       title: "List alert rules",
-      description: "List alert rules for declared app metrics.",
+      description:
+        "List effective alert rules for declared app metrics, including whether each comes from the release manifest or an operational override.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -2493,7 +3984,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/alert-rules/{ruleId}",
     summary: "Create or replace a custom metric alert rule",
     description:
-      "Creates or replaces one fixed-window threshold rule for a metric declared by the active deployment.",
+      "Creates or replaces one operational fixed-window threshold rule for a metric declared by the active deployment. An operational rule with the same ID overrides a manifest rule until the operational rule is deleted.",
     auth: "bearer",
     scopes: ["app:configure"],
     input: appPath.extend({
@@ -2507,7 +3998,7 @@ export const controlPlaneOperations = {
       toolName: "put_alert_rule",
       title: "Put alert rule",
       description:
-        "Create an app metric alert rule or replace the complete existing rule with the same ID.",
+        "Create an operational app metric alert rule or replace the complete operational rule with the same ID. Use the deployment manifest for durable app-owned behavior.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
@@ -2517,8 +4008,9 @@ export const controlPlaneOperations = {
   deleteAlertRule: operation({
     method: "DELETE",
     path: "/v1/apps/{appId}/alert-rules/{ruleId}",
-    summary: "Delete a custom metric alert rule",
-    description: "Deletes one app-scoped alert rule.",
+    summary: "Delete an operational custom metric alert rule",
+    description:
+      "Deletes one app-scoped operational rule. If it overrode a same-ID manifest rule, the manifest definition becomes effective again.",
     auth: "bearer",
     scopes: ["app:configure"],
     input: appPath.extend({ ruleId: alertRuleIdSchema }),
@@ -2526,8 +4018,9 @@ export const controlPlaneOperations = {
     idempotency: "none",
     mcp: {
       toolName: "delete_alert_rule",
-      title: "Delete alert rule",
-      description: "Delete one app metric alert rule.",
+      title: "Delete operational alert rule",
+      description:
+        "Delete one operational app metric alert rule or override; manifest rules change only through a deployment.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
@@ -2554,6 +4047,19 @@ export const controlPlaneOperations = {
       idempotentHint: true,
       openWorldHint: false,
     },
+  }),
+  queryLogsPage: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/logs/page",
+    summary: "Query an app log page",
+    description:
+      "Returns a normalized, stable keyset page from an app-scoped bounded log query. Continue with nextCursor using the exact same filters, time range, and page size.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({ body: appLogsPageRequestSchema }),
+    output: appLogsPageOutput,
+    bodyKey: "body",
+    idempotency: "none",
   }),
   queryMetrics: operation({
     method: "POST",
@@ -2624,6 +4130,62 @@ export const controlPlaneOperations = {
     queryKey: "query",
     idempotency: "none",
   }),
+  listAppAccessPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/access/page",
+    summary: "List app access",
+    description:
+      "Returns one stable keyset page of dashboard administrators or runtime users plus snapshot group totals.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath.extend({ query: appAccessPageQuery.optional() }),
+    output: appAccessPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  addAppAccess: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/access",
+    summary: "Add app access",
+    description:
+      "Adds an existing or newly provisioned OpenCloud identity as a builder or runtime app user.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({
+      body: z.object({
+        email: z.string().trim().toLowerCase().max(320).pipe(z.email()),
+        role: z.enum(["builder", "app_user"]),
+      }),
+    }),
+    output: z.object({
+      person: appAccessPersonOutput,
+      operation: controlPlaneOperationSchema,
+    }),
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  removeAppBuilder: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/builders/{userId}",
+    summary: "Remove an app builder",
+    description: "Removes dashboard management access from one builder.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ userId: uuid }),
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
+  removeAppUser: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/access/{userId}",
+    summary: "Remove an app user",
+    description: "Removes authenticated runtime access from one app user.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ userId: uuid }),
+    output: controlPlaneOperationSchema,
+    idempotency: "required",
+  }),
   createCredential: operation({
     method: "POST",
     path: "/v1/apps/{appId}/credentials",
@@ -2645,7 +4207,83 @@ export const controlPlaneOperations = {
       })
       .passthrough(),
     bodyKey: "body",
+    idempotency: "optional",
+  }),
+  createAppAccessToken: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/access-tokens",
+    summary: "Create an app access token",
+    description:
+      "Creates an owner-bound credential for all current and future authenticated runtime surfaces of one app. Confirmed browser sessions and owner API credentials with the correct control-plane audience may request one-time response delivery; MCP-resource credentials must use reveal_link, whose response never contains plaintext.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ body: createAppAccessTokenRequestSchema }),
+    output: appAccessTokenCreationOutput,
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "create_app_access_token",
+      title: "Create app access token",
+      description:
+        "Create an owner-bound full-runtime token and return a one-time owner reveal link. The secret is never included in MCP output.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  }),
+  listAppAccessTokens: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/access-tokens",
+    summary: "List app access tokens",
+    description: "Lists non-secret app access-token metadata.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath,
+    output: z.array(appAccessTokenMetadataSchema),
     idempotency: "none",
+    mcp: {
+      toolName: "list_app_access_tokens",
+      title: "List app access tokens",
+      description: "List non-secret runtime token metadata for an app.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listAppAccessTokensPage: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/access-tokens/page",
+    summary: "List an app access-token page",
+    description:
+      "Returns a stable, newest-first snapshot page of non-secret owner token metadata. The active count is intentionally current so the create-token capacity gate does not rely on a stale page snapshot.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ query: appAccessTokenPageQuery.optional() }),
+    output: appAccessTokenPageOutput,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  revokeAppAccessToken: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/access-tokens/{tokenId}",
+    summary: "Revoke an app access token",
+    description: "Idempotently revokes one app runtime access token.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({ tokenId: uuid }),
+    output: z.object({ tokenId: uuid, revoked: z.boolean() }),
+    idempotency: "none",
+    mcp: {
+      toolName: "revoke_app_access_token",
+      title: "Revoke app access token",
+      description: "Immediately reject new runtime requests for one token.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   }),
   requestAppAccessTokenApproval: operation({
     method: "POST",

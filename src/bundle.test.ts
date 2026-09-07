@@ -60,6 +60,50 @@ async function readArchivedManifest(
 }
 
 describe("bundle builder", () => {
+  it("archives shared public icon aliases and optional Function paths with SDK 2.3", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "functions"));
+    await writeFile(path.join(root, "frontend", "icon.png"), Buffer.from([137, 80, 78, 71]));
+    await writeFile(path.join(root, "functions", "pixel.ts"), `import { defineFunction, schema } from "@opencloud/server";
+throw new Error("must not execute while bundling");
+export default defineFunction({ input: schema.unknown(), handler() { return null; } });`);
+    await writeFile(path.join(root, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+runtime:
+  sdk:
+    version: 2.3.0
+frontend:
+  directory: frontend
+functions:
+  - name: pixel
+    entrypoint: functions/pixel.ts
+routes:
+  - id: favicon
+    path: /favicon.png
+    asset: icon.png
+    access: public
+  - id: apple
+    path: /apple-icon.png
+    asset: icon.png
+    access: public
+  - id: pixel
+    path: /pixel{.:ext}
+    function: pixel
+    methods: [GET, HEAD]
+`);
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(archived.routes).toEqual(bundle.manifest.schemaVersion === 3 ? bundle.manifest.routes : []);
+    expect(bundle.files.filter(file => file.endsWith("icon.png"))).toEqual(["frontend/icon.png"]);
+    expect(archived.runtime).toEqual({ sdk: { version: "2.3.0" } });
+    await rm(path.join(root, "frontend", "icon.png"));
+    await expect(buildBundle(root)).rejects.toThrow(/asset|file|missing/i);
+    await symlink(path.join(root, "functions", "pixel.ts"), path.join(root, "frontend", "icon.png"));
+    await expect(buildBundle(root)).rejects.toThrow(/symlink|symbolic/i);
+  });
+
   it("defaults versionless manifests to publisher-versioned schema 3", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));
@@ -177,7 +221,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "2.2.0",
+        version: "2.3.0",
       },
     });
     expect(first.files).toEqual([

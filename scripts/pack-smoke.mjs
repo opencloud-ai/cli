@@ -82,7 +82,7 @@ try {
     cwd: consumer,
     env: childEnvironment,
   });
-  assert.equal(version.stdout.trim(), "3.8.2");
+  assert.equal(version.stdout.trim(), "3.9.0");
   const help = run(binary, ["draft", "--help"], {
     cwd: consumer,
     env: childEnvironment,
@@ -118,7 +118,7 @@ try {
   assert.equal("version" in manifest, false);
 
   process.stdout.write(
-    "Packed OpenCloud CLI 3.8.2 installs, starts, emits structured failures, and initializes schema 3.\n",
+    "Packed OpenCloud CLI 3.9.0 installs, starts, emits structured failures, and initializes schema 3.\n",
   );
 } finally {
   await rm(temporary, { recursive: true, force: true });
