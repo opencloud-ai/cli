@@ -23,6 +23,16 @@ const valid = {
 };
 
 describe("OpenCloud manifest", () => {
+  it("requires SDK 2.4 for search without changing older manifests", () => {
+    const data = { search: [{ name: "notes", table: "notes", select: ["id", "title"], fullText: { column: "search_text", language: "simple" } }] };
+    for (const version of ["2.0.0", "2.1.0", "2.2.0", "2.3.0"]) {
+      const manifest = { ...valid, runtime: { sdk: { version } } };
+      expect(parseManifest(manifest)).not.toHaveProperty("data");
+      expect(parseManifest({ ...manifest, data: { search: [] } }).data?.search).toEqual([]);
+      expect(() => parseManifest({ ...manifest, data })).toThrow(/Data search requires runtime SDK version 2.4.0/);
+    }
+    expect(parseManifest({ ...valid, runtime: { sdk: { version: "2.4.0" } }, data }).data?.search).toHaveLength(1);
+  });
   it("accepts a deterministic app bundle", () => {
     expect(parseManifest(valid)).toMatchObject(valid);
     expect(parseManifest(valid)).not.toHaveProperty("files");
@@ -91,7 +101,7 @@ describe("OpenCloud manifest", () => {
   });
 
   it("requires an exact installed deployment-pinned SDK version", () => {
-    for (const version of ["2.0.0", "2.1.0", "2.2.0"]) {
+    for (const version of ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"]) {
       expect(
         parseManifest({
           ...valid,
@@ -108,7 +118,7 @@ describe("OpenCloud manifest", () => {
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, 2\.2\.0, or 2\.3\.0/);
+      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, 2\.2\.0, 2\.3\.0, 2\.4\.0, or 2\.5\.0/);
     }
   });
 

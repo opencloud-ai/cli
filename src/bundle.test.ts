@@ -104,6 +104,49 @@ routes:
     await expect(buildBundle(root)).rejects.toThrow(/symlink|symbolic/i);
   });
 
+  it("preserves agent tasks and cron timezones in the uploaded archive", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "functions"));
+    await writeFile(path.join(root, "frontend", "index.html"), "Campaign check");
+    await writeFile(path.join(root, "functions", "record.ts"), 'import { defineFunction, schema } from "@opencloud/server"; export default defineFunction({ input: schema.object({}), handler: () => ({ ok: true }) });');
+    await writeFile(path.join(root, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+runtime:
+  sdk:
+    version: 2.5.0
+frontend:
+  directory: frontend
+functions:
+  - name: record
+    entrypoint: functions/record.ts
+    access: system
+cron:
+  - name: daily
+    schedule: "0 9 * * *"
+    timezone: Europe/Prague
+    function: record
+agentTasks:
+  - name: inspect
+    title: Check campaigns
+    instructions: Inspect the supplied competitor.
+    resultFunction: record
+    inputSchema:
+      type: object
+      properties:
+        url: { type: string }
+      required: [url]
+      additionalProperties: false
+`);
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(archived.runtime).toEqual({ sdk: { version: "2.5.0" } });
+    expect(archived.agentTasks).toEqual(bundle.manifest.agentTasks);
+    expect(archived.agentTasks).toHaveLength(1);
+    expect(archived.cron[0].timezone).toBe("Europe/Prague");
+  });
+
   it("defaults versionless manifests to publisher-versioned schema 3", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));

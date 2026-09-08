@@ -1,4 +1,7 @@
 export * from "./api.js";
+export * from "./agent-tasks.js";
+export * from "./data-search.js";
+export * from "./job-file-delegation.js";
 export * from "./app-routes.js";
 export * from "./app-domains.js";
 export * from "./brand.generated.js";
