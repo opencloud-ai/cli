@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { dataSearchDeclarationsSchema } from "./data-search.js";
 import { CronExpressionParser } from "cron-parser";
+import { agentTaskDefinitionSchema } from "./agent-tasks.js";
 import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest, AppRouteError } from "./app-routes.js";
 import {
   alertAggregationSchema,
@@ -107,8 +109,8 @@ function isAppOwnedHealthPath(value: string): boolean {
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0", "2.3.0"], {
-  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, or 2.3.0",
+export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"], {
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, or 2.5.0",
 });
 
 export const migrationSchema = z
@@ -133,6 +135,9 @@ export const cronSchema = z
   .object({
     name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
     schedule: z.string().min(5).max(100),
+    timezone: z.string().min(1).max(100).refine(value => {
+      try { new Intl.DateTimeFormat("en", { timeZone: value }).format(); return true; } catch { return false; }
+    }, "expected an IANA timezone").optional(),
     function: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
     enabled: z.boolean().default(true),
   })
@@ -246,6 +251,7 @@ export const deploymentVersionSchema = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 
 const openCloudManifestFields = {
+  data: z.object({ search: dataSearchDeclarationsSchema }).strict().optional(),
   frontend: z
     .object({
       directory: relativePath,
@@ -277,6 +283,7 @@ const openCloudManifestFields = {
   functions: z.array(functionSchema).max(100).default([]),
   cron: z.array(cronSchema).max(100).default([]),
   queues: z.array(queueSchema).max(50).default([]),
+  agentTasks: z.array(agentTaskDefinitionSchema).max(20).optional(),
   email: z
     .object({
       addresses: z.array(emailAddressSchema).max(25).default([]),
@@ -339,6 +346,9 @@ export const openCloudManifestSchema = z
     openCloudManifestV3Schema,
   ])
   .superRefine((manifest, context) => {
+    if (manifest.data?.search.length && !["2.4.0", "2.5.0"].includes(manifest.runtime.sdk.version)) {
+      context.addIssue({ code: "custom", path: ["data", "search"], message: "Data search requires runtime SDK version 2.4.0" });
+    }
     if (manifest.schemaVersion === 3 && manifest.routes) {
       manifest.routes.forEach((route, index) => {
         if (!("function" in route)) return;
@@ -346,7 +356,7 @@ export const openCloudManifestSchema = z
         if (!target || target.access === "system") {
           context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Route must reference a declared user or public Function" });
         }
-        if (manifest.runtime.sdk.version !== "2.3.0") {
+        if (!["2.3.0", "2.4.0", "2.5.0"].includes(manifest.runtime.sdk.version)) {
           context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Function routes require runtime SDK version 2.3.0 or later" });
         }
         try {
@@ -398,6 +408,7 @@ export const openCloudManifestSchema = z
         | "functions"
         | "cron"
         | "queues"
+        | "agentTasks"
         | "email"
         | "observability",
     ) => {
@@ -429,6 +440,16 @@ export const openCloudManifestSchema = z
       manifest.queues.map((queue) => queue.name),
       "queues",
     );
+    assertUnique((manifest.agentTasks ?? []).map(task => task.name), "agentTasks");
+    for (const [index, task] of (manifest.agentTasks ?? []).entries()) {
+      if (manifest.runtime.sdk.version !== "2.5.0") {
+        context.addIssue({ code: "custom", path: ["agentTasks", index], message: "Agent tasks require runtime SDK 2.5.0" });
+      }
+      if (!manifest.functions.some(fn => fn.name === task.resultFunction)) {
+        context.addIssue({ code: "custom", path: ["agentTasks", index, "resultFunction"],
+          message: "Agent task result Function must be declared" });
+      }
+    }
     assertUnique(
       (manifest.email?.addresses ?? []).map((address) => address.name),
       "email",
@@ -504,7 +525,7 @@ export const openCloudManifestSchema = z
         });
       }
       try {
-        CronExpressionParser.parse(cron.schedule, { tz: "Etc/UTC" });
+        CronExpressionParser.parse(cron.schedule, { tz: cron.timezone ?? "Etc/UTC" });
       } catch {
         context.addIssue({
           code: "custom",

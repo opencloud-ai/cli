@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.10.0
+
+- Support SDK 2.5.0 and bounded `agentTasks` declarations in local validation,
+  bundles, and development uploads. Preserve result Function references.
+- Validate and retain cron IANA timezones, keeping UTC as the default.
+- Existing File upload and Function invocation commands remain unchanged.
+- Keep SDK 2.3.0 as the default for existing installations; select 2.5.0
+  explicitly when using task declarations on a compatible platform.
+
 ## 3.9.0
 
 - Add `app domain get`, `add`, `check`, and `remove` with typed DNS/setup status
