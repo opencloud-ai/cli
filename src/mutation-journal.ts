@@ -1718,6 +1718,13 @@ export class MutationJournal {
       spec.explicitIdempotencyKey !== undefined
         ? validateIdempotencyKey(spec.explicitIdempotencyKey)
         : null;
+    if (this.authority && explicitKey === null) {
+      throw new MutationJournalError(
+        "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
+        "App-owner Agent mutations require an explicit --idempotency-key; no request was started",
+        true,
+      );
+    }
     const slot = createHash("sha256")
       .update(
         explicitKey === null

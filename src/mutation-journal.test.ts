@@ -839,6 +839,7 @@ describe("mutation journal", () => {
       commandId: "opencloud app restart" as const,
       safeScope: { appId: APP_ID },
       safeRequest: { action: "restart" },
+      explicitIdempotencyKey: "restart-after-runtime-loss",
     };
     const first = await MutationJournal.open({
       directory,
@@ -878,6 +879,37 @@ describe("mutation journal", () => {
         return "recovered";
       }),
     ).resolves.toBe("recovered");
+  });
+
+  it("requires an explicit idempotency key before an app-owner Agent mutation", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const callback = vi.fn();
+    const journal = await MutationJournal.open({
+      directory,
+      apiUrl: API_URL,
+      appId: APP_ID,
+      authority: {
+        rootRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        familyId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      },
+    });
+
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud app restart",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "restart" },
+        },
+        callback,
+      ),
+    ).rejects.toMatchObject({
+      code: "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
+      retryable: true,
+    });
+    expect(callback).not.toHaveBeenCalled();
+    expect(await readdir(path.join(directory, "entries"))).toEqual([]);
+    expect(await readdir(path.join(directory, "locks"))).toEqual([]);
   });
 
   it("writes only protected regular files and no secret-derived data", async () => {
