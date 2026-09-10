@@ -1056,6 +1056,8 @@ try {
     "dev",
     "verify",
     directVerifyRoot,
+    "--idempotency-key",
+    "verify-direct-failure",
     "--interval",
     "0.05",
     "--timeout",
@@ -1071,7 +1073,9 @@ try {
   );
   activeDevRevisionId = nextRevisionId;
   devVerificationBehavior = "pass";
-  const verifiedAfterDirectFailure = await runCli(verifyArguments, {
+  const verifyRetryArguments = [...verifyArguments];
+  verifyRetryArguments[5] = "verify-direct-retry";
+  const verifiedAfterDirectFailure = await runCli(verifyRetryArguments, {
     journal: directVerifyJournal,
   });
   assert.equal(
@@ -1092,6 +1096,8 @@ try {
     "dev",
     "verify",
     receiptVerifyRoot,
+    "--idempotency-key",
+    "verify-receipt-reconcile",
     "--interval",
     "0.05",
     "--timeout",
@@ -1121,7 +1127,9 @@ try {
   activeDevRevisionId = nextRevisionId;
   devVerificationReceipts = [];
   devVerificationBehavior = "pass";
-  await runCli(receiptVerifyArguments, { journal: receiptVerifyJournal });
+  const nextReceiptVerifyArguments = [...receiptVerifyArguments];
+  nextReceiptVerifyArguments[5] = "verify-receipt-next-revision";
+  await runCli(nextReceiptVerifyArguments, { journal: receiptVerifyJournal });
   assert.equal(
     requests.filter((request) =>
       request.url?.endsWith(`/dev-sessions/${sessionId}/verify`),
