@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.10.1
+
+- Require an explicit `--idempotency-key` for every app-owner Agent mutation.
+  Reject a missing key before creating a mutation-journal entry or sending a
+  request, preventing cancelled Agent roots from stranding a shared implicit
+  mutation slot. Interactive human CLI use retains automatic keys.
+
 ## 3.10.0
 
 - Support SDK 2.5.0 and bounded `agentTasks` declarations in local validation,

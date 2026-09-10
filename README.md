@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.10.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.10.1` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.10.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.10.1"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.1.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -153,9 +153,11 @@ recover an interrupted or timed-out wait without repeating the mutation:
 "$OPENCLOUD_CLI" operation list "$APP_ID" --limit 50
 ```
 
-Reuse one `--idempotency-key` for retries of the same intended effect. Every
-success emits one compact JSON document; failures emit redacted structured JSON
-and exit non-zero. `secret set` reads only standard input. `app
+Every app-owner Agent mutation requires one explicit `--idempotency-key`.
+Reuse it only for retries of the same intended effect; use a new key for
+materially different input. The CLI rejects a missing key before creating a
+journal entry or starting a request. Every success emits one compact JSON
+document; failures emit redacted structured JSON and exit non-zero. `secret set` reads only standard input. `app
 credential-create` requires `--token-file`, refuses overwrite, writes the
 one-time token with mode `0600`, and never includes it in command output.
 
