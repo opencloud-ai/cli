@@ -86,7 +86,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.10.1";
+const CLI_VERSION = "3.10.2";
 
 const program = new Command()
   .name("opencloud")
@@ -2124,6 +2124,7 @@ dev
     "Run Chromium and primary-flow checks for the exact dev revision",
   )
   .argument("[directory]", "app source directory", ".")
+  .option("--idempotency-key <key>")
   .option(
     "--parallelism <number>",
     "number of isolated external E2E tests to run concurrently (1-10)",
@@ -2161,6 +2162,7 @@ dev
           requireExternalE2eSpec: true,
           parallelism: parallelism ?? null,
         },
+        explicitIdempotencyKey: options.idempotencyKey,
         cwd: sourceRoot,
       }),
       async (run) => {

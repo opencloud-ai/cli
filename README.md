@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.10.1` in
+OpenCloud application skills pin an exact CLI release. To install `v3.10.2` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.10.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.1.tgz"
+OPENCLOUD_CLI_VERSION="v3.10.2"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.2.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -230,8 +230,10 @@ Use the stable capability preview and isolated migration-replayed database befor
 "$OPENCLOUD_CLI" app dev notifications list .
 "$OPENCLOUD_CLI" app dev invoke . function-name --body '{"example":true}'
 "$OPENCLOUD_CLI" app dev requests .
-"$OPENCLOUD_CLI" app dev verify . --parallelism 5
-"$OPENCLOUD_CLI" app dev promote . --idempotency-key "$IDEMPOTENCY_KEY"
+"$OPENCLOUD_CLI" app dev verify . --parallelism 5 \
+  --idempotency-key "$VERIFY_IDEMPOTENCY_KEY"
+"$OPENCLOUD_CLI" app dev promote . \
+  --idempotency-key "$PROMOTE_IDEMPOTENCY_KEY"
 "$OPENCLOUD_CLI" app dev receipts .
 "$OPENCLOUD_CLI" app dev evidence .
 ```

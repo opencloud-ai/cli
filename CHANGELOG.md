@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.10.2
+
+- Accept an explicit `--idempotency-key` for `app dev verify` so app-owner
+  Agents can enter the existing receipt-based verification reconciliation
+  workflow.
+
 ## 3.10.1
 
 - Require an explicit `--idempotency-key` for every app-owner Agent mutation.
