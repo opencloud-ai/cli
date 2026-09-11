@@ -7,6 +7,9 @@ import * as tar from "tar";
 import YAML from "yaml";
 
 const root = path.resolve(import.meta.dirname, "..");
+const packageVersion = JSON.parse(
+  await readFile(path.join(root, "package.json"), "utf8"),
+).version;
 const temporary = await mkdtemp(
   path.join(os.tmpdir(), "opencloud-cli-package-test-"),
 );
@@ -82,7 +85,7 @@ try {
     cwd: consumer,
     env: childEnvironment,
   });
-  assert.equal(version.stdout.trim(), "3.10.2");
+  assert.equal(version.stdout.trim(), packageVersion);
   const help = run(binary, ["draft", "--help"], {
     cwd: consumer,
     env: childEnvironment,
@@ -118,7 +121,7 @@ try {
   assert.equal("version" in manifest, false);
 
   process.stdout.write(
-    "Packed OpenCloud CLI 3.10.2 installs, starts, emits structured failures, and initializes schema 3.\n",
+    `Packed OpenCloud CLI ${packageVersion} installs, starts, emits structured failures, and initializes schema 3.\n`,
   );
 } finally {
   await rm(temporary, { recursive: true, force: true });

@@ -734,8 +734,8 @@ async function walkDirectory(
   selection: BundleSelection,
   manifestFile: string,
 ): Promise<void> {
-  const relativeDirectory = bundleRelativePath(root, directory);
-  if (relativeDirectory) selection.directories.add(relativeDirectory);
+  // Draft transport is file-only. Parent directories are added by
+  // addSelectedFile so empty directories cannot change the artifact digest.
   const entries = await readdir(directory, { withFileTypes: true });
   entries.sort((a, b) => comparePaths(a.name, b.name));
   for (const entry of entries) {

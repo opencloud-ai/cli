@@ -60,6 +60,25 @@ async function readArchivedManifest(
 }
 
 describe("bundle builder", () => {
+  it("omits empty directories so file-only draft reconstruction is byte-identical", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend", "evidence"), { recursive: true });
+    await writeFile(path.join(root, "frontend", "index.html"), "hello");
+    await writeManifest(
+      root,
+      `frontend:
+  directory: frontend`,
+    );
+
+    const withEmptyDirectory = await buildBundle(root);
+    await rm(path.join(root, "frontend", "evidence"), { recursive: true });
+    const reconstructedFromFiles = await buildBundle(root);
+
+    expect(withEmptyDirectory.files).toEqual(reconstructedFromFiles.files);
+    expect(withEmptyDirectory.sha256).toBe(reconstructedFromFiles.sha256);
+    expect(withEmptyDirectory.archive).toEqual(reconstructedFromFiles.archive);
+  });
+
   it("archives shared public icon aliases and optional Function paths with SDK 2.3", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend"));

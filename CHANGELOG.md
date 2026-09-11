@@ -5,6 +5,8 @@
 - Accept an explicit `--idempotency-key` for `app dev verify` so app-owner
   Agents can enter the existing receipt-based verification reconciliation
   workflow.
+- Exclude empty directories from canonical app archives so file-only source
+  drafts reconstruct to the same artifact digest during development startup.
 
 ## 3.10.1
 
