@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.10.3
+
+- Apply `app dev verify --timeout` to the verification HTTP request as well as
+  receipt reconciliation. Long-running checks now return their real success or
+  failure instead of aborting at the client's default 30-second request limit.
+
 ## 3.10.2
 
 - Accept an explicit `--idempotency-key` for `app dev verify` so app-owner

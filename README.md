@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.10.2` in
+OpenCloud application skills pin an exact CLI release. To install `v3.10.3` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.10.2"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.2.tgz"
+OPENCLOUD_CLI_VERSION="v3.10.3"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.3.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -266,6 +266,11 @@ follows the durable production operation, runs feature-aware production
 verification, prints the live HTTPS URL, and removes the dev environment only
 after success. If deployment or verification fails, dev remains available for
 repair.
+
+`app dev verify --timeout <seconds>` controls both the verification HTTP request
+and any receipt reconciliation wait (default 900 seconds, range 1–1800).
+An interrupted request can continue running on the server; rerun the same
+command to reconcile retained evidence before starting another attempt.
 
 ## Application email
 

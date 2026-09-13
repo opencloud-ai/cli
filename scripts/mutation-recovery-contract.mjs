@@ -65,6 +65,7 @@ let activeDevRevisionId = revisionId;
 let activeDevSessionStatus = "active";
 let devVerificationBehavior = "pass";
 let devVerificationReceipts = [];
+let devVerificationDelayMs = 0;
 
 async function bodyOf(request) {
   const chunks = [];
@@ -456,6 +457,9 @@ const server = createServer(async (request, response) => {
     request.url === `/v1/apps/${appId}/dev-sessions/${sessionId}/verify`
   ) {
     const passed = !devVerificationBehavior.includes("fail");
+    if (devVerificationDelayMs) {
+      await new Promise(resolve => setTimeout(resolve, devVerificationDelayMs));
+    }
     const receipt = devReceipt(passed);
     if (devVerificationBehavior.startsWith("lost")) {
       devVerificationReceipts = [receipt];
@@ -1051,6 +1055,9 @@ try {
   activeDevRevisionId = revisionId;
   devVerificationReceipts = [];
   devVerificationBehavior = "fail";
+  // A real HTTP response beyond the transport's old 30-second default must
+  // preserve the server's failure, not turn it into an ambiguous timeout.
+  devVerificationDelayMs = 31_000;
   const verifyArguments = [
     "app",
     "dev",
@@ -1061,7 +1068,7 @@ try {
     "--interval",
     "0.05",
     "--timeout",
-    "2",
+    "60",
   ];
   const directFailure = await runCli(verifyArguments, {
     journal: directVerifyJournal,
@@ -1082,6 +1089,7 @@ try {
     JSON.parse(verifiedAfterDirectFailure.stdout).receipt.summary.passed,
     true,
   );
+  devVerificationDelayMs = 0;
 
   const receiptVerifyJournal = path.join(temporary, "journal-verify-receipt");
   const receiptVerifyRoot = await prepareDevSource(

@@ -86,7 +86,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.10.2";
+const CLI_VERSION = "3.10.3";
 
 const program = new Command()
   .name("opencloud")
@@ -2130,7 +2130,7 @@ dev
     "number of isolated external E2E tests to run concurrently (1-10)",
   )
   .option("--interval <seconds>", "reconciliation poll interval", "2")
-  .option("--timeout <seconds>", "maximum reconciliation time", "900")
+  .option("--timeout <seconds>", "maximum verification request or reconciliation time", "900")
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);
@@ -2271,7 +2271,7 @@ dev
             requireExternalE2eSpec: true,
             ...(parallelism === undefined ? {} : { parallelism }),
           },
-        });
+        }, { timeoutMs });
         if (
           result.receipt.revisionId !== activeRevisionId ||
           result.receipt.artifactSha256 !== artifactSha256
