@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.11.0
+
+- Add `integration custom-list` to list the organisation-built integration
+  contracts an app may declare, and `integration events` to read its recent
+  production event deliveries with a bounded `--limit`.
+- Add `app dev integration list|mode|test-connection|inject` to inspect and
+  switch development slots between fake and live behaviour, select or clear a
+  provider app's test connection, and deliver synthetic provider events to a
+  slot's event handler. The three mutations use the exact-app journal, and
+  event injection always sends the required `Idempotency-Key`.
+- Refresh the public contract and typed-client snapshots. Local validation now
+  accepts `provider: custom` slots, including `account: calling_user` and
+  `events`, and `provides.integration` contracts with credential or OAuth 2.0
+  authorization, sync, webhooks, and events. SDK 2.6.0 pins are accepted while
+  2.3.0 remains the default for new and unpinned apps.
+- Let `app email list` read installations that send through SES and preserve
+  their custom-domain receiving metadata.
+
 ## 3.10.3
 
 - Apply `app dev verify --timeout` to the verification HTTP request as well as

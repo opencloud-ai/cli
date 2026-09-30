@@ -488,6 +488,156 @@ integrations:
     expect(archived.integrations).toEqual(bundle.manifest.integrations);
   });
 
+  it("validates and archives a published integration contract with SDK 2.6", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "functions"));
+    await writeFile(path.join(root, "frontend", "index.html"), "Acme CRM gateway");
+    for (const name of ["contacts-list", "contacts-sync", "oauth-exchange"]) {
+      await writeFile(
+        path.join(root, "functions", `${name}.ts`),
+        'import { defineFunction, schema } from "@opencloud/server"; export default defineFunction({ input: schema.object({}), handler: () => ({ ok: true }) });',
+      );
+    }
+    const manifest = (sdkVersion: string, listAccess = "system") => `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+runtime:
+  sdk:
+    version: ${sdkVersion}
+frontend:
+  directory: frontend
+functions:
+  - name: contacts-list
+    entrypoint: functions/contacts-list.ts
+    access: ${listAccess}
+  - name: contacts-sync
+    entrypoint: functions/contacts-sync.ts
+    access: system
+  - name: oauth-exchange
+    entrypoint: functions/oauth-exchange.ts
+    access: system
+provides:
+  integration:
+    name: acme-crm
+    title: Acme CRM
+    description: Contacts from Acme CRM.
+    authorization:
+      type: oauth2
+      authorizationUrl: https://login.acme.example/oauth/authorize
+      clientId: opencloud-acme
+      scopes: [contacts.read]
+      exchange: oauth-exchange
+    capabilities:
+      - name: contacts.read
+        description: Read contacts
+    operations:
+      - name: contacts.list
+        capability: contacts.read
+        function: contacts-list
+        description: List contacts.
+        fake: { contacts: [{ id: c_1, name: Ada Lovelace }] }
+    sync:
+      function: contacts-sync
+      schedule: "*/15 * * * *"
+    events:
+      - type: contact.created
+        capability: contacts.read
+        description: A contact was created.
+        fake: { contactId: c_1 }
+`;
+    await writeFile(path.join(root, "opencloud.yaml"), manifest("2.6.0"));
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(bundle.manifest.schemaVersion === 3 && bundle.manifest.provides)
+      .toMatchObject({
+        integration: {
+          name: "acme-crm",
+          authorization: {
+            type: "oauth2",
+            pkce: true,
+            accessToken: "OAUTH_ACCESS_TOKEN",
+          },
+          credentials: [],
+          sync: { function: "contacts-sync", schedule: "*/15 * * * *" },
+        },
+      });
+    expect(archived.provides).toEqual(
+      bundle.manifest.schemaVersion === 3 ? bundle.manifest.provides : null,
+    );
+    expect(archived.runtime).toEqual({ sdk: { version: "2.6.0" } });
+
+    await writeFile(path.join(root, "opencloud.yaml"), manifest("2.5.0"));
+    await expect(buildBundle(root)).rejects.toThrow(/SDK version 2\.6\.0/);
+    await writeFile(path.join(root, "opencloud.yaml"), manifest("2.6.0", "user"));
+    await expect(buildBundle(root)).rejects.toThrow(/must declare access: system/);
+  });
+
+  it("validates custom integration slots on the default SDK", async () => {
+    const root = await temporaryDirectory();
+    await mkdir(path.join(root, "frontend"));
+    await mkdir(path.join(root, "functions"));
+    await writeFile(path.join(root, "frontend", "index.html"), "Contacts");
+    await writeFile(
+      path.join(root, "functions", "on-contact.ts"),
+      'import { defineFunction, schema } from "@opencloud/server"; export default defineFunction({ input: schema.unknown(), handler: () => ({ ok: true }) });',
+    );
+    const manifest = (callingUserEvents = "") => `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  directory: frontend
+functions:
+  - name: on-contact
+    entrypoint: functions/on-contact.ts
+    access: system
+integrations:
+  crm:
+    provider: custom
+    integration: acme-crm
+    account: app
+    capabilities: [contacts.read]
+    events:
+      function: on-contact
+      types: [contact.created]
+  my_crm:
+    provider: custom
+    integration: acme-crm
+    account: calling_user
+    capabilities: [contacts.read]
+${callingUserEvents}`;
+    await writeFile(path.join(root, "opencloud.yaml"), manifest());
+
+    const bundle = await buildBundle(root);
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.3.0");
+    expect(bundle.manifest.integrations).toEqual({
+      crm: {
+        provider: "custom",
+        integration: "acme-crm",
+        account: "app",
+        cardinality: "one",
+        capabilities: ["contacts.read"],
+        events: { function: "on-contact", types: ["contact.created"] },
+      },
+      my_crm: {
+        provider: "custom",
+        integration: "acme-crm",
+        account: "calling_user",
+        cardinality: "one",
+        capabilities: ["contacts.read"],
+      },
+    });
+    expect(archived.integrations).toEqual(bundle.manifest.integrations);
+
+    await writeFile(
+      path.join(root, "opencloud.yaml"),
+      manifest("    events:\n      function: on-contact\n"),
+    );
+    await expect(buildBundle(root)).rejects.toThrow(/require account: app/);
+  });
+
   it("never archives local .opencloud development metadata", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, ".opencloud"));

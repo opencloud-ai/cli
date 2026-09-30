@@ -42,6 +42,13 @@ import {
   devEmailInjectionRequest,
   emailHistoryQuery,
 } from "./email.js";
+import {
+  devIntegrationEventRequest,
+  devIntegrationModeRequest,
+  devIntegrationTestConnectionRequest,
+  integrationEventDeliveriesQuery,
+  integrationSlotName,
+} from "./integrations.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
 import { devNotificationCaptureLimit, notificationHistoryQuery } from "./notifications.js";
 import {
@@ -86,7 +93,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.10.3";
+const CLI_VERSION = "3.11.0";
 
 const program = new Command()
   .name("opencloud")
@@ -1998,6 +2005,186 @@ devNotifications
         sessionId: state.sessionId,
         query: { limit: devNotificationCaptureLimit(options.limit) },
       }),
+    );
+  });
+
+const devIntegration = dev
+  .command("integration")
+  .description(
+    "Control integration slots, provider test connections, and synthetic events in dev",
+  );
+
+devIntegration
+  .command("list")
+  .description(
+    "Show each slot's fake or live dev mode and a provider app's test connection",
+  )
+  .argument("[directory]", "app source directory", ".")
+  .action(async (directory) => {
+    const state = await requireDevState(callerPath(directory));
+    output(
+      await client().call("getDevSessionIntegrations", {
+        appId: state.appId,
+        sessionId: state.sessionId,
+      }),
+    );
+  });
+
+devIntegration
+  .command("mode")
+  .description(
+    "Return fake output (the default) or use the app's live production binding for one dev slot",
+  )
+  .argument("<directory>", "app source directory")
+  .argument("<integration-name>", "app-account integration slot")
+  .addArgument(
+    new Argument("<mode>", "development integration mode").choices([
+      "fake",
+      "live",
+    ]),
+  )
+  .option("--idempotency-key <key>", "stable key for this intended mutation")
+  .action(async (directory, integrationNameValue, modeValue, options) => {
+    const sourceRoot = callerPath(directory);
+    const integrationName = integrationSlotName(integrationNameValue);
+    const body = devIntegrationModeRequest(modeValue);
+    const state = await requireDevState(sourceRoot);
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev integration mode",
+        appId: state.appId,
+        safeScope: {
+          appId: state.appId,
+          sessionId: state.sessionId,
+          integrationName,
+        },
+        safeRequest: { action: "set-dev-integration-mode", mode: body.mode },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "setDevSessionIntegrationMode",
+          {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            integrationName,
+            body,
+          },
+          { idempotencyKey: key },
+        ),
+    );
+  });
+
+devIntegration
+  .command("test-connection")
+  .description(
+    "Choose the connection whose credentials this provider app's dev Functions receive",
+  )
+  .argument("<directory>", "app source directory")
+  .argument(
+    "[connection-id]",
+    "eligible connection ID from `app dev integration list`",
+  )
+  .option("--clear", "clear the selected test connection")
+  .option("--idempotency-key <key>", "stable key for this intended mutation")
+  .action(async (directory, connectionId, options) => {
+    const sourceRoot = callerPath(directory);
+    const body = devIntegrationTestConnectionRequest({
+      connectionId:
+        connectionId === undefined ? undefined : String(connectionId),
+      clear: options.clear === true,
+    });
+    const state = await requireDevState(sourceRoot);
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev integration test-connection",
+        appId: state.appId,
+        safeScope: { appId: state.appId, sessionId: state.sessionId },
+        safeRequest: {
+          action: "set-dev-integration-test-connection",
+          connectionId: body.connectionId,
+        },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "setDevSessionIntegrationTestConnection",
+          { appId: state.appId, sessionId: state.sessionId, body },
+          { idempotencyKey: key },
+        ),
+    );
+  });
+
+devIntegration
+  .command("inject")
+  .description(
+    "Deliver one synthetic provider event to a custom slot's dev event handler",
+  )
+  .argument("<directory>", "app source directory")
+  .argument("<integration-name>", "custom integration slot with events.function")
+  .requiredOption(
+    "--type <type>",
+    "event type the provider declares, such as contact.created",
+  )
+  .addOption(
+    new Option(
+      "--data <json>",
+      "event data object; defaults to the provider's declared fake data",
+    ).conflicts("dataFile"),
+  )
+  .addOption(
+    new Option(
+      "--data-file <path>",
+      "read the event data object from a JSON file relative to the app directory",
+    ).conflicts("data"),
+  )
+  .option(
+    "--id <event-id>",
+    "event ID given to the handler; reuse one to test duplicate delivery",
+  )
+  .option("--idempotency-key <key>", "stable key for this intended mutation")
+  .action(async (directory, integrationNameValue, options) => {
+    const sourceRoot = callerPath(directory);
+    const integrationName = integrationSlotName(integrationNameValue);
+    const body = await devIntegrationEventRequest(
+      {
+        type: String(options.type),
+        data: options.data,
+        dataFile: options.dataFile,
+        id: options.id,
+      },
+      (value) => path.resolve(sourceRoot, value),
+    );
+    const state = await requireDevState(sourceRoot);
+    await outputReplayMutation(
+      {
+        commandId: "opencloud app dev integration inject",
+        appId: state.appId,
+        safeScope: {
+          appId: state.appId,
+          sessionId: state.sessionId,
+          integrationName,
+        },
+        safeRequest: {
+          action: "inject-dev-integration-event",
+          type: body.type,
+        },
+        explicitIdempotencyKey: options.idempotencyKey,
+        cwd: sourceRoot,
+      },
+      (control, key) =>
+        control.call(
+          "injectDevIntegrationEvent",
+          {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            integrationName,
+            body,
+          },
+          { idempotencyKey: key },
+        ),
     );
   });
 
@@ -4622,7 +4809,9 @@ addOperationOptions(
 
 const integration = program
   .command("integration")
-  .description("Manage exact-app integration bindings");
+  .description(
+    "Manage exact-app integration bindings and inspect organisation-built integrations",
+  );
 
 integration
   .command("list")
@@ -4715,6 +4904,38 @@ integration
           undefined,
           key,
         ),
+    );
+  });
+
+integration
+  .command("custom-list")
+  .description(
+    "List organisation-built integration contracts this app may declare with provider: custom",
+  )
+  .argument("<app-id>")
+  .action(async (appId) => {
+    // Sharing is evaluated for a person, so prefer the signed-in account or
+    // owner session over a workspace app credential.
+    output(
+      await (
+        await managementClient()
+      ).call("listAppCustomIntegrations", { appId: String(appId) }),
+    );
+  });
+
+integration
+  .command("events")
+  .description(
+    "List recent production deliveries of custom integration events to this app",
+  )
+  .argument("<app-id>")
+  .option("--limit <number>", "maximum deliveries, 1-100", "50")
+  .action(async (appId, options) => {
+    output(
+      await client().call("listAppIntegrationEventDeliveries", {
+        appId: String(appId),
+        query: integrationEventDeliveriesQuery(options.limit),
+      }),
     );
   });
 

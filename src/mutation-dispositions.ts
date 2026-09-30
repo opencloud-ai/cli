@@ -79,6 +79,21 @@ export const mutationDispositionRegistry = {
     recovery: "server_replay",
     reason: "The dev-effect receipt replays the same idempotency key and request digest.",
   },
+  "opencloud app dev integration mode": {
+    boundary: "exact_app",
+    recovery: "intrinsic_reconcile",
+    reason: "Setting the exact session slot to the same fake or live mode is convergent.",
+  },
+  "opencloud app dev integration test-connection": {
+    boundary: "exact_app",
+    recovery: "intrinsic_reconcile",
+    reason: "Selecting or clearing the same session test connection is convergent.",
+  },
+  "opencloud app dev integration inject": {
+    boundary: "exact_app",
+    recovery: "server_replay",
+    reason: "The required Idempotency-Key reserves one dev-effect receipt, so a retry cannot invoke the event handler twice.",
+  },
   "opencloud app dev verify": {
     boundary: "exact_app",
     recovery: "intrinsic_reconcile",

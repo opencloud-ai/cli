@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.10.3` in
+OpenCloud application skills pin an exact CLI release. To install `v3.11.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.10.3"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.10.3.tgz"
+OPENCLOUD_CLI_VERSION="v3.11.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.11.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -289,6 +289,86 @@ MIME and attachment bytes are never returned. Development Function sends are
 captured instead of delivered; `app dev email inject` accepts only reserved
 `.test` sender and Reply-To addresses, and body/attachment file paths resolve
 relative to the app directory.
+
+## Organisation-built integrations
+
+Apps can use integrations that other apps in the same organisation publish with
+`provides.integration`. List the contracts this app may use, then declare a
+`provider: custom` slot with only the capabilities it needs:
+
+```bash
+"$OPENCLOUD_CLI" integration custom-list "$APP_ID"
+```
+
+```yaml
+integrations:
+  crm:
+    provider: custom
+    integration: acme-crm
+    account: app
+    capabilities: [contacts.read]
+    events:
+      function: on-contact
+      types: [contact.created]
+```
+
+Consumer slots need runtime SDK 2.2.0 or later; the 2.3.0 default qualifies. A
+provider contract that declares `sync`, `webhook`, or `events` must pin SDK
+2.6.0. Local validation checks both shapes before development or deployment.
+Integration sharing is evaluated for a person, so `integration custom-list`
+uses the signed-in account or app-owner session rather than a workspace app
+credential.
+
+Development returns each operation's declared fake output. Switch one
+app-account slot to live only to confirm real behaviour, prefer reads, and
+switch back to fake; live calls use the app's production binding and are
+audited. `calling_user` slots and verification sandboxes always stay fake:
+
+```bash
+"$OPENCLOUD_CLI" app dev integration list .
+"$OPENCLOUD_CLI" app dev integration mode . crm live \
+  --idempotency-key "$LIVE_IDEMPOTENCY_KEY"
+"$OPENCLOUD_CLI" app dev integration mode . crm fake \
+  --idempotency-key "$FAKE_IDEMPOTENCY_KEY"
+```
+
+Production events never reach development. Test a slot's `events.function`
+with a synthetic event of a type the provider declares. Omit `--data` to use
+the provider's fake payload, or pass an object with `--data` or `--data-file`
+(relative to the app directory); reuse `--id` to test duplicate delivery:
+
+```bash
+"$OPENCLOUD_CLI" app dev integration inject . crm \
+  --type contact.created --data '{"contactId":"c_1"}' \
+  --idempotency-key "$EVENT_IDEMPOTENCY_KEY"
+```
+
+Every injection sends the required `Idempotency-Key`: the explicit key, or the
+journal's stable key during interactive use, so a retry cannot run the handler
+twice.
+
+A provider app tests its own operation, sync, and webhook Functions with a test
+connection. Choose an eligible connection shown by `app dev integration list`,
+preferably a sandbox, and clear it when finished. Eligibility and selection are
+evaluated for the person behind the credential:
+
+```bash
+"$OPENCLOUD_CLI" app dev integration test-connection . "$CONNECTION_ID" \
+  --idempotency-key "$SELECT_IDEMPOTENCY_KEY"
+"$OPENCLOUD_CLI" app dev integration test-connection . --clear \
+  --idempotency-key "$CLEAR_IDEMPOTENCY_KEY"
+```
+
+Inspect recent production event deliveries, attempts, and the last error;
+event payloads are not returned:
+
+```bash
+"$OPENCLOUD_CLI" integration events "$APP_ID" --limit 25
+```
+
+Connecting accounts, entering credential values, OAuth sign-in, and running a
+connection's sync now remain human browser actions in OpenCloud. The CLI never
+receives connection credentials.
 
 ## Web Push notifications
 

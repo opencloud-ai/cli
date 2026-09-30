@@ -45,11 +45,15 @@ export const operationStateSchema = z.enum([
 
 export const createAppRequestSchema = z.object({
   name: z.string().min(1).max(120),
+  organisationId: z.uuid().optional(),
+  workspaceId: z.uuid().optional(),
   visibility: appVisibilitySchema.default("private"),
 });
 
 export const createPendingAppRequestSchema = z
   .object({
+    organisationId: z.uuid().optional(),
+    workspaceId: z.uuid().optional(),
     visibility: appVisibilitySchema.default("private"),
   })
   .strict();
@@ -94,6 +98,11 @@ export const assignAppIdentityRequestSchema = z.discriminatedUnion(
   [
     assignAppIdentityLegacyRequestSchema,
     assignAppIdentityActivationRequestSchema,
+    assignAppIdentityActivationRequestSchema.extend({
+      schemaVersion: z.literal(4),
+      conversationId: z.uuid(),
+      organisationId: z.uuid(),
+    }),
   ],
 );
 

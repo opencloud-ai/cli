@@ -17,6 +17,25 @@ afterEach(() => {
 });
 
 describe("browser OpenCloudClient", () => {
+  it("sends organisation membership changes through typed same-origin transport", async () => {
+    const organisationId = "00000000-0000-4000-8000-000000000001";
+    const userId = "00000000-0000-4000-8000-000000000003";
+    const directory = {
+      organisation: { id: organisationId, name: "Example", status: "active", policyVersion: "1" },
+      membership: { organisationId, userId, role: "member" },
+      capabilities: { manageOrganisation: false, inviteMembers: false, manageLimits: false, leaveOrganisation: true },
+    };
+    const fetcher = vi.fn(async () => Response.json(directory));
+    const client = browser(fetcher as typeof fetch);
+    await expect(client.call("setOrganisationMemberRole", {
+      organisationId, userId, body: { role: "member" },
+    }, { idempotencyKey: "membership-change-1" })).resolves.toEqual(directory);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(url).toBe(`https://dashboard.opencloud.test/v1/organisations/${organisationId}/members/${userId}`);
+    expect(init).toMatchObject({ method: "PUT", credentials: "same-origin", body: '{"role":"member"}' });
+    expect(new Headers(init?.headers).get("idempotency-key")).toBe("membership-change-1");
+  });
+
   it("binds the native fetch default to the browser global", async () => {
     vi.stubGlobal("location", { origin: "https://dashboard.opencloud.test" });
     let receiver: unknown;

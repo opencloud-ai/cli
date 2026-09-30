@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  customIntegrationCapabilitySchema,
   integrationCapabilitySchema,
   integrationDefinitionSchema,
 } from "./integration-manifest.js";
@@ -170,6 +171,8 @@ export const asanaProjectSchema = z.object({
 
 export const appIntegrationBindingSchema = z.object({
   id: uuid,
+  // Organisation custody applies only to custom integration connections.
+  custody: z.enum(["personal", "app", "organisation"]),
   integrationName,
   connectionId: uuid,
   callingUserId: uuid.nullable().optional(),
@@ -177,7 +180,10 @@ export const appIntegrationBindingSchema = z.object({
   label: boundedLabel,
   accountLabel: z.string().min(1).max(320).nullable(),
   status: z.enum(["active", "reconnect_required", "revoked"]).nullable(),
-  capabilities: z.array(integrationCapabilitySchema).max(100).optional(),
+  capabilities: z
+    .array(z.union([integrationCapabilitySchema, customIntegrationCapabilitySchema]))
+    .max(100)
+    .optional(),
   triggerMode: z.enum(["mention", "directed", "all_messages"]).nullable(),
   createdAt: timestamp.optional(),
   updatedAt: timestamp.optional(),
@@ -191,6 +197,7 @@ export const appIntegrationsOutputSchema = z.object({
 export const bindAppIntegrationRequestSchema = z
   .object({
     connectionId: uuid,
+    custody: z.enum(["personal", "app"]).default("personal"),
     resourceId: z.string().trim().min(1).max(1_024),
     label: boundedLabel.default("Connected account"),
     triggerMode: z.enum(["mention", "directed", "all_messages"]).optional(),
@@ -253,7 +260,7 @@ const aiAuthorizationBase = {
   attemptId: uuid,
   connection: aiProviderConnectionSchema,
   status: aiAuthorizationStatusSchema,
-  authorizationUrl: httpsUrl(),
+  authorizationUrl: httpsUrl().nullable(),
   expiresAt: timestamp,
   errorClass: z.string().trim().min(1).max(200).nullable(),
 };
@@ -284,13 +291,13 @@ export const aiAuthorizationSchema = z.discriminatedUnion("method", [
   z.object({
     ...aiAuthorizationBase,
     method: z.literal("device_oauth"),
-    userCode: z.string().trim().min(2).max(100),
-    instructions: z.string().trim().min(1).max(1_000),
+    userCode: z.string().trim().min(2).max(100).nullable(),
+    instructions: z.string().trim().min(1).max(1_000).nullable(),
   }),
   z.object({
     ...aiAuthorizationBase,
     method: z.literal("manual_oauth"),
-    instructions: z.string().trim().min(1).max(1_000),
+    instructions: z.string().trim().min(1).max(1_000).nullable(),
   }),
 ]);
 
@@ -343,6 +350,8 @@ export const aiIntegrationOverviewSchema = z.object({
         appUrl: webUrl(2_048),
         aiCredentialSource: z.enum(["owner", "user", "platform"]),
         providerConnectionId: uuid.nullable(),
+        providerCustody: z.enum(["personal", "app"]),
+        appOwnedConnections: z.array(aiProviderConnectionSchema).max(100),
         model: z.string().min(1).max(200),
         reasoningEffort: z.enum([
           "none",
@@ -369,7 +378,6 @@ export const aiIntegrationOverviewSchema = z.object({
         platformUsage: z
           .object({
             spentNanodollars: z.string().regex(/^\d+$/),
-            reservedNanodollars: z.string().regex(/^\d+$/),
             agentSpentNanodollars: z.string().regex(/^\d+$/),
             functionSpentNanodollars: z.string().regex(/^\d+$/),
           })
@@ -432,14 +440,21 @@ export const updateAppAiRequestSchema = z
   .object({
     aiCredentialSource: z.enum(["owner", "user", "platform"]),
     providerConnectionId: uuid.nullable(),
+    providerCustody: z.enum(["personal", "app"]).default("personal"),
+    personalConnectionConsent: z.object({ intentId: uuid }).strict().optional(),
     model: z.string().trim().min(1).max(200),
     reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh", "max"]),
   })
-  .strict();
+  .strict()
+  .refine((value) => value.providerCustody !== "app" ||
+    (value.aiCredentialSource === "owner" && value.personalConnectionConsent === undefined), {
+    message: "App-owned connections require owner mode without personal delegation consent",
+  });
 
 export const appAiAssignmentSchema = z.object({
   appId: uuid,
   providerConnectionId: uuid.nullable(),
+  providerCustody: z.enum(["personal", "app"]),
   model: z.string().min(1).max(200),
   reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh", "max"]),
   createdAt: timestamp,

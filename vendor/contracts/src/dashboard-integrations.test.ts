@@ -13,6 +13,24 @@ const BINDING_ID = "33333333-3333-4333-8333-333333333333";
 const NOW = "2026-09-01T12:00:00.000Z";
 
 describe("dashboard integration contracts", () => {
+  it("requires explicit personal consent and keeps app custody distinct", () => {
+    const schema = controlPlaneOperations.updateAppAiIntegration.input;
+    const body = { aiCredentialSource: "owner", providerConnectionId: CONNECTION_ID,
+      model: "gpt-5.6-sol", reasoningEffort: "medium" };
+    expect(schema.parse({ appId: APP_ID, body }).body.providerCustody).toBe("personal");
+    expect(schema.parse({ appId: APP_ID, body: { ...body,
+      personalConnectionConsent: { intentId: BINDING_ID } } }).body.personalConnectionConsent)
+      .toEqual({ intentId: BINDING_ID });
+    expect(schema.safeParse({ appId: APP_ID, body: { ...body,
+      personalConnectionConsent: { intentId: "not-an-intent" } } }).success).toBe(false);
+    expect(schema.safeParse({ appId: APP_ID, body: { ...body, providerCustody: "app",
+      personalConnectionConsent: { intentId: BINDING_ID } } }).success).toBe(false);
+    expect(schema.safeParse({ appId: APP_ID, body: { ...body, providerCustody: "app",
+      aiCredentialSource: "platform" } }).success).toBe(false);
+    expect(schema.parse({ appId: APP_ID, body: { ...body, providerCustody: "app" } })
+      .body.providerCustody).toBe("app");
+  });
+
   it("keeps account provider reads credential-free and bounded", () => {
     const parsed = accountIntegrationConnectionSchema.parse({
       id: CONNECTION_ID,
@@ -64,9 +82,10 @@ describe("dashboard integration contracts", () => {
           triggerMode: "mention",
         },
       }),
-    ).toMatchObject({ appId: APP_ID, integrationName: "team_chat" });
+    ).toMatchObject({ appId: APP_ID, integrationName: "team_chat", body: { custody: "personal" } });
     const binding = controlPlaneOperations.bindAppIntegration.output.parse({
       id: BINDING_ID,
+      custody: "app",
       integrationName: "team_chat",
       connectionId: CONNECTION_ID,
       callingUserId: null,
@@ -83,6 +102,7 @@ describe("dashboard integration contracts", () => {
     });
     expect(binding).not.toHaveProperty("calendarId");
     expect(binding).not.toHaveProperty("providerCredential");
+    expect(binding.custody).toBe("app");
     expect(
       controlPlaneOperations.unbindAppIntegration.output.parse({
         bindingId: BINDING_ID,
@@ -184,6 +204,8 @@ describe("dashboard integration contracts", () => {
           appUrl: "https://family-helper.example.test",
           aiCredentialSource: "owner",
           providerConnectionId: CONNECTION_ID,
+          providerCustody: "personal",
+          appOwnedConnections: [],
           model: "gpt-5.6-sol",
           reasoningEffort: "medium",
           usage: {
