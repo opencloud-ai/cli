@@ -163,6 +163,27 @@ export function sdkVersionAtLeast(
   return INSTALLED_SDK_VERSIONS.indexOf(version) >= INSTALLED_SDK_VERSIONS.indexOf(minimum);
 }
 
+/**
+ * Functions that run only for an integration connection: the published
+ * contract's operations, sync, webhook, and OAuth exchange and refresh.
+ */
+export function integrationContractFunctionNames(
+  manifest: OpenCloudManifest,
+): ReadonlySet<string> {
+  const contract =
+    manifest.schemaVersion === 3 ? manifest.provides?.integration : undefined;
+  if (!contract) return new Set();
+  const authorization = contract.authorization;
+  return new Set([
+    ...contract.operations.map((operation) => operation.function),
+    ...(contract.sync ? [contract.sync.function] : []),
+    ...(contract.webhook ? [contract.webhook.function] : []),
+    ...(authorization.type === "oauth2"
+      ? [authorization.exchange, ...(authorization.refresh ? [authorization.refresh] : [])]
+      : []),
+  ]);
+}
+
 export const migrationSchema = z
   .object({
     id: z.string().regex(/^[0-9]{4,14}_[a-z0-9][a-z0-9_-]*$/),

@@ -3,7 +3,7 @@ import {
   createCustomIntegrationConnectionRequestSchema,
   updateCustomIntegrationConnectionRequestSchema,
 } from "./custom-integrations.js";
-import { parseManifest } from "./manifest.js";
+import { integrationContractFunctionNames, parseManifest } from "./manifest.js";
 
 const base = {
   schemaVersion: 3,
@@ -159,6 +159,14 @@ describe("custom integration manifests", () => {
     };
     const manifest = parseManifest(extended);
     if (manifest.schemaVersion !== 3) throw new Error("expected schema 3");
+    expect([...integrationContractFunctionNames(manifest)].sort()).toEqual([
+      "oauth-exchange",
+      "oauth-refresh",
+      "orders-list",
+      "receive-webhook",
+      "sync-orders",
+    ]);
+    expect(integrationContractFunctionNames(parseManifest(base)).size).toBe(0);
     expect(manifest.provides?.integration.authorization).toEqual({
       type: "oauth2",
       authorizationUrl: "https://erp.example/oauth/authorize",

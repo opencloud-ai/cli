@@ -171,6 +171,7 @@ export async function buildBundle(
     manifest,
     selection,
   );
+  await assertSelfContainedFunctions(manifest, selection);
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
     ...(await findFrontendSdkWarnings(manifest, selection)),
@@ -515,6 +516,53 @@ async function inspectFunctionEntrypoints(
     }
   }
   return warnings;
+}
+
+const FUNCTION_SOURCE_PATTERN = /[.](?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const RELATIVE_IMPORT_PATTERNS = [
+  /\bfrom\s*["'](\.{1,2}\/[^"']+)["']/g,
+  /\bimport\s*["'](\.{1,2}\/[^"']+)["']/g,
+  /\bimport\s*\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g,
+];
+
+/**
+ * Each Function is deployed on its own with only its entrypoint's directory,
+ * so a relative import must stay inside that directory and name an existing
+ * file (the runtime resolves exact file names, including the extension).
+ */
+async function assertSelfContainedFunctions(
+  manifest: OpenCloudManifest,
+  selection: BundleSelection,
+): Promise<void> {
+  for (const definition of manifest.functions) {
+    const directory = path.posix.dirname(definition.entrypoint);
+    const sources = [...selection.files.entries()].filter(
+      ([relative]) =>
+        relative.startsWith(`${directory}/`) && FUNCTION_SOURCE_PATTERN.test(relative),
+    );
+    for (const [relative, sourceFile] of sources) {
+      const content = (await readFile(sourceFile, "utf8"))
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      for (const pattern of RELATIVE_IMPORT_PATTERNS) {
+        for (const [, specifier] of content.matchAll(pattern)) {
+          const target = path.posix.normalize(
+            path.posix.join(path.posix.dirname(relative), specifier!),
+          );
+          if (!target.startsWith(`${directory}/`)) {
+            throw new Error(
+              `Function ${definition.name} imports ${specifier} from ${relative}, which is outside its directory ${directory}/. Each Function is deployed on its own with only that directory, so keep helper modules inside it (copy a shared helper into each Function that uses it).`,
+            );
+          }
+          if (!selection.files.has(target)) {
+            throw new Error(
+              `Function ${definition.name} imports ${specifier} from ${relative}, but ${target} does not exist. Import the exact file name, including its extension.`,
+            );
+          }
+        }
+      }
+    }
+  }
 }
 
 async function findFrontendSdkWarnings(

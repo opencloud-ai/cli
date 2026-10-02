@@ -15,6 +15,10 @@
   `events`, and `provides.integration` contracts with credential or OAuth 2.0
   authorization, sync, webhooks, and events. SDK 2.6.0 pins are accepted while
   2.3.0 remains the default for new and unpinned apps.
+- Reject a Function whose relative import leaves its own directory or names a
+  file that does not exist. Each Function is deployed with only its
+  entrypoint's directory, so such a bundle previously deployed and then failed
+  to start.
 - Let `app email list` read installations that send through SES and preserve
   their custom-domain receiving metadata.
 
