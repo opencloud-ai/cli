@@ -23,9 +23,10 @@ this snapshot changes only when the CLI deliberately changes that default.
 ## CLI 3.11.0 organisation-built integrations
 
 The contract, typed-client, and bundler snapshots are copied from platform
-commit `8f75f4453ecb8c6133e1405bd69a940c58ad58ee` (pull request #330), which
-contains the organisation-built integration contracts and the bundler check
-that each Function's relative imports stay inside its own directory. Every vendored contract, typed-client,
-and bundler file is byte-identical to that commit. Browser SDK 2.3.0 remains
-the local default; providers that declare sync, webhooks, or events explicitly
-select SDK 2.6.0 on an updated platform.
+commit `710446e3e6b8a604f077ba95911ff4ba7f7ca057` (merged in pull request
+#330), which contains the organisation-built integration contracts and the
+bundler check that each Function's relative imports stay inside its own
+directory. Every vendored contract, typed-client, and bundler file is
+byte-identical to that commit. Browser SDK 2.3.0 remains the local default;
+providers that declare sync, webhooks, or events explicitly select SDK 2.6.0
+on an updated platform.
