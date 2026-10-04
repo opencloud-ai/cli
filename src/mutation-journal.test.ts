@@ -912,6 +912,53 @@ describe("mutation journal", () => {
     expect(await readdir(path.join(directory, "locks"))).toEqual([]);
   });
 
+  it.each([
+    "opencloud app dev integration mode",
+    "opencloud app dev integration test-connection",
+    "opencloud app dev integration inject",
+  ] as const)(
+    "requires and then reuses an explicit Agent key for %s",
+    async (commandId) => {
+      const directory = path.join(await temporaryDirectory(), "journal");
+      const journal = await MutationJournal.open({
+        directory,
+        apiUrl: API_URL,
+        appId: APP_ID,
+        authority: {
+          rootRunId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          familyId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        },
+      });
+      const spec = {
+        commandId,
+        safeScope: {
+          appId: APP_ID,
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          integrationName: "crm",
+        },
+        safeRequest: { action: commandId },
+      };
+      const callback = vi.fn();
+      await expect(journal.run(spec, callback)).rejects.toMatchObject({
+        code: "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
+      });
+      expect(callback).not.toHaveBeenCalled();
+
+      const keys: string[] = [];
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await journal.run(
+          { ...spec, explicitIdempotencyKey: "agent-integration-key" },
+          async (run) => {
+            keys.push(run.idempotencyKey);
+            await run.markAttempted();
+            await run.complete();
+          },
+        );
+      }
+      expect(keys).toEqual(["agent-integration-key", "agent-integration-key"]);
+    },
+  );
+
   it("writes only protected regular files and no secret-derived data", async () => {
     const root = await temporaryDirectory();
     const directory = path.join(root, "journal");

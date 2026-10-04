@@ -152,6 +152,9 @@ describe("route manifest compatibility", () => {
   });
 
   it("gates Function routes on SDK 2.3 while static aliases support old SDKs", () => {
+    for (const version of ["2.3.0", "2.4.0"]) {
+      expect(() => parseManifest({ ...manifest, runtime: { sdk: { version } }, routes: [route("/pixel")] })).not.toThrow();
+    }
     for (const version of ["2.0.0", "2.1.0", "2.2.0"]) {
       const runtime = { sdk: { version } };
       expect(() => parseManifest({ ...manifest, runtime, routes: [route("/pixel")] })).toThrow(/2.3.0/);

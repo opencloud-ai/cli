@@ -7,6 +7,18 @@ import {
 } from "./control-plane.js";
 
 describe("controlPlaneOperations", () => {
+  it("exposes exact organisation capacity to typed user callers without subject identities", () => {
+    const operation = controlPlaneOperations.getOrganisationCapacity;
+    expect(operation).toMatchObject({ method: "GET", path: "/v1/organisations/{organisationId}/capacity", auth: "user", scopes: [], idempotency: "none" });
+    const organisationId = "22222222-2222-4222-8222-222222222222";
+    expect(operation.input.parse({ organisationId })).toEqual({ organisationId });
+    const metric = { metric: "file_bytes", period: "lifetime", allowance: "9007199254740993123", committed: "5", used: "2", reserved: "1", uncertain: "2", available: "9007199254740993118" };
+    const output = { organisationId, metrics: [metric] };
+    expect(operation.output.parse(output)).toEqual(output);
+    for (const invalid of [42, "-1", "1.5", "01", "1e3"]) expect(operation.output.safeParse({ ...output, metrics: [{ ...metric, available: invalid }] }).success).toBe(false);
+    expect(operation.output.parse({ ...output, privateConversation: "hidden", metrics: [{ ...metric, appId: "hidden" }] })).toEqual(output);
+  });
+
   it("shares custom domain methods, scope, outputs and idempotency with typed callers", () => {
     const appId = "22222222-2222-4222-8222-222222222222";
     const output = { available: true, unavailableReason: null, binding: null, cleanupPending: false };

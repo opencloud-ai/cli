@@ -13,6 +13,13 @@ const submission = agentTaskSubmissionSchema.parse({
 });
 
 describe("agent task admission contracts", () => {
+  it("accepts generic committed results while rejecting incomplete or invented receipts", () => {
+    const receipt = { schemaVersion: 2, submissionKey: "capture-1", resultId: "evidence-1", committed: true };
+    expect(agentTaskReceiptSchema.parse(receipt)).toEqual(receipt);
+    for (const change of [{ committed: false }, { resultId: "" }, { resultId: undefined }, { submissionKey: "" }, { invented: true }]) {
+      expect(agentTaskReceiptSchema.safeParse({ ...receipt, ...change }).success).toBe(false);
+    }
+  });
   it("checks every assignment against the pinned strict schema", () => {
     expect(() => validateAgentTaskSubmission(definition, submission)).not.toThrow();
     for (const input of [{}, { url: true }, { url: "https://forma.test", undeclared: "value" }, { url: "x".repeat(2_049) }]) {
@@ -26,6 +33,11 @@ describe("agent task admission contracts", () => {
     expect(agentTaskDefinitionSchema.safeParse({ ...definition, inputSchema: { ...definition.inputSchema, required: ["missing"] } }).success).toBe(false);
     expect(agentTaskDefinitionSchema.safeParse({ ...definition, inputSchema: { ...definition.inputSchema, $ref: "https://schema.test" } }).success).toBe(false);
     expect(agentTaskSubmissionSchema.safeParse({ ...submission, assignments: Array.from({ length: 50 }, (_, i) => ({ id: String(i), input: { url: "x".repeat(8_192) } })) }).success).toBe(false);
+  });
+
+  it("keeps legacy task token metadata readable without making it operational", () => {
+    const parsed = agentTaskDefinitionSchema.parse({ ...definition, tokenLimit: 100_000 });
+    expect(parsed.tokenLimit).toBe(100_000);
   });
 
   it("requires a committed application receipt, without claiming notification delivery", () => {

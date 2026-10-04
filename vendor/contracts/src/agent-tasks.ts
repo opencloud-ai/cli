@@ -32,7 +32,10 @@ export const agentTaskDefinitionSchema = z.object({
   maxAssignments: z.number().int().min(1).max(50).default(10),
   timeoutSeconds: z.number().int().min(60).max(3_600).default(900),
   maxAttempts: z.number().int().min(1).max(3).default(2),
-  tokenLimit: z.number().int().min(1_000).max(500_000).default(100_000),
+  // Read-only compatibility metadata from pre-v4 task manifests. It is
+  // retained so immutable stored admissions remain readable; no runtime path
+  // uses it as a work or token ceiling.
+  tokenLimit: z.number().int().nonnegative().optional(),
 }).strict();
 export type AgentTaskDefinition = z.infer<typeof agentTaskDefinitionSchema>;
 
@@ -69,7 +72,7 @@ export function validateAgentTaskSubmission(definition: AgentTaskDefinition, sub
   }
 }
 
-export const agentTaskReceiptSchema = z.object({
+const legacyAgentTaskReceiptSchema = z.object({
   schemaVersion: z.literal(1),
   submissionKey: agentTaskKeySchema,
   observationId: z.string().min(1).max(128),
@@ -78,6 +81,17 @@ export const agentTaskReceiptSchema = z.object({
   notification: z.enum(["not_needed", "queued"]),
   screenshotFileId: z.uuid().optional(),
 }).strict();
+// Generic result commitment; keep historical campaign receipts readable.
+export const agentTaskReceiptSchema = z.union([
+  legacyAgentTaskReceiptSchema,
+  z.object({
+    schemaVersion: z.literal(2),
+    submissionKey: agentTaskKeySchema,
+    resultId: z.string().min(1).max(128),
+    committed: z.literal(true),
+    screenshotFileId: z.uuid().optional(),
+  }).strict(),
+]);
 export type AgentTaskReceipt = z.infer<typeof agentTaskReceiptSchema>;
 
 export const agentTaskStateSchema = z.enum(["queued", "running", "processing", "succeeded", "partial", "failed", "stopped"]);

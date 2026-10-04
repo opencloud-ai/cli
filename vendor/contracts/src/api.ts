@@ -149,7 +149,7 @@ export type UpsertAlertRuleRequest = z.infer<
 >;
 
 export type AgentOnboardingState =
-  "awaiting_email_verification" | "provisional_ready" | "ready";
+  "awaiting_email_verification" | "organisation_setup_required" | "provisional_ready" | "ready";
 
 export interface AgentOnboardingResponse {
   onboardingId: string;
@@ -185,6 +185,10 @@ export interface AppRecord {
   state: AppState;
   backupSchedule?: "none" | "daily" | "weekly";
   ownerUserId: string;
+  organisationId?: string;
+  workspaceId?: string;
+  placementVersion?: string;
+  creatorUserId?: string;
   desiredDeploymentId: string | null;
   activeDeploymentId: string | null;
   createdAt: string;

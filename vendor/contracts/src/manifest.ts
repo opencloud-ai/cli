@@ -13,12 +13,15 @@ import {
   manifestAlertRuleSchema,
 } from "./api-core.js";
 import {
+  builtInIntegrationDefinitionSchema,
+  customIntegrationDefinitionSchema,
   integrationAccountSchema,
   integrationCapabilitySchema,
   integrationCardinalitySchema,
   integrationDefinitionSchema,
   integrationEventsSchema,
   integrationProviderSchema,
+  providedIntegrationSchema,
 } from "./integration-manifest.js";
 
 export {
@@ -31,13 +34,36 @@ export {
   manifestAlertRuleSchema,
 } from "./api-core.js";
 export {
+  builtInIntegrationDefinitionSchema,
+  customIntegrationDefinitionSchema,
   integrationAccountSchema,
   integrationCapabilitySchema,
   integrationCardinalitySchema,
   integrationDefinitionSchema,
   integrationEventsSchema,
   integrationProviderSchema,
+  providedIntegrationSchema,
 };
+export {
+  customIntegrationCapabilitySchema,
+  customIntegrationCredentialNameSchema,
+  customIntegrationEventTypeSchema,
+  customIntegrationNameSchema,
+  customIntegrationOperationNameSchema,
+  providedIntegrationAuthorizationSchema,
+  providedIntegrationCapabilitySchema,
+  providedIntegrationCredentialSchema,
+  providedIntegrationEventSchema,
+  providedIntegrationOperationSchema,
+  providedIntegrationSyncSchema,
+  type BuiltInIntegrationDefinition,
+  type CustomIntegrationDefinition,
+  type ProvidedIntegration,
+  type ProvidedIntegrationAuthorization,
+  type ProvidedIntegrationCredential,
+  type ProvidedIntegrationEvent,
+  type ProvidedIntegrationOperation,
+} from "./integration-manifest.js";
 
 const relativePath = z
   .string()
@@ -109,9 +135,54 @@ function isAppOwnedHealthPath(value: string): boolean {
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-export const sdkVersionSchema = z.enum(["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"], {
-  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, or 2.5.0",
+const INSTALLED_SDK_VERSIONS = ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0"] as const;
+
+export const sdkVersionSchema = z.enum(INSTALLED_SDK_VERSIONS, {
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, or 2.6.0",
 });
+
+/** The next occurrence of a manifest cron schedule after `after`. */
+export function nextCronOccurrence(
+  schedule: string,
+  timezone: string | undefined,
+  after: Date = new Date(),
+): Date {
+  return CronExpressionParser.parse(schedule, {
+    tz: timezone ?? "Etc/UTC",
+    currentDate: after,
+  })
+    .next()
+    .toDate();
+}
+
+/** Installed SDK versions are ordered; each includes every earlier capability. */
+export function sdkVersionAtLeast(
+  version: (typeof INSTALLED_SDK_VERSIONS)[number],
+  minimum: (typeof INSTALLED_SDK_VERSIONS)[number],
+): boolean {
+  return INSTALLED_SDK_VERSIONS.indexOf(version) >= INSTALLED_SDK_VERSIONS.indexOf(minimum);
+}
+
+/**
+ * Functions that run only for an integration connection: the published
+ * contract's operations, sync, webhook, and OAuth exchange and refresh.
+ */
+export function integrationContractFunctionNames(
+  manifest: OpenCloudManifest,
+): ReadonlySet<string> {
+  const contract =
+    manifest.schemaVersion === 3 ? manifest.provides?.integration : undefined;
+  if (!contract) return new Set();
+  const authorization = contract.authorization;
+  return new Set([
+    ...contract.operations.map((operation) => operation.function),
+    ...(contract.sync ? [contract.sync.function] : []),
+    ...(contract.webhook ? [contract.webhook.function] : []),
+    ...(authorization.type === "oauth2"
+      ? [authorization.exchange, ...(authorization.refresh ? [authorization.refresh] : [])]
+      : []),
+  ]);
+}
 
 export const migrationSchema = z
   .object({
@@ -337,6 +408,10 @@ export const openCloudManifestV3Schema = z
     appId: z.uuid(),
     ...openCloudManifestFields,
     routes: appRoutesSchema.optional(),
+    provides: z
+      .object({ integration: providedIntegrationSchema })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -346,7 +421,7 @@ export const openCloudManifestSchema = z
     openCloudManifestV3Schema,
   ])
   .superRefine((manifest, context) => {
-    if (manifest.data?.search.length && !["2.4.0", "2.5.0"].includes(manifest.runtime.sdk.version)) {
+    if (manifest.data?.search.length && !sdkVersionAtLeast(manifest.runtime.sdk.version, "2.4.0")) {
       context.addIssue({ code: "custom", path: ["data", "search"], message: "Data search requires runtime SDK version 2.4.0" });
     }
     if (manifest.schemaVersion === 3 && manifest.routes) {
@@ -356,7 +431,7 @@ export const openCloudManifestSchema = z
         if (!target || target.access === "system") {
           context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Route must reference a declared user or public Function" });
         }
-        if (!["2.3.0", "2.4.0", "2.5.0"].includes(manifest.runtime.sdk.version)) {
+        if (!sdkVersionAtLeast(manifest.runtime.sdk.version, "2.3.0")) {
           context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Function routes require runtime SDK version 2.3.0 or later" });
         }
         try {
@@ -386,7 +461,108 @@ export const openCloudManifestSchema = z
           "Web Push notifications require runtime SDK version 2.1.0 or later",
       });
     }
+    if (manifest.schemaVersion === 3 && manifest.provides?.integration) {
+      const contract = manifest.provides.integration;
+      const requireSystemFunction = (
+        name: string,
+        path: (string | number)[],
+        purpose: string,
+      ) => {
+        const target = manifest.functions.find(
+          (definition) => definition.name === name,
+        );
+        if (!target) {
+          context.addIssue({
+            code: "custom",
+            path,
+            message: `${purpose} references unknown function: ${name}`,
+          });
+        } else if (target.access !== "system") {
+          context.addIssue({
+            code: "custom",
+            path,
+            message: `${purpose} function ${name} must declare access: system`,
+          });
+        }
+      };
+      contract.operations.forEach((operation, index) => {
+        requireSystemFunction(
+          operation.function,
+          ["provides", "integration", "operations", index, "function"],
+          `integration operation ${operation.name}`,
+        );
+      });
+      if (contract.authorization.type === "oauth2") {
+        requireSystemFunction(
+          contract.authorization.exchange,
+          ["provides", "integration", "authorization", "exchange"],
+          "integration OAuth exchange",
+        );
+        if (contract.authorization.refresh) {
+          requireSystemFunction(
+            contract.authorization.refresh,
+            ["provides", "integration", "authorization", "refresh"],
+            "integration OAuth refresh",
+          );
+        }
+      }
+      if (contract.sync) {
+        requireSystemFunction(
+          contract.sync.function,
+          ["provides", "integration", "sync", "function"],
+          "integration sync",
+        );
+        try {
+          CronExpressionParser.parse(contract.sync.schedule, {
+            tz: contract.sync.timezone ?? "Etc/UTC",
+          });
+        } catch {
+          context.addIssue({
+            code: "custom",
+            path: ["provides", "integration", "sync", "schedule"],
+            message: `invalid cron schedule: ${contract.sync.schedule}`,
+          });
+        }
+      }
+      if (contract.webhook) {
+        requireSystemFunction(
+          contract.webhook.function,
+          ["provides", "integration", "webhook", "function"],
+          "integration webhook",
+        );
+      }
+      if (
+        (contract.sync || contract.webhook || contract.events.length) &&
+        !sdkVersionAtLeast(manifest.runtime.sdk.version, "2.6.0")
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["runtime", "sdk", "version"],
+          message:
+            "integration sync, webhooks, and events require runtime SDK version 2.6.0",
+        });
+      }
+      contract.credentials.forEach((credential, index) => {
+        if (Object.hasOwn(manifest.secrets, credential.name)) {
+          context.addIssue({
+            code: "custom",
+            path: ["provides", "integration", "credentials", index, "name"],
+            message: `integration credential ${credential.name} must not reuse an app secret name`,
+          });
+        }
+      });
+    }
     for (const [name, integration] of Object.entries(manifest.integrations)) {
+      if (
+        integration.provider === "custom" &&
+        ["2.0.0", "2.1.0"].includes(manifest.runtime.sdk.version)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["integrations", name, "provider"],
+          message: "custom integrations require runtime SDK version 2.2.0 or later",
+        });
+      }
       if (
         ["google-analytics", "google-search-console", "google-ads"].includes(
           integration.provider,
@@ -442,7 +618,7 @@ export const openCloudManifestSchema = z
     );
     assertUnique((manifest.agentTasks ?? []).map(task => task.name), "agentTasks");
     for (const [index, task] of (manifest.agentTasks ?? []).entries()) {
-      if (manifest.runtime.sdk.version !== "2.5.0") {
+      if (!sdkVersionAtLeast(manifest.runtime.sdk.version, "2.5.0")) {
         context.addIssue({ code: "custom", path: ["agentTasks", index], message: "Agent tasks require runtime SDK 2.5.0" });
       }
       if (!manifest.functions.some(fn => fn.name === task.resultFunction)) {
@@ -573,6 +749,28 @@ export const openCloudManifestSchema = z
     });
     Object.entries(manifest.integrations).forEach(
       ([integrationName, integration]) => {
+        if (integration.provider === "custom") {
+          const handler = integration.events?.function;
+          if (!handler) return;
+          const target = manifest.functions.find(
+            (definition) => definition.name === handler,
+          );
+          const path = ["integrations", integrationName, "events", "function"];
+          if (!target) {
+            context.addIssue({
+              code: "custom",
+              path,
+              message: `custom integration events reference unknown function: ${handler}`,
+            });
+          } else if (target.access !== "system") {
+            context.addIssue({
+              code: "custom",
+              path,
+              message: `custom integration event function ${handler} must declare access: system`,
+            });
+          }
+          return;
+        }
         const messageHandler = integration.events?.message?.function;
         const asanaHandler = integration.events?.function;
         const handler = messageHandler ?? asanaHandler;

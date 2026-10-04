@@ -1,4 +1,27 @@
 import { z } from "zod";
+import { organisationEmailDomainSchema, organisationHostSchema } from "./organisation-domains.js";
+import { appAudiencesSchema, appSharingViewSchema } from "./app-audiences.js";
+import { organisationWeeklyCapacitySchema, employeeAllowanceOverrideSchema, organisationWeekSchema } from "./organisation-capacity.js";
+import { organisationLimitSchema, organisationTimeZoneSchema } from "./organisation.js";
+import {
+  acceptOrganisationInvitationRequestSchema,
+  capacityMetricSchema,
+  capacityQuantitySchema,
+  appCapabilitiesSchema,
+  appShareRecipientSchema,
+  appSharePermissionSchema,
+  organisationDirectoryViewSchema,
+  accountOrganisationContextSchema,
+  createOrganisationRequestSchema,
+  updateOrganisationRequestSchema,
+  organisationMemberViewSchema,
+  setOrganisationMemberRoleRequestSchema,
+  organisationInvitationSchema,
+  createOrganisationInvitationRequestSchema,
+} from "./organisation-directory.js";
+export * from "./organisation-directory.js";
+import { controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
+export { controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
 import { appDomainAddSchema, appDomainSettingsSchema } from "./app-domains.js";
 import {
   alertAggregationSchema,
@@ -49,6 +72,22 @@ import {
 } from "./dashboard-integrations.js";
 
 export * from "./dashboard-integrations.js";
+import {
+  beginCustomIntegrationAuthorizationRequestSchema,
+  createCustomIntegrationConnectionRequestSchema,
+  customIntegrationAuthorizationDestinationSchema,
+  customIntegrationCatalogSchema,
+  customIntegrationConnectionSchema,
+  customIntegrationSyncRunSchema,
+  devIntegrationModeSchema,
+  devSessionIntegrationSettingsSchema,
+  injectDevIntegrationEventRequestSchema,
+  injectDevIntegrationEventResultSchema,
+  integrationEventDeliveriesSchema,
+  updateCustomIntegrationConnectionRequestSchema,
+} from "./custom-integrations.js";
+
+export * from "./custom-integrations.js";
 
 import { integrationDefinitionSchema } from "./integration-manifest.js";
 
@@ -57,6 +96,11 @@ const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const secretName = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const jsonObject = z.record(z.string(), z.unknown());
 const emptyBody = z.object({});
+const accountWelcomeSchema = z.object({
+  step: z.enum(["confirm_email", "name", "organisation", "complete"]),
+  displayName: z.string(), email: z.email(), continueUrl: z.url(),
+});
+const welcomeReturnSchema = z.string().max(2048).optional();
 const platformVersionOutput = z.object({
   version: z.string(),
   commit: z.string(),
@@ -165,6 +209,8 @@ export type AccountMcpTokensPage = z.infer<
 
 const appIntegrationNameSchema = dashboardIntegrationNameSchema;
 const eligibleAppIntegrationConnectionSchema = z.object({
+  // Organisation custody applies only to custom integration connections.
+  custody: z.enum(["personal", "app", "organisation"]),
   id: uuid,
   accountLabel: z.string(),
   status: z.literal("active"),
@@ -284,57 +330,6 @@ const visitorAnalyticsOutput = z.object({
   }),
 });
 
-export const controlPlaneAppSchema = z
-  .object({
-    id: uuid,
-    identityStatus: z.enum(["pending", "assigned"]),
-    name: z.string().nullable(),
-    slug: z.string().nullable(),
-    appUrl: z.url().nullable(),
-    authUrl: z.url(),
-    apiUrl: z.url(),
-    visibility: appVisibilitySchema,
-    aiCredentialSource: appAiCredentialSourceSchema.default("owner"),
-    state: appStateSchema,
-    backupSchedule: z.enum(["none", "daily", "weekly"]).optional(),
-    ownerUserId: uuid,
-    desiredDeploymentId: uuid.nullable(),
-    activeDeploymentId: uuid.nullable(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-  })
-  .passthrough();
-
-export const controlPlaneAppDeploymentTruthSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    appId: uuid,
-    appState: appStateSchema,
-    canonicalUrl: z.url().nullable(),
-    activeDeployment: z
-      .object({
-        id: uuid,
-        version: z.string(),
-        artifactSha256: sha256,
-        state: deploymentStateSchema,
-        activatedAt: z.string().nullable(),
-        activationOperationId: uuid.nullable(),
-        activatedByAgentRootRunId: uuid.nullable(),
-      })
-      .refine(
-        (deployment) =>
-          deployment.activatedByAgentRootRunId === null ||
-          deployment.activationOperationId !== null,
-        {
-          message: "Agent activation attribution requires an operation",
-          path: ["activatedByAgentRootRunId"],
-        },
-      )
-      .passthrough()
-      .nullable(),
-  })
-  .passthrough();
-
 export const assignAppIdentityResponseSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -381,38 +376,6 @@ const appAccessTokenCreationOutput = z.object({
   revealUrl: z.url().optional(),
   deliveryExpiresAt: z.string(),
 });
-
-export const controlPlaneOperationSchema = z
-  .object({
-    id: uuid,
-    appId: uuid.nullable(),
-    deploymentId: uuid.nullable(),
-    type: z.string(),
-    state: operationStateSchema,
-    actorType: z.string(),
-    actorId: z.string(),
-    idempotencyKey: z.string(),
-    error: jsonObject.nullable(),
-    createdAt: z.string(),
-    updatedAt: z.string(),
-    steps: z
-      .array(
-        z
-          .object({
-            id: uuid,
-            name: z.string(),
-            state: operationStateSchema,
-            attempt: z.number().int(),
-            startedAt: z.string().nullable(),
-            finishedAt: z.string().nullable(),
-            output: jsonObject.nullable(),
-            error: jsonObject.nullable(),
-          })
-          .passthrough(),
-      )
-      .optional(),
-  })
-  .passthrough();
 
 export const controlPlaneDeploymentSchema = z
   .object({
@@ -743,7 +706,7 @@ export const appEmailHistoryQuerySchema = z
 export const controlPlaneAppEmailSchema = z
   .object({
     schemaVersion: z.literal(1),
-    provider: z.enum(["disabled", "capture", "mailpace"]),
+    provider: z.enum(["disabled", "capture", "mailpace", "ses"]),
     sending: z.object({
       configured: z.boolean(),
       domain: z.string(),
@@ -752,6 +715,10 @@ export const controlPlaneAppEmailSchema = z
       configured: z.boolean(),
       domain: z.string(),
       webhookUrl: z.url(),
+      customDomain: z.object({
+        hostname: z.string(),
+        configured: z.boolean(),
+      }).nullable().optional(),
     }),
     development: z.object({
       capture: z.literal(true),
@@ -763,6 +730,7 @@ export const controlPlaneAppEmailSchema = z
         displayName: z.string().nullable(),
         sendAddress: z.email(),
         inboundAddress: z.email().nullable(),
+        customInboundAddress: z.email().nullable().optional(),
         function: z.string().nullable(),
       }),
     ),
@@ -798,6 +766,7 @@ const onboardingOutput = z
       ),
     state: z.enum([
       "awaiting_email_verification",
+      "organisation_setup_required",
       "provisional_ready",
       "ready",
     ]),
@@ -1514,8 +1483,242 @@ const productionDataTablePath = appPath.extend({
   table: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/),
 });
 const productionFilePath = appPath.extend({ fileId: uuid });
+const capacityLimitInput = z.object({ metric: capacityMetricSchema, period: z.string(), ceiling: capacityQuantitySchema }).strict();
+export const organisationCapacityOutputSchema = z.object({
+  organisationId: uuid,
+  metrics: z.array(z.object({
+    metric: capacityMetricSchema, period: z.string(), allowance: capacityQuantitySchema.nullable(),
+    committed: capacityQuantitySchema, used: capacityQuantitySchema,
+    reserved: capacityQuantitySchema.optional(), uncertain: capacityQuantitySchema.optional(), available: capacityQuantitySchema.nullable(),
+  })),
+});
+export const workspaceCapacityOutputSchema = z.object({
+  organisationId: uuid, workspaceId: uuid,
+  metrics: z.array(z.object({
+    metric: capacityMetricSchema, period: z.string(), allowance: capacityQuantitySchema.nullable(),
+    ceiling: capacityQuantitySchema.nullable(), committed: capacityQuantitySchema, used: capacityQuantitySchema,
+    reserved: capacityQuantitySchema.optional(), uncertain: capacityQuantitySchema.optional(), available: capacityQuantitySchema.nullable(),
+  })),
+});
 
 export const controlPlaneOperations = {
+  getAppCapabilities: operation({
+    method: "GET", path: "/v1/apps/{appId}/capabilities",
+    summary: "Read current app capabilities", description: "Read canonical server actions for the current app actor.",
+    auth: "user", scopes: [], input: appPath, output: appCapabilitiesSchema, idempotency: "none",
+  }),
+  getAppSharing: operation({
+    method: "GET", path: "/v1/apps/{appId}/sharing",
+    summary: "Read app audiences", description: "Read independent app-use and app-administration audiences.",
+    auth: "user", scopes: [], input: appPath,
+    output: appSharingViewSchema, idempotency: "none",
+  }),
+  setAppAudiences: operation({
+    method: "PUT", path: "/v1/apps/{appId}/sharing",
+    summary: "Set app audiences", description: "Set independent use and administration audiences with current same-organisation people.",
+    auth: "user", scopes: [], input: appPath.extend({ body: appAudiencesSchema }),
+    output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }),
+    bodyKey: "body", idempotency: "required",
+  }),
+  grantAppShare: operation({
+    method: "PUT", path: "/v1/apps/{appId}/shares",
+    summary: "Share an app", description: "Grant administration or use to one current organisation member.",
+    auth: "user", scopes: [], input: appPath.extend({ body: z.object({ recipient: appShareRecipientSchema, permission: appSharePermissionSchema }).strict() }),
+    output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }), bodyKey: "body", idempotency: "required",
+  }),
+  revokeAppShare: operation({
+    method: "DELETE", path: "/v1/apps/{appId}/shares/{shareId}",
+    summary: "Revoke an app share", description: "Revoke one grant while retaining independently effective access.",
+    auth: "user", scopes: [], input: appPath.extend({ shareId: uuid }),
+    output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }), idempotency: "required",
+  }),
+  getOrganisationCapacity: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}/capacity",
+    summary: "Inspect organisation capacity", description: "Read authoritative organisation allowances and commitments without private app or conversation identities.",
+    auth: "user", scopes: [], input: z.object({ organisationId: uuid }),
+    output: organisationCapacityOutputSchema, idempotency: "none",
+  }),
+  getPersonalCapacity: operation({
+    method: "GET", path: "/v1/account/capacity",
+    summary: "Inspect personal capacity",
+    description: "Read the current user's personal capacity and reset period. The summary is null before a personal scope exists; never creates a scope or includes company capacity.",
+    auth: "user", scopes: [], input: emptyBody,
+    output: z.object({ summary: z.object({ capacity: organisationCapacityOutputSchema, period: organisationWeekSchema }).nullable() }),
+    idempotency: "none",
+  }),
+  getOrganisationWeeklyCapacity: operation({
+    method:"GET",path:"/v1/organisations/{organisationId}/weekly-capacity",
+    summary:"Read weekly employee limits",description:"Read the current period and default; members see their own allowance and admins see employee overrides. Automation shares the organisation budget.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid}),output:organisationWeeklyCapacitySchema,idempotency:"none",
+  }),
+  getOrganisationHosts: operation({
+    method:"GET",path:"/v1/organisations/{organisationId}/hosts",summary:"Inspect organisation addresses",description:"Read current and retained organisation addresses and HTTPS readiness.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid}),output:z.object({available:z.boolean(),hosts:z.array(organisationHostSchema.extend({isCurrent:z.boolean()}))}),idempotency:"none",
+  }),
+  setOrganisationHost: operation({
+    method:"PUT",path:"/v1/organisations/{organisationId}/hosts",summary:"Set organisation address",description:"Reserve a unique label and provision nested app HTTPS. Existing aliases remain reserved and usable.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,body:z.object({handle:z.string().min(1).max(63)}).strict()}),output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  listOrganisationEmailDomains: operation({
+    method:"GET",path:"/v1/organisations/{organisationId}/email-domains",summary:"List email enrolment domains",description:"Organisation administrators can inspect exact-domain TXT claims and verification freshness.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid}),output:z.array(organisationEmailDomainSchema),idempotency:"none",
+  }),
+  addOrganisationEmailDomain: operation({
+    method:"POST",path:"/v1/organisations/{organisationId}/email-domains",summary:"Claim an email domain",description:"Create a disabled exact-domain TXT claim. Verification and explicit enablement are required before enrolment.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,body:z.object({domain:z.string().min(1).max(253)}).strict()}),output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  checkOrganisationEmailDomain: operation({
+    method:"POST",path:"/v1/organisations/{organisationId}/email-domains/{domainId}/check",summary:"Check email-domain ownership",description:"Verify the exact DNS TXT challenge outside the assignment transaction and retain bounded evidence.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,domainId:uuid}),output:z.object({saved:z.literal(true)}),idempotency:"required",
+  }),
+  setOrganisationEmailDomainEnabled: operation({
+    method:"PUT",path:"/v1/organisations/{organisationId}/email-domains/{domainId}",summary:"Enable or disable email enrolment",description:"Only a currently verified domain can be enabled. Existing members are unchanged.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,domainId:uuid,body:z.object({enabled:z.boolean()}).strict()}),output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  removeOrganisationEmailDomain: operation({
+    method:"DELETE",path:"/v1/organisations/{organisationId}/email-domains/{domainId}",summary:"Remove an email-domain claim",description:"Stop future enrolment and release the claim. A new claim requires a new random TXT challenge.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,domainId:uuid}),output:z.object({saved:z.literal(true)}),idempotency:"required",
+  }),
+  resolveLegacyWorkspace: operation({
+    method:"GET",path:"/v1/organisations/{organisationId}/legacy-workspaces/{workspaceId}",
+    summary:"Resolve a historical workspace link",description:"Verify current organisation membership and historical ownership before redirecting an old workspace URL.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,workspaceId:uuid}),output:z.object({organisationId:uuid}),idempotency:"none",
+  }),
+  setOrganisationWeeklyDefault: operation({
+    method:"PUT",path:"/v1/organisations/{organisationId}/weekly-capacity/default",
+    summary:"Set the default employee allowance",description:"Set weekly AI spend in exact USD nanodollars and schedule a timezone change at the next boundary. Does not increase platform capacity.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,body:z.object({defaultEmployeeSpend:organisationLimitSchema,timeZone:organisationTimeZoneSchema}).strict()}),
+    output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  setEmployeeWeeklyOverride: operation({
+    method:"PUT",path:"/v1/organisations/{organisationId}/members/{userId}/weekly-override",
+    summary:"Set an employee allowance override",description:"Replace the weekly allowance permanently or for the current period without resetting usage.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,userId:uuid,body:employeeAllowanceOverrideSchema}),
+    output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  removeEmployeeWeeklyOverride: operation({
+    method:"DELETE",path:"/v1/organisations/{organisationId}/members/{userId}/weekly-override",
+    summary:"Remove an employee allowance override",description:"Use null periodId for a permanent override or an exact period ID for a temporary override.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,userId:uuid,body:z.object({periodId:uuid.nullable()}).strict()}),
+    output:z.object({saved:z.literal(true)}),bodyKey:"body",idempotency:"required",
+  }),
+  getAccountOrganisationContext: operation({
+    method: "GET", path: "/v1/account/organisation",
+    summary: "Get account organisation context", description: "Return the account's assigned organisation lifecycle, including bounded provisional identities. Assignment alone grants no tenant access.",
+    auth: "user", scopes: [], input: z.object({}),
+    output: accountOrganisationContextSchema, idempotency: "none",
+  }),
+  listOrganisations: operation({
+    method: "GET", path: "/v1/organisations",
+    summary: "list organisations", description: "list organisations. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({  }),
+    output: z.array(organisationDirectoryViewSchema),
+    idempotency: "none",
+  }),
+  createOrganisation: operation({
+    method: "POST", path: "/v1/organisations",
+    summary: "create organisation", description: "create organisation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ body: createOrganisationRequestSchema }),
+    output: organisationDirectoryViewSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  getOrganisation: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}",
+    summary: "get organisation", description: "get organisation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid }),
+    output: organisationDirectoryViewSchema,
+    idempotency: "none",
+  }),
+  updateOrganisation: operation({
+    method: "PATCH", path: "/v1/organisations/{organisationId}",
+    summary: "update organisation", description: "update organisation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, body: updateOrganisationRequestSchema }),
+    output: organisationDirectoryViewSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  listOrganisationMembers: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}/members",
+    summary: "list organisation members", description: "list organisation members. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid }),
+    output: z.array(organisationMemberViewSchema),
+    idempotency: "none",
+  }),
+  setOrganisationMemberRole: operation({
+    method: "PUT", path: "/v1/organisations/{organisationId}/members/{userId}",
+    summary: "set organisation member role", description: "set organisation member role. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, userId: uuid, body: setOrganisationMemberRoleRequestSchema }),
+    output: organisationDirectoryViewSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  removeOrganisationMember: operation({
+    method: "DELETE", path: "/v1/organisations/{organisationId}/members/{userId}",
+    summary: "remove organisation member", description: "remove organisation member. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, userId: uuid }),
+    output: z.object({ removed: z.literal(true) }),
+    idempotency: "required",
+  }),
+  listOrganisationInvitations: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}/invitations",
+    summary: "list organisation invitations", description: "list organisation invitations. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid }),
+    output: z.array(organisationInvitationSchema),
+    idempotency: "none",
+  }),
+  createOrganisationInvitation: operation({
+    method: "POST", path: "/v1/organisations/{organisationId}/invitations",
+    summary: "create organisation invitation", description: "create organisation invitation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, body: createOrganisationInvitationRequestSchema }),
+    output: organisationInvitationSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  revokeOrganisationInvitation: operation({
+    method: "DELETE", path: "/v1/organisations/{organisationId}/invitations/{invitationId}",
+    summary: "revoke organisation invitation", description: "revoke organisation invitation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, invitationId: uuid }),
+    output: z.object({ revoked: z.literal(true) }),
+    idempotency: "required",
+  }),
+  acceptOrganisationInvitation: operation({
+    method: "POST", path: "/v1/organisation-invitations/{invitationId}/accept",
+    summary: "accept organisation invitation", description: "accept organisation invitation. Authority is evaluated by the organisation directory.",
+    auth: "user", scopes: [],
+    input: z.object({ invitationId: uuid, body: acceptOrganisationInvitationRequestSchema }),
+    output: organisationDirectoryViewSchema,
+    bodyKey: "body",
+    idempotency: "required",
+  }),
+  getAccountWelcome: operation({
+    method:"GET", path:"/v1/auth/welcome", summary:"Read account welcome steps",
+    description:"Read the signed-in browser's email confirmation, name and optional organisation setup state.",
+    auth:"user", scopes:[], input:z.object({query:z.object({returnTo:welcomeReturnSchema}).optional()}),
+    queryKey:"query",output:accountWelcomeSchema,idempotency:"none",
+  }),
+  saveAccountWelcomeName: operation({
+    method:"POST",path:"/v1/auth/welcome/name",summary:"Save the confirmed user's name",
+    description:"Save a name after email confirmation and advance to optional organisation setup when appropriate.",
+    auth:"user",scopes:[],input:z.object({body:z.object({displayName:z.string().trim().min(1).max(160),returnTo:welcomeReturnSchema})}),
+    bodyKey:"body",output:accountWelcomeSchema,idempotency:"none",
+  }),
+  completeAccountWelcome: operation({
+    method:"POST",path:"/v1/auth/welcome/complete",summary:"Complete or skip organisation setup",
+    description:"Remember completion after the user's name is saved. Skipping preserves the personal account.",
+    auth:"user",scopes:[],input:z.object({body:z.object({returnTo:welcomeReturnSchema})}),
+    bodyKey:"body",output:accountWelcomeSchema,idempotency:"none",
+  }),
   getDashboardSession: operation({
     method: "GET",
     path: "/v1/auth/session",
@@ -1633,6 +1836,90 @@ export const controlPlaneOperations = {
     scopes: [],
     input: emptyBody,
     output: z.array(accountIntegrationConnectionSchema).max(500),
+    idempotency: "none",
+  }),
+  listCustomIntegrations: operation({
+    method: "GET",
+    path: "/v1/custom-integrations",
+    summary: "List organisation-built integrations",
+    description:
+      "Returns integrations published by apps in the current user's organisations that the user may use, their contracts, and the connections the user can see. Credential values are write-only and never returned.",
+    auth: "user",
+    scopes: [],
+    input: emptyBody,
+    output: customIntegrationCatalogSchema,
+    idempotency: "none",
+  }),
+  createCustomIntegrationConnection: operation({
+    method: "POST",
+    path: "/v1/custom-integrations/{providerAppId}/connections",
+    summary: "Connect an organisation-built integration",
+    description:
+      "Stores write-only credential values for one published integration as a personal connection, or as an organisation connection when an organisation administrator requests organisation custody.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      providerAppId: uuid,
+      body: createCustomIntegrationConnectionRequestSchema,
+    }),
+    output: customIntegrationConnectionSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  updateCustomIntegrationConnection: operation({
+    method: "PATCH",
+    path: "/v1/custom-integrations/connections/{connectionId}",
+    summary: "Update an organisation-built integration connection",
+    description:
+      "Renames a connection or replaces its write-only credential values. Personal connections are managed by their owner and organisation connections by organisation administrators.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      connectionId: uuid,
+      body: updateCustomIntegrationConnectionRequestSchema,
+    }),
+    output: customIntegrationConnectionSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  deleteCustomIntegrationConnection: operation({
+    method: "DELETE",
+    path: "/v1/custom-integrations/connections/{connectionId}",
+    summary: "Remove an organisation-built integration connection",
+    description:
+      "Deletes the connection, its encrypted credential values, and every app binding that uses it.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: z.object({ connectionId: uuid, deleted: z.literal(true) }),
+    idempotency: "none",
+  }),
+  beginCustomIntegrationAuthorization: operation({
+    method: "POST",
+    path: "/v1/custom-integrations/{providerAppId}/oauth",
+    summary: "Begin organisation-built integration sign-in",
+    description:
+      "Creates a short-lived, user-bound OAuth attempt for an integration whose contract declares oauth2 authorization and returns only the provider's authorization URL. The provider app's exchange Function redeems the code; tokens are stored write-only. Optionally reconnects an existing connection or binds a calling-user slot after sign-in.",
+    auth: "user",
+    scopes: [],
+    input: z.object({
+      providerAppId: uuid,
+      body: beginCustomIntegrationAuthorizationRequestSchema,
+    }),
+    output: customIntegrationAuthorizationDestinationSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  runCustomIntegrationSync: operation({
+    method: "POST",
+    path: "/v1/custom-integrations/connections/{connectionId}/sync",
+    summary: "Run an integration connection's sync now",
+    description:
+      "Queues the provider's declared sync Function for one active connection outside its schedule. Allowed for the personal owner, organisation administrators for organisation connections, and editors of the provider app.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: customIntegrationSyncRunSchema,
     idempotency: "none",
   }),
   beginGoogleIntegrationAuthorization: operation({
@@ -1881,6 +2168,44 @@ export const controlPlaneOperations = {
     output: aiIntegrationOverviewSchema,
     idempotency: "none",
   }),
+  getOrganisationAiConnections: operation({
+    method:"GET",path:"/v1/ai-integrations/organisations/{organisationId}",
+    summary:"List organisation AI accounts",description:"Read credential-free provider account metadata for the current organisation.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid}),output:z.object({connections:z.array(aiProviderConnectionSchema)}),idempotency:"none",
+  }),
+  transferOrganisationAiConnection: operation({
+    method:"POST",path:"/v1/ai-integrations/organisations/{organisationId}",
+    summary:"Transfer an AI account to an organisation",description:"An organisation administrator explicitly transfers an unused personal provider account into permanent organisation custody.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,body:z.object({connectionId:uuid,requestId:uuid}).strict()}),
+    output:z.object({connection:aiProviderConnectionSchema}),bodyKey:"body",idempotency:"required",
+  }),
+  createOrganisationAiConnection: operation({
+    method: "POST", path: "/v1/ai-integrations/organisations/{organisationId}/connections",
+    summary: "Connect an organisation AI account", description: "Connect an API key or start sign-in directly in organisation custody. Never retry automatically.",
+    auth: "user", scopes: [], input: z.object({organisationId: uuid, body: createAiConnectionRequestSchema}),
+    output: createAiConnectionOutputSchema, bodyKey: "body", idempotency: "none",
+  }),
+  getOrganisationAiAuthorization: operation({
+    method: "GET", path: "/v1/ai-integrations/organisations/{organisationId}/authorizations/{attemptId}",
+    summary: "Read organisation AI sign-in", description: "Read an administrator's own attempt for this organisation.",
+    auth: "user", scopes: [], input: z.object({organisationId: uuid, attemptId: uuid}), output: aiAuthorizationSchema, idempotency: "none",
+  }),
+  cancelOrganisationAiAuthorization: operation({
+    method: "DELETE", path: "/v1/ai-integrations/organisations/{organisationId}/authorizations/{attemptId}",
+    summary: "Cancel organisation AI sign-in", description: "Cancel an administrator's own attempt for this organisation.",
+    auth: "user", scopes: [], input: z.object({organisationId: uuid, attemptId: uuid}), output: aiAuthorizationSchema, idempotency: "none",
+  }),
+  submitOrganisationAiAuthorizationCode: operation({
+    method: "POST", path: "/v1/ai-integrations/organisations/{organisationId}/authorizations/{attemptId}/code",
+    summary: "Complete organisation AI sign-in", description: "Submit a one-time provider code for this administrator's organisation attempt.",
+    auth: "user", scopes: [], input: z.object({organisationId: uuid, attemptId: uuid, body: z.object({authorizationCode:z.string().trim().min(3).max(10_000)}).strict()}),
+    output: aiAuthorizationSchema, bodyKey: "body", idempotency: "none",
+  }),
+  disconnectOrganisationAiConnection: operation({
+    method:"DELETE",path:"/v1/ai-integrations/organisations/{organisationId}/connections/{connectionId}",
+    summary:"Disconnect an organisation AI account",description:"An organisation administrator revokes a provider connection owned by this organisation.",
+    auth:"user",scopes:[],input:z.object({organisationId:uuid,connectionId:uuid}),output:z.object({removed:z.literal(true)}),idempotency:"none",
+  }),
   createAiIntegrationConnection: operation({
     method: "POST",
     path: "/v1/ai-integrations/connections",
@@ -2003,7 +2328,7 @@ export const controlPlaneOperations = {
     path: "/v1/onboarding/agent",
     summary: "Start email-based agent onboarding",
     description:
-      "Creates a provisional user and first app for a new email, or requests verification for an existing identity. Returns a non-secret owner launch URL for the pending flow.",
+      "Retains an onboarding request and creates a provisional identity for a new email, or requests verification for an existing identity. Returns a non-secret owner launch URL. Email confirmation and explicit company setup or invitation acceptance precede app and credential creation.",
     auth: "none",
     scopes: [],
     input: z.object({ body: startAgentOnboardingRequestSchema }),
@@ -2707,6 +3032,105 @@ export const controlPlaneOperations = {
       openWorldHint: false,
     },
   }),
+  getDevSessionIntegrations: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/integrations",
+    summary: "Get development integration modes",
+    description:
+      "Returns each declared integration slot's development mode. Slots default to deterministic fake output; live slots call the real system through the app's production bindings. Verification sandboxes always use fake output.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: devSessionPath,
+    output: devSessionIntegrationSettingsSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "get_dev_integrations",
+      title: "Get dev integration modes",
+      description:
+        "Show whether each integration slot in a development session returns fake data or calls the real system, plus the provider test connection when this app publishes an integration.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  setDevSessionIntegrationMode: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/integrations/{integrationName}/mode",
+    summary: "Set a development integration mode",
+    description:
+      "Chooses fake or live behaviour for one declared app-account integration slot in one development session. Live mode uses the app's production binding and reaches the real system; calling-user slots remain fake.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath.extend({
+      integrationName: appIntegrationNameSchema,
+      body: z.object({ mode: devIntegrationModeSchema }).strict(),
+    }),
+    output: devSessionIntegrationSettingsSchema,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "set_dev_integration_mode",
+      title: "Set dev integration mode",
+      description:
+        "Use fake (the default) for building and repeated tests. Switch one slot to live only to confirm real data shapes, authentication, pagination, or errors before deploying; prefer reads, avoid live writes unless the user asked for that behaviour, and switch back to fake afterwards. Live calls use production bindings and are audited.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  setDevSessionIntegrationTestConnection: operation({
+    method: "PUT",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/integration-test-connection",
+    summary: "Choose a provider test connection",
+    description:
+      "For an app that publishes an integration, selects the connection whose credential values its operation Functions receive in this development session, or clears it with null.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath.extend({
+      body: z.object({ connectionId: uuid.nullable() }).strict(),
+    }),
+    output: devSessionIntegrationSettingsSchema,
+    bodyKey: "body",
+    idempotency: "none",
+    mcp: {
+      toolName: "set_dev_integration_test_connection",
+      title: "Set integration test connection",
+      description:
+        "Select which eligible connection supplies credential values to this app's integration operation Functions during development, or pass null to clear it. Prefer a sandbox or read-only connection. OpenCloud never returns the values; never log or return them from Function code.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  }),
+  injectDevIntegrationEvent: operation({
+    method: "POST",
+    path: "/v1/apps/{appId}/dev-sessions/{sessionId}/integrations/{integrationName}/events",
+    summary: "Deliver a synthetic integration event in development",
+    description:
+      "Invokes the consumer slot's declared event handler in the active development revision with one synthetic event of a type the provider declares. Data defaults to the provider's declared fake payload. Production events are never delivered to development sessions.",
+    auth: "bearer",
+    scopes: ["app:deploy"],
+    input: devSessionPath.extend({
+      integrationName: appIntegrationNameSchema,
+      body: injectDevIntegrationEventRequestSchema,
+    }),
+    output: injectDevIntegrationEventResultSchema,
+    bodyKey: "body",
+    idempotency: "required",
+    mcp: {
+      toolName: "inject_dev_integration_event",
+      title: "Inject dev integration event",
+      description:
+        "Test a custom integration slot's events.function with a synthetic event. Omit data to use the provider's declared fake payload. The handler runs as the app's system principal against isolated development data.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  }),
   applyDevRevision: operation({
     method: "POST",
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/apply",
@@ -3223,6 +3647,14 @@ export const controlPlaneOperations = {
     queryKey: "query",
     idempotency: "none",
   }),
+  listOrganisationAppOperationsPage: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}/operations/page",
+    summary: "List organisation app activity",
+    description: "Current members can read a stable page of operations only for apps they can administer in this organisation. Cursors bind the member, organisation and filters.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, query: accountOperationsPageQuerySchema.optional() }),
+    output: operationsPageOutput, queryKey: "query", idempotency: "none",
+  }),
   listSecrets: operation({
     method: "GET",
     path: "/v1/apps/{appId}/secrets",
@@ -3385,6 +3817,55 @@ export const controlPlaneOperations = {
     }),
     idempotency: "none",
   }),
+  listAppCustomIntegrations: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/custom-integrations",
+    summary: "List organisation-built integrations available to an app",
+    description:
+      "Returns the contracts of integrations published in the exact app's organisation that the delegated user may use: operations, capabilities, credential field names, and deterministic fake outputs. Connections and credential values are omitted.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: appPath,
+    output: customIntegrationCatalogSchema,
+    idempotency: "none",
+    mcp: {
+      toolName: "list_custom_integrations",
+      title: "List custom integrations",
+      description:
+        "List integrations published by other apps in this app's organisation. Declare one in the manifest with provider: custom, integration: <name>, account: app, and only the capabilities you need, then call its operations with integrations.use(slot).call(operation, input) from a Function on SDK 2.2.0 or later.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
+  listAppIntegrationEventDeliveries: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/integration-events",
+    summary: "List integration event deliveries",
+    description:
+      "Returns the app's most recent production deliveries of organisation-built integration events: type, handler, status, attempts, and the last bounded error. Event payloads are not returned and are discarded after delivery.",
+    auth: "bearer",
+    scopes: ["app:observe"],
+    input: appPath.extend({
+      query: z
+        .object({ limit: z.number().int().min(1).max(100).default(50) })
+        .optional(),
+    }),
+    output: integrationEventDeliveriesSchema,
+    queryKey: "query",
+    idempotency: "none",
+    mcp: {
+      toolName: "list_integration_event_deliveries",
+      title: "List integration event deliveries",
+      description:
+        "Inspect whether provider events reached this app's event handlers in production, with retry counts and the last error.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }),
   listAppIntegrationResources: operation({
     method: "GET",
     path: "/v1/apps/{appId}/integrations/{integrationName}/connections/{connectionId}/resources",
@@ -3415,6 +3896,7 @@ export const controlPlaneOperations = {
       body: z
         .object({
           connectionId: uuid,
+          custody: z.enum(["personal", "app"]).default("personal"),
           resourceId: z.string().trim().min(1).max(1_024).optional(),
           calendarId: z.string().trim().min(1).max(1_024).optional(),
           label: z
@@ -3448,6 +3930,17 @@ export const controlPlaneOperations = {
     output: z.unknown(),
     idempotency: "none",
   }),
+  disconnectAppIntegrationConnection: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/integration-connections/{connectionId}",
+    summary: "Disconnect an app-owned connection",
+    description: "An app editor disconnects a connection owned by this exact app and removes its bindings.",
+    auth: "bearer",
+    scopes: ["owner"],
+    input: appPath.extend({ connectionId: uuid }),
+    output: z.object({ connectionId: uuid, disconnected: z.literal(true) }),
+    idempotency: "none",
+  }),
   bindAppIntegrationOperation: operation({
     method: "POST",
     path: "/v1/apps/{appId}/integrations/{integrationName}/binding-operations",
@@ -3461,6 +3954,7 @@ export const controlPlaneOperations = {
       body: z
         .object({
           connectionId: uuid,
+          custody: z.enum(["personal", "app"]).default("personal"),
           resourceId: z.string().trim().min(1).max(1_024).optional(),
           label: z
             .string()

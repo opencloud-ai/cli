@@ -49,7 +49,7 @@ describe("browser package boundary", () => {
 
     expect(
       [...graph.keys()].map((file) => file.slice(sourceRoot.length + 1)),
-    ).toEqual(["browser.ts", "transport.ts", "errors.ts"]);
+    ).toEqual(["browser.ts", "transport.ts", "request-signal.ts", "errors.ts"]);
     for (const [file, source] of graph) {
       expect(source, file).not.toMatch(/\bBuffer\b|\bprocess\.|\brequire\s*\(/);
     }
@@ -85,5 +85,32 @@ describe("browser package boundary", () => {
         /^\(disabled\):|cron-parser|luxon|contracts\/dist\/manifest/,
       );
     }
+  });
+
+  it("bundles admin separately without Node shims or the application registry", async () => {
+    const result = await build({
+      absWorkingDir: packageRoot,
+      entryPoints: ["src/platform-admin/browser.ts"],
+      bundle: true,
+      format: "esm",
+      logLevel: "silent",
+      metafile: true,
+      platform: "browser",
+      write: false,
+    });
+    expect(result.outputFiles?.[0]?.text).not.toMatch(/node:|\bBuffer\b|\bprocess\.|\brequire\s*\(|__commonJS/);
+    expect(result.outputFiles?.[0]?.text.includes("controlPlaneOperations")).toBe(false);
+    expect(Object.keys(result.metafile!.inputs).join("\n")).not.toContain("src/transport.ts");
+    const app = await build({
+      absWorkingDir: packageRoot,
+      entryPoints: ["src/browser.ts"],
+      bundle: true,
+      format: "esm",
+      logLevel: "silent",
+      metafile: true,
+      platform: "browser",
+      write: false,
+    });
+    expect(Object.keys(app.metafile!.inputs).join("\n")).not.toContain("platform-admin");
   });
 });

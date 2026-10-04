@@ -101,7 +101,7 @@ describe("OpenCloud manifest", () => {
   });
 
   it("requires an exact installed deployment-pinned SDK version", () => {
-    for (const version of ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"]) {
+    for (const version of ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0"]) {
       expect(
         parseManifest({
           ...valid,
@@ -118,7 +118,7 @@ describe("OpenCloud manifest", () => {
           ...valid,
           runtime: { sdk: { version } },
         }),
-      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, 2\.2\.0, 2\.3\.0, 2\.4\.0, or 2\.5\.0/);
+      ).toThrow(/installed SDK version: 2\.0\.0, 2\.1\.0, 2\.2\.0, 2\.3\.0, 2\.4\.0, 2\.5\.0, or 2\.6\.0/);
     }
   });
 
