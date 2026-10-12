@@ -19,6 +19,8 @@ export const dashboardRoutePaths = {
   invitation: "/invitations/:invitationId",
   "account-usage": "/usage",
   "account-activity": "/activity",
+  "account-billing": "/billing",
+  build: "/build",
   "account-integrations": "/integrations",
   "integration-ai": "/integrations/ai",
   "integration-mcp": "/integrations/mcp",

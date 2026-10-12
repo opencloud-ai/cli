@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.12.0
+
+- Refresh the public contract, typed-client, and bundler snapshots. Local
+  validation now accepts SDK 2.7.0 pins, which add Function request `headers`
+  and `data.asAppUser` for apps that manage their own sign-in. SDK 2.3.0
+  remains the default for new and unpinned apps.
+
 ## 3.11.0
 
 - Add `integration custom-list` to list the organisation-built integration

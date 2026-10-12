@@ -823,6 +823,32 @@ describe("controlPlaneOperations", () => {
     expect(operation.output.parse(output)).toEqual(output);
   });
 
+  it("types self-service account deletion as an idempotent browser-only mutation", () => {
+    const operation = controlPlaneOperations.deleteDashboardAccount;
+    expect(operation).toMatchObject({
+      method: "POST",
+      path: "/v1/auth/account/deletion",
+      auth: "user",
+      bodyKey: "body",
+      idempotency: "required",
+    });
+    expect("mcp" in operation).toBe(false);
+    expect(
+      operation.input.parse({ body: { confirmationEmail: "  Person@Example.Test " } }),
+    ).toEqual({ body: { confirmationEmail: "person@example.test" } });
+    expect(() =>
+      operation.input.parse({ body: { confirmationEmail: "person@example.test", extra: true } }),
+    ).toThrow();
+    const output = {
+      deletion: {
+        state: "deleting",
+        operationId: "11111111-1111-4111-8111-111111111111",
+        requestedAt: "2026-10-05T12:00:00.000Z",
+      },
+    };
+    expect(operation.output.parse(output)).toEqual(output);
+  });
+
   it("types dashboard preferences and account MCP token management outside MCP", () => {
     const tokenId = "11111111-1111-4111-8111-111111111111";
     const profile = controlPlaneOperations.updateDashboardProfile;

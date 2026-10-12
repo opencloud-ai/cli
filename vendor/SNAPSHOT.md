@@ -30,3 +30,14 @@ directory. Every vendored contract, typed-client, and bundler file is
 byte-identical to that commit. Browser SDK 2.3.0 remains the local default;
 providers that declare sync, webhooks, or events explicitly select SDK 2.6.0
 on an updated platform.
+
+## CLI 3.12.0 SDK 2.7.0
+
+The contract, typed-client, and bundler snapshots are copied from platform
+commit `c349f235cce46738dc38a24939d39b31e5c50c6a` (pull request #363), which
+adds SDK 2.7.0 to the installed manifest versions. Every vendored contract,
+typed-client, and bundler file is byte-identical to that commit. Browser SDK
+2.3.0 remains the local default. The brand, installer, and installation tests
+read platform files (`SKILL.md`, `install.sh`, brand assets, private admin
+contracts) and are excluded from the public Vitest configuration like the
+earlier platform-only checks.
