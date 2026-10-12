@@ -98,3 +98,25 @@ export const controlPlaneOperationSchema = z
       .optional(),
   })
   .passthrough();
+
+/**
+ * Automatic suspension of an app's outbound email after its hard-bounce or
+ * complaint rate exceeded the installation limit. Owners see it on the Emails
+ * page; platform administrators can lift it.
+ */
+export const appEmailSuspensionSchema = z.object({
+  reason: z.enum(["bounce_rate", "complaint_rate"]),
+  message: z.string(),
+  suspendedAt: z.string(),
+  recipients: z.number().int().nonnegative(),
+  hardBounces: z.number().int().nonnegative(),
+  complaints: z.number().int().nonnegative(),
+  bounceRatePercent: z.number().nonnegative(),
+  complaintRatePercent: z.number().nonnegative(),
+  limits: z.object({
+    windowHours: z.number().nonnegative(),
+    minRecipients: z.number().nonnegative(),
+    maxBounceRatePercent: z.number().nonnegative(),
+    maxComplaintRatePercent: z.number().nonnegative(),
+  }),
+});

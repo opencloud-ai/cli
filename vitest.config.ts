@@ -4,7 +4,15 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     // These platform packaging/OpenAPI checks require files outside the public snapshot.
-    exclude: ["**/node_modules/**", "vendor/control-plane-client/src/browser-entry.test.ts", "vendor/contracts/src/dashboard-privileged.test.ts"],
+    exclude: [
+      "**/node_modules/**",
+      "vendor/control-plane-client/src/browser-entry.test.ts",
+      "vendor/contracts/src/dashboard-privileged.test.ts",
+      "vendor/contracts/src/brand-pack.test.ts",
+      "vendor/contracts/src/brand-text.test.ts",
+      "vendor/contracts/src/cli-installer.test.ts",
+      "vendor/contracts/src/installation.test.ts",
+    ],
   },
   resolve: {
     alias: {

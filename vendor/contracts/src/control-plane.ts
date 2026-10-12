@@ -20,9 +20,19 @@ import {
   createOrganisationInvitationRequestSchema,
 } from "./organisation-directory.js";
 export * from "./organisation-directory.js";
-import { controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
-export { controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
+import { accountDeletionRequestSchema, accountDeletionSchema, accountStatusSchema } from "./account-lifecycle.js";
+export * from "./account-lifecycle.js";
+import { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
+export { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
 import { appDomainAddSchema, appDomainSettingsSchema } from "./app-domains.js";
+import { installationCapabilitiesSchema, installationViewSchema } from "./installation.js";
+import {
+  billingCheckoutRequestSchema,
+  billingOverviewSchema,
+  billingPlanChangeRequestSchema,
+  billingPlanChangeResultSchema,
+  billingRedirectSchema,
+} from "./billing.js";
 import {
   alertAggregationSchema,
   alertOperatorSchema,
@@ -99,6 +109,12 @@ const emptyBody = z.object({});
 const accountWelcomeSchema = z.object({
   step: z.enum(["confirm_email", "name", "organisation", "complete"]),
   displayName: z.string(), email: z.email(), continueUrl: z.url(),
+  /** Installation switch: when true, building needs an organisation and an
+   * account on its way to building must create or join one; when false the
+   * step never appears. */
+  organisationsEnabled: z.boolean().default(true),
+  /** The confirmed email's domain can be claimed for automatic joining. */
+  emailDomainJoin: z.boolean().default(true),
 });
 const welcomeReturnSchema = z.string().max(2048).optional();
 const platformVersionOutput = z.object({
@@ -240,9 +256,7 @@ const appAccessPersonOutput = z.object({
   email: z.email().nullable(),
   displayName: z.string().max(160).nullable(),
   role: z.enum(["owner", "builder", "app_user"]),
-  status: z
-    .enum(["pending_email_verification", "active", "expired_unverified"])
-    .nullable(),
+  status: accountStatusSchema.nullable(),
   createdAt: z.string(),
 });
 
@@ -710,6 +724,7 @@ export const controlPlaneAppEmailSchema = z
     sending: z.object({
       configured: z.boolean(),
       domain: z.string(),
+      suspension: appEmailSuspensionSchema.nullable().optional(),
     }),
     receiving: z.object({
       configured: z.boolean(),
@@ -1546,6 +1561,32 @@ export const controlPlaneOperations = {
     output: z.object({ summary: z.object({ capacity: organisationCapacityOutputSchema, period: organisationWeekSchema }).nullable() }),
     idempotency: "none",
   }),
+  getBilling: operation({
+    method: "GET", path: "/v1/billing",
+    summary: "Read plan and billing",
+    description: "Read the current account plan, subscription status, limits, usage against limits and available plans. Never creates a payer scope.",
+    auth: "user", scopes: [], input: emptyBody, output: billingOverviewSchema, idempotency: "none",
+  }),
+  createBillingCheckoutSession: operation({
+    method: "POST", path: "/v1/billing/checkout-sessions",
+    summary: "Start a paid plan",
+    description: "Create a provider-hosted checkout for a new subscription on the personal account and return its URL.",
+    auth: "user", scopes: [], input: z.object({ body: billingCheckoutRequestSchema }),
+    output: billingRedirectSchema, bodyKey: "body", idempotency: "required",
+  }),
+  changeBillingPlan: operation({
+    method: "POST", path: "/v1/billing/plan-changes",
+    summary: "Change plan",
+    description: "Upgrade immediately with proration, schedule a downgrade or cancellation for the end of the period, or withdraw a scheduled cancellation.",
+    auth: "user", scopes: [], input: z.object({ body: billingPlanChangeRequestSchema }),
+    output: billingPlanChangeResultSchema, bodyKey: "body", idempotency: "required",
+  }),
+  createBillingPortalSession: operation({
+    method: "POST", path: "/v1/billing/portal-sessions",
+    summary: "Open the billing portal",
+    description: "Create a provider-hosted customer portal session for payment methods, invoices and cancellation.",
+    auth: "user", scopes: [], input: emptyBody, output: billingRedirectSchema, idempotency: "required",
+  }),
   getOrganisationWeeklyCapacity: operation({
     method:"GET",path:"/v1/organisations/{organisationId}/weekly-capacity",
     summary:"Read weekly employee limits",description:"Read the current period and default; members see their own allowance and admins see employee overrides. Automation shares the organisation budget.",
@@ -1703,19 +1744,19 @@ export const controlPlaneOperations = {
   }),
   getAccountWelcome: operation({
     method:"GET", path:"/v1/auth/welcome", summary:"Read account welcome steps",
-    description:"Read the signed-in browser's email confirmation, name and optional organisation setup state.",
+    description:"Read the signed-in browser's email confirmation, name and organisation setup state.",
     auth:"user", scopes:[], input:z.object({query:z.object({returnTo:welcomeReturnSchema}).optional()}),
     queryKey:"query",output:accountWelcomeSchema,idempotency:"none",
   }),
   saveAccountWelcomeName: operation({
     method:"POST",path:"/v1/auth/welcome/name",summary:"Save the confirmed user's name",
-    description:"Save a name after email confirmation and advance to optional organisation setup when appropriate.",
+    description:"Save a name after email confirmation and advance to organisation setup when the account has no organisation.",
     auth:"user",scopes:[],input:z.object({body:z.object({displayName:z.string().trim().min(1).max(160),returnTo:welcomeReturnSchema})}),
     bodyKey:"body",output:accountWelcomeSchema,idempotency:"none",
   }),
   completeAccountWelcome: operation({
     method:"POST",path:"/v1/auth/welcome/complete",summary:"Complete or skip organisation setup",
-    description:"Remember completion after the user's name is saved. Skipping preserves the personal account.",
+    description:"Remember completion after the user's name is saved. On organisation installations, an account on its way to building must first create or join an organisation (ORGANISATION_SETUP_REQUIRED); completion then continues to the organisation's dashboard instead of the Agent.",
     auth:"user",scopes:[],input:z.object({body:z.object({returnTo:welcomeReturnSchema})}),
     bodyKey:"body",output:accountWelcomeSchema,idempotency:"none",
   }),
@@ -1736,6 +1777,8 @@ export const controlPlaneOperations = {
       sessionExpiresAt: z.iso.datetime({ offset: true }),
       emailConfirmationRequired: z.boolean(),
       emailConfirmationExpiresAt: z.iso.datetime({ offset: true }).nullable(),
+      /** Installation switches; when absent clients keep the original behaviour. */
+      capabilities: installationCapabilitiesSchema.optional(),
     }),
     idempotency: "none",
   }),
@@ -1768,6 +1811,19 @@ export const controlPlaneOperations = {
     output: z.object({ updated: z.literal(true) }),
     bodyKey: "body",
     idempotency: "none",
+  }),
+  deleteDashboardAccount: operation({
+    method: "POST",
+    path: "/v1/auth/account/deletion",
+    summary: "Permanently delete the signed-in account",
+    description:
+      "Immediately signs the account out everywhere, revokes its credentials and Agent access, takes its apps offline, and starts permanent deletion. Requires a browser sign-in within the last 10 minutes and the account email typed as confirmation. Deletion cannot be undone.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ body: accountDeletionRequestSchema }),
+    output: z.object({ deletion: accountDeletionSchema }),
+    bodyKey: "body",
+    idempotency: "required",
   }),
   listAccountMcpTokensPage: operation({
     method: "GET",
@@ -2309,6 +2365,18 @@ export const controlPlaneOperations = {
       assignment: appAiAssignmentSchema,
     }),
     bodyKey: "body",
+    idempotency: "none",
+  }),
+  getInstallation: operation({
+    method: "GET",
+    path: "/v1/installation",
+    summary: "Get installation capabilities",
+    description:
+      "Returns credential-free installation switches, such as whether organisations or installation-funded AI are available, so clients can hide features this installation does not offer. Every write rechecks the same switches.",
+    auth: "none",
+    scopes: [],
+    input: emptyBody,
+    output: installationViewSchema,
     idempotency: "none",
   }),
   getPlatformVersion: operation({

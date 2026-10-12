@@ -135,10 +135,10 @@ function isAppOwnedHealthPath(value: string): boolean {
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-const INSTALLED_SDK_VERSIONS = ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0"] as const;
+const INSTALLED_SDK_VERSIONS = ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"] as const;
 
 export const sdkVersionSchema = z.enum(INSTALLED_SDK_VERSIONS, {
-  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, or 2.6.0",
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, or 2.7.0",
 });
 
 /** The next occurrence of a manifest cron schedule after `after`. */
