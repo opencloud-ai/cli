@@ -42,11 +42,15 @@ read platform files (`SKILL.md`, `install.sh`, brand assets, private admin
 contracts) and are excluded from the public Vitest configuration like the
 earlier platform-only checks.
 
-## CLI 3.13.0 release source
+## CLI 3.13.0 release source and platform builds
 
 The contract, typed-client, and bundler snapshots are copied from platform
-commit `e5a8aa0cb97f8fcaf1d7d4ef14c5f4c6410fddd7` (pull request #374), which
-keeps each release's draft source, adds the release source and artifact
-downloads, and accepts `expectedActiveDeploymentId` on deploys and dev starts.
-Every vendored contract, typed-client, and bundler file is byte-identical to
-that commit. Browser SDK 2.3.0 remains the local default.
+commit `f762d21b7c0da56d339046aba22100282f17f718` (pull request #378). It
+contains pull request #374, which keeps each release's draft source, adds the
+release source and artifact downloads, and accepts
+`expectedActiveDeploymentId` on deploys and dev starts, and #378 itself, which
+builds a frontend that declares `frontend.build` during validation and lets a
+local bundle leave that frontend out. `contracts/src/ai-capacity.ts` is new
+because the public operation type graph now imports it. Every vendored
+contract, typed-client, and bundler source file is byte-identical to that
+commit. Browser SDK 2.3.0 remains the local default.

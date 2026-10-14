@@ -20,8 +20,17 @@
   fast-forwards and drops files the release removed; local changes the release
   would overwrite are refused unless `--force`. Releases without recorded
   source fall back to their artifact and never remove files.
-- Refresh the public contract and typed-client snapshots for release source,
-  release downloads, and deploy preconditions.
+- Support frontends OpenCloud builds. When the manifest declares
+  `frontend.build`, local bundling no longer needs the build output, the
+  upload leaves any local build out, and the server's validated artifact
+  identifies the release. Validation waits up to nine minutes for the build,
+  retries while another build for the app runs, and prints validation errors
+  such as a failed build's log. An API that cannot build frontends is refused
+  before any request starts.
+- A definite validation failure no longer blocks the next `deploy` or
+  `app dev` request after a fix.
+- Refresh the public contract, typed-client, and bundler snapshots for release
+  source, release downloads, deploy preconditions, and platform builds.
 
 ## 3.12.0
 

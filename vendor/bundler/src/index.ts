@@ -29,6 +29,7 @@ interface AuthorManifest {
   frontend?: {
     directory?: string;
     spa?: boolean;
+    build?: { script?: string };
   };
   runtime?: {
     sdk?: {
@@ -71,7 +72,8 @@ export interface BundleWarning {
   code:
     | "UNDECLARED_MIGRATION_FILE"
     | "UNDECLARED_FUNCTION_ENTRYPOINT"
-    | "FRONTEND_SDK_NOT_REFERENCED";
+    | "FRONTEND_SDK_NOT_REFERENCED"
+    | "FRONTEND_BUILT_BY_PLATFORM";
   path: string;
   message: string;
 }
@@ -79,6 +81,11 @@ export interface BundleWarning {
 export interface BundleOptions {
   /** Legacy schema-2 compatibility override. Schema 3 is publisher-versioned. */
   version?: string;
+  /**
+   * For a manifest with `frontend.build`, leave the frontend out: OpenCloud
+   * builds it during validation, so a local bundle checks only the rest.
+   */
+  platformFrontend?: boolean;
 }
 
 interface BundleSelection {
@@ -161,8 +168,15 @@ export async function buildBundle(
     migration.sha256 = await sha256File(migrationFile);
   }
   const manifest = parseManifest(raw);
-  const selection = await selectBundleFiles(root, manifest, manifestFile);
-  await validateAppRouteAssets(root, manifest);
+  const platformFrontend =
+    options.platformFrontend === true && manifest.frontend.build !== undefined;
+  const selection = await selectBundleFiles(
+    root,
+    manifest,
+    manifestFile,
+    platformFrontend,
+  );
+  if (!platformFrontend) await validateAppRouteAssets(root, manifest);
   const e2eTest = await selectE2eTest(root, selection, manifestFile);
   if (e2eTest) {
     assertE2eTestOutsideFrontend(manifest.frontend.directory);
@@ -174,7 +188,15 @@ export async function buildBundle(
   await assertSelfContainedFunctions(manifest, selection);
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
-    ...(await findFrontendSdkWarnings(manifest, selection)),
+    ...(platformFrontend
+      ? [
+          {
+            code: "FRONTEND_BUILT_BY_PLATFORM" as const,
+            path: manifest.frontend.directory,
+            message: `OpenCloud builds ${manifest.frontend.directory} with npm run ${manifest.frontend.build!.script} during validation; this local bundle leaves it out.`,
+          },
+        ]
+      : await findFrontendSdkWarnings(manifest, selection)),
     ...functionWarnings,
   ].sort((left, right) => comparePaths(left.path, right.path));
   const sourceFiles = [sourceManifest, ...selection.files.keys()].sort(
@@ -689,6 +711,7 @@ async function selectBundleFiles(
   root: string,
   manifest: OpenCloudManifest,
   manifestFile: string,
+  platformFrontend = false,
 ): Promise<BundleSelection> {
   const selection: BundleSelection = {
     files: new Map(),
@@ -705,10 +728,12 @@ async function selectBundleFiles(
     await walkDirectory(root, absoluteDirectory, selection, manifestFile);
   };
 
-  await addDirectoryTree(
-    manifest.frontend.directory,
-    `Frontend directory ${manifest.frontend.directory}`,
-  );
+  if (!platformFrontend) {
+    await addDirectoryTree(
+      manifest.frontend.directory,
+      `Frontend directory ${manifest.frontend.directory}`,
+    );
+  }
 
   for (const migration of manifest.migrations) {
     const absoluteFile = resolveBundlePath(

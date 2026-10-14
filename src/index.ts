@@ -502,7 +502,10 @@ interface LocalDevState {
   appId: string;
   draftId: string;
   sessionId: string;
+  /** The local bundle digest, which detects local changes. */
   artifactSha256: string;
+  /** The session's server-built artifact, for an app OpenCloud builds. */
+  serverArtifactSha256?: string;
   updatedAt: string;
 }
 
@@ -605,6 +608,22 @@ async function removeDevStateIfMatching(
   });
 }
 
+/**
+ * A manifest with frontend.build is built by OpenCloud during validation, so
+ * a local bundle leaves that frontend out and the server's validated
+ * artifact, not the local digest, identifies the release.
+ */
+function localBundle(sourceRoot: string) {
+  return buildBundle(sourceRoot, { platformFrontend: true });
+}
+
+function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {
+  return bundle.manifest.frontend.build !== undefined;
+}
+
+const PLATFORM_BUILD_VALIDATION_TIMEOUT_MS = 9 * 60_000;
+const PLATFORM_BUILD_BUSY_RETRIES = 20;
+
 type DraftFiles = Map<string, { content: Buffer; sha256: string }>;
 
 /**
@@ -654,8 +673,21 @@ async function planDraftUpload(
     files: await bundleDraftFiles(sourceRoot, bundle),
     sourceSha256: null,
   });
-  if (!(await releaseContracts(control)).releaseSource) return bundleOnly();
-  const tree = await collectSourceTree(sourceRoot);
+  const contracts = await releaseContracts(control);
+  const built = platformBuilt(bundle);
+  if (built && !(contracts.platformBuilds && contracts.releaseSource)) {
+    throw new CliContractError(
+      "PLATFORM_BUILD_UNSUPPORTED",
+      "This OpenCloud API cannot build frontends. Build the frontend locally and remove frontend.build from the manifest.",
+    );
+  }
+  if (!contracts.releaseSource) return bundleOnly();
+  const output = `${bundle.manifest.frontend.directory}/`;
+  const collected = await collectSourceTree(sourceRoot);
+  // OpenCloud builds this directory itself, so a local build is never sent.
+  const tree = built
+    ? { ...collected, files: collected.files.filter((file) => !file.path.startsWith(output)) }
+    : collected;
   const files: DraftFiles = new Map(
     tree.files.map((file) => [file.path, { content: file.content, sha256: file.sha256 }]),
   );
@@ -668,6 +700,12 @@ async function planDraftUpload(
   }
   printSkippedSource(tree.skipped);
   const size = [...files.values()].reduce((total, file) => total + file.content.length, 0);
+  if (size > SOURCE_TREE_MAX_BYTES && built) {
+    throw new CliContractError(
+      "SOURCE_TOO_LARGE",
+      `The working tree is ${size} bytes, over the ${SOURCE_TREE_MAX_BYTES}-byte draft limit OpenCloud needs to build the frontend`,
+    );
+  }
   if (size > SOURCE_TREE_MAX_BYTES) {
     process.stderr.write(
       `The working tree is ${size} bytes, over the ${SOURCE_TREE_MAX_BYTES}-byte draft limit; uploading the bundle only, without release source.\n`,
@@ -930,12 +968,20 @@ async function synchronizeValidatedDraft(
     });
   }
   await run.markAttempted();
-  const result = await control.call("validateDraft", {
-    appId: bundle.manifest.appId,
-    draftId: draft.id,
-    body: {},
-  });
+  const result = await validateWithPlatformBuild(control, bundle, draft.id).catch(
+    async (error: unknown) => {
+      // A build that never started changed nothing; the next attempt starts afresh.
+      if (error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY") {
+        await run.complete();
+      }
+      throw error;
+    },
+  );
   if (!result.passed) {
+    printValidationErrors(result.diagnostics);
+    // A definite validation failure changed nothing live, so the next attempt,
+    // usually after a fix, starts afresh instead of waiting on this one.
+    await run.complete();
     throw new CliContractError(
       "DRAFT_VALIDATION_FAILED",
       "Authoritative server validation failed",
@@ -944,6 +990,21 @@ async function synchronizeValidatedDraft(
   return result;
   };
   let validation = await applyAndValidate(upload.files);
+  if (platformBuilt(bundle)) {
+    // The server built the frontend, so its artifact is the release identity.
+    await run.checkpointStage({
+      stage: "validated",
+      artifactSha256: bundle.sha256,
+      draftId: draft.id,
+      revision,
+    });
+    return {
+      appId: bundle.manifest.appId,
+      draftId: draft.id,
+      artifactSha256: validation.artifactSha256!,
+      validation,
+    };
+  }
   if (validation.artifactSha256 !== bundle.sha256 && upload.mode === "source") {
     // The server resolved the author manifest differently (usually an unpinned
     // runtime.sdk.version). Keep the source but send the canonical manifest,
@@ -974,6 +1035,47 @@ async function synchronizeValidatedDraft(
   };
 }
 
+/** Validates a draft, allowing for a platform frontend build and waiting while another runs. */
+async function validateWithPlatformBuild(
+  control: OpenCloudClient,
+  bundle: Awaited<ReturnType<typeof buildBundle>>,
+  draftId: string,
+) {
+  const built = platformBuilt(bundle);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await control.call(
+        "validateDraft",
+        { appId: bundle.manifest.appId, draftId, body: {} },
+        built ? { timeoutMs: PLATFORM_BUILD_VALIDATION_TIMEOUT_MS } : {},
+      );
+    } catch (error) {
+      const busy =
+        built && error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY";
+      if (!busy || attempt >= PLATFORM_BUILD_BUSY_RETRIES) throw error;
+      process.stderr.write("Another frontend build for this app is running; retrying.\n");
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+    }
+  }
+}
+
+function printValidationErrors(
+  diagnostics: ReadonlyArray<{
+    level: string;
+    code?: string | undefined;
+    path?: string | undefined;
+    message: string;
+  }>,
+): void {
+  const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
+  if (!errors.length) return;
+  process.stderr.write(
+    `Validation errors (${errors.length}):\n${errors
+      .map((diagnostic) => `  [${diagnostic.code ?? "ERROR"}] ${diagnostic.path ? `${diagnostic.path}: ` : ""}${diagnostic.message}`)
+      .join("\n")}\n`,
+  );
+}
+
 function childIdempotencyKey(run: MutationRun, stage: string): string {
   return `ocj1:${createHash("sha256")
     .update(run.idempotencyKey)
@@ -987,12 +1089,16 @@ async function storeDevSession(
   artifactSha256: string,
   session: DevSessionWire,
 ): Promise<void> {
+  const serverArtifactSha256 = session.activeRevision?.artifactSha256;
   await saveDevState(sourceRoot, {
     schemaVersion: 1,
     appId: session.appId,
     draftId: session.draftId,
     sessionId: session.id,
     artifactSha256,
+    ...(serverArtifactSha256 && serverArtifactSha256 !== artifactSha256
+      ? { serverArtifactSha256 }
+      : {}),
     updatedAt: new Date().toISOString(),
   });
 }
@@ -1813,7 +1919,7 @@ dev
     const sourceRoot = callerPath(directory);
     await withDevWorkflowLock(sourceRoot, async () => {
     const previous = await readDevState(sourceRoot);
-    const bundle = await buildBundle(sourceRoot);
+    const bundle = await localBundle(sourceRoot);
     if (previous && previous.appId !== bundle.manifest.appId) {
       throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
@@ -1850,6 +1956,7 @@ dev
           validation: unknown;
         };
         if (
+          !platformBuilt(bundle) &&
           retained?.sessionId &&
           retained.draftId &&
           retained.artifactSha256 === bundle.sha256
@@ -1900,7 +2007,7 @@ dev
         if (
           session.appId !== appId ||
           session.draftId !== synchronized.draftId ||
-          session.activeRevision?.artifactSha256 !== bundle.sha256 ||
+          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
           (retained?.sessionId && retained.sessionId !== session.id)
         ) {
           throw new CliContractError(
@@ -1946,7 +2053,7 @@ dev
     const sourceRoot = callerPath(directory);
     await withDevWorkflowLock(sourceRoot, async () => {
     const state = await requireDevState(sourceRoot);
-    const bundle = await buildBundle(sourceRoot);
+    const bundle = await localBundle(sourceRoot);
     if (state.appId !== bundle.manifest.appId) {
       throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
@@ -1985,7 +2092,7 @@ dev
         if (
           session.id !== state.sessionId ||
           session.draftId !== state.draftId ||
-          session.activeRevision?.artifactSha256 !== bundle.sha256 ||
+          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
           (retained?.sessionId && retained.sessionId !== session.id)
         ) {
           throw new CliContractError(
@@ -2484,7 +2591,7 @@ dev
   .argument("[directory]", "app source directory", ".")
   .option("--limit <number>", "maximum records", "50")
   .action(async (directory, options) => {
-    const bundle = await buildBundle(callerPath(directory));
+    const bundle = await localBundle(callerPath(directory));
     const limit = Number(options.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       throw new Error("--limit must be an integer between 1 and 200");
@@ -2503,7 +2610,7 @@ dev
   .argument("[directory]", "app source directory", ".")
   .action(async (directory) => {
     const sourceRoot = callerPath(directory);
-    const bundle = await buildBundle(sourceRoot);
+    const bundle = await localBundle(sourceRoot);
     const localState = await readDevState(sourceRoot);
     const receipts = await client().call("listDevReceipts", {
       appId: bundle.manifest.appId,
@@ -2720,7 +2827,7 @@ dev
     const sourceRoot = callerPath(directory);
     await withDevWorkflowLock(sourceRoot, async () => {
     const localState = await readDevState(sourceRoot);
-    const bundle = await buildBundle(sourceRoot);
+    const bundle = await localBundle(sourceRoot);
     if (!bundle.e2eTest) {
       throw new Error(
         `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, exercise every Function through its intended path (including enqueueing queue consumers), and verify the exact revision.`,
@@ -2861,7 +2968,10 @@ dev
           !promotionOperation ||
           result.draft.id !== state.draftId ||
           result.deployment.appId !== state.appId ||
-          result.deployment.artifactSha256 !== bundle.sha256
+          result.deployment.artifactSha256 !==
+            (platformBuilt(bundle)
+              ? (state.serverArtifactSha256 ?? result.deployment.artifactSha256)
+              : bundle.sha256)
         ) {
           throw new CliContractError(
             "MUTATION_REPLAY_MISMATCH",
@@ -3117,7 +3227,7 @@ dev
     await withDevWorkflowLock(sourceRoot, async () => {
     const state = await readDevState(sourceRoot);
     const appId =
-      state?.appId ?? (await buildBundle(sourceRoot)).manifest.appId;
+      state?.appId ?? (await localBundle(sourceRoot)).manifest.appId;
     const context = await exactAppMutationContext(appId, sourceRoot);
     await context.journal.run(
       mutationIntent({
@@ -4067,7 +4177,7 @@ addOperationOptions(
 ).action(
   async (directory, options: OperationOptions & { force?: boolean }) => {
     const sourceRoot = callerPath(directory);
-    const bundle = await buildBundle(sourceRoot);
+    const bundle = await localBundle(sourceRoot);
     process.stderr.write(
       `Syncing ${manifestReleaseLabel(bundle.manifest)} (${bundle.sha256.slice(0, 12)})\n`,
     );
@@ -4193,7 +4303,7 @@ program
   .argument("<directory>")
   .option("--write-archive <path>", "write the canonical .tgz artifact")
   .action(async (directory, options) => {
-    const bundle = await buildBundle(callerPath(directory));
+    const bundle = await localBundle(callerPath(directory));
     const archivePath = options.writeArchive
       ? callerPath(String(options.writeArchive))
       : null;
@@ -4234,7 +4344,7 @@ program
   .option("--expect-app-id <uuid>")
   .option("--max-files <count>")
   .action(async (directory, options) => {
-    const bundle = await buildBundle(callerPath(directory));
+    const bundle = await localBundle(callerPath(directory));
     if (options.expectAppId && bundle.manifest.appId !== options.expectAppId) {
       throw new Error(
         `Manifest appId ${bundle.manifest.appId} does not match ${options.expectAppId}`,

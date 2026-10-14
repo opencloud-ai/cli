@@ -327,6 +327,19 @@ const openCloudManifestFields = {
     .object({
       directory: relativePath,
       spa: z.boolean().default(true),
+      /**
+       * OpenCloud builds the frontend during validation: a clean
+       * `npm ci` in the app root, then `npm run <script>`, whose output is
+       * `directory`. Uploaded files in `directory` are ignored.
+       */
+      build: z
+        .object({
+          script: z
+            .string()
+            .regex(/^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$/),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
   runtime: z
