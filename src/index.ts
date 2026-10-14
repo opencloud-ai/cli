@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { Argument, Command, Option } from "commander";
 import YAML from "yaml";
 import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
@@ -67,7 +79,22 @@ import {
   resolveWorkspaceFile,
 } from "./workspace-store.js";
 import type { MutationCommandId } from "./mutation-dispositions.js";
-import { assertMutationJournalCompatibility } from "./mutation-compatibility.js";
+import {
+  assertMutationJournalCompatibility,
+  releaseContracts,
+} from "./mutation-compatibility.js";
+import {
+  collectSourceTree,
+  sha256Hex,
+  SOURCE_TREE_MAX_BYTES,
+  sourceTreeDigest,
+  type SkippedSourceFile,
+} from "./source-tree.js";
+import {
+  readReleaseBase,
+  writeReleaseBase,
+} from "./release-base.js";
+import { planPull, readReleaseArchive, type ReleaseKind } from "./pull.js";
 import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
@@ -93,7 +120,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.12.0";
+const CLI_VERSION = "3.13.0";
 
 const program = new Command()
   .name("opencloud")
@@ -578,11 +605,178 @@ async function removeDevStateIfMatching(
   });
 }
 
+type DraftFiles = Map<string, { content: Buffer; sha256: string }>;
+
+/**
+ * The files a draft receives. "source" mode sends the whole working tree so
+ * the release keeps its complete source; "bundle" mode sends only the
+ * canonical bundle, as before release source existed.
+ */
+interface DraftUpload {
+  mode: "source" | "bundle";
+  files: DraftFiles;
+  /** Digest of the uploaded source set; null in bundle mode. */
+  sourceSha256: string | null;
+}
+
+async function bundleDraftFiles(
+  sourceRoot: string,
+  bundle: Awaited<ReturnType<typeof buildBundle>>,
+): Promise<DraftFiles> {
+  const files: DraftFiles = new Map();
+  for (const file of bundle.files) {
+    const content =
+      file === "opencloud.json"
+        ? Buffer.from(serializeBundleManifest(bundle.manifest))
+        : await readFile(path.join(sourceRoot, ...file.split("/")));
+    files.set(file, { content, sha256: sha256Hex(content) });
+  }
+  return files;
+}
+
+function printSkippedSource(skipped: SkippedSourceFile[]): void {
+  if (!skipped.length) return;
+  process.stderr.write(
+    `Not stored with the release source (${skipped.length}):\n${skipped
+      .map((file) => `  ${file.path} (${file.reason.replaceAll("_", " ")})`)
+      .join("\n")}\n`,
+  );
+}
+
+/** Chooses how a draft is uploaded, from what this API supports. */
+async function planDraftUpload(
+  control: OpenCloudClient,
+  sourceRoot: string,
+  bundle: Awaited<ReturnType<typeof buildBundle>>,
+): Promise<DraftUpload> {
+  const bundleOnly = async (): Promise<DraftUpload> => ({
+    mode: "bundle",
+    files: await bundleDraftFiles(sourceRoot, bundle),
+    sourceSha256: null,
+  });
+  if (!(await releaseContracts(control)).releaseSource) return bundleOnly();
+  const tree = await collectSourceTree(sourceRoot);
+  const files: DraftFiles = new Map(
+    tree.files.map((file) => [file.path, { content: file.content, sha256: file.sha256 }]),
+  );
+  // The bundle's inputs always travel, even when .gitignore hides them (such
+  // as built frontend output), so OpenCloud builds the same bundle.
+  for (const file of bundle.sourceFiles) {
+    if (files.has(file)) continue;
+    const content = await readFile(path.join(sourceRoot, ...file.split("/")));
+    files.set(file, { content, sha256: sha256Hex(content) });
+  }
+  printSkippedSource(tree.skipped);
+  const size = [...files.values()].reduce((total, file) => total + file.content.length, 0);
+  if (size > SOURCE_TREE_MAX_BYTES) {
+    process.stderr.write(
+      `The working tree is ${size} bytes, over the ${SOURCE_TREE_MAX_BYTES}-byte draft limit; uploading the bundle only, without release source.\n`,
+    );
+    return bundleOnly();
+  }
+  return {
+    mode: "source",
+    files,
+    sourceSha256: sourceTreeDigest(
+      [...files].map(([file, value]) => ({ path: file, sha256: value.sha256 })),
+    ),
+  };
+}
+
+/**
+ * The release this working copy is based on, when the API can check it.
+ * --force skips the check to replace a newer release deliberately.
+ */
+async function expectedBaseDeployment(
+  control: OpenCloudClient,
+  sourceRoot: string,
+  appId: string,
+  force: boolean,
+): Promise<string | undefined> {
+  if (force) return undefined;
+  const base = await readReleaseBase(sourceRoot);
+  if (
+    !base ||
+    base.appId !== appId ||
+    normalizeApiUrl(base.apiUrl) !== normalizeApiUrl(targetApiUrl(sourceRoot))
+  ) {
+    return undefined;
+  }
+  return (await releaseContracts(control)).deployPreconditions
+    ? base.deploymentId
+    : undefined;
+}
+
+/**
+ * OpenCloud checks the base before it stores or changes anything, so a
+ * stale-release refusal had no effect. Settle the journal entry so the next
+ * request (after pull, or with --force) is not mistaken for a retry.
+ */
+async function settleStaleReleaseRefusal<T>(
+  run: MutationRun,
+  request: Promise<T>,
+): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      error.status === 409 &&
+      (error.body as { code?: unknown } | null)?.code === "ACTIVE_DEPLOYMENT_CHANGED"
+    ) {
+      await run.complete();
+    }
+    throw error;
+  }
+}
+
+/** Records the release a working copy now matches, after it went live. */
+async function recordReleaseBase(
+  control: OpenCloudClient,
+  sourceRoot: string,
+  appId: string,
+  draftId: string,
+  deployment: unknown,
+): Promise<void> {
+  if (!(await releaseContracts(control)).deployPreconditions) return;
+  const release = deployment as {
+    id?: unknown;
+    version?: unknown;
+    artifactSha256?: unknown;
+    source?: { sha256?: unknown } | null;
+  };
+  if (
+    typeof release.id !== "string" ||
+    typeof release.version !== "string" ||
+    typeof release.artifactSha256 !== "string"
+  ) {
+    return;
+  }
+  const files = await control.call("listDraftFiles", { appId, draftId });
+  await writeReleaseBase(sourceRoot, {
+    schemaVersion: 1,
+    apiUrl: normalizeApiUrl(targetApiUrl(sourceRoot)),
+    appId,
+    deploymentId: release.id,
+    version: release.version,
+    artifactSha256: release.artifactSha256,
+    sourceSha256:
+      typeof release.source?.sha256 === "string" ? release.source.sha256 : null,
+    files: Object.fromEntries(
+      files
+        .filter((file) => !file.deleted)
+        .map((file) => [file.path, file.sha256]),
+    ),
+    recordedAt: new Date().toISOString(),
+  });
+}
+
 async function synchronizeValidatedDraft(
   control: OpenCloudClient,
   sourceRoot: string,
   bundle: Awaited<ReturnType<typeof buildBundle>>,
   run: MutationRun,
+  upload: DraftUpload,
   existingDraftId?: string,
   draftNamePrefix = "Dev",
 ): Promise<{
@@ -653,20 +847,9 @@ async function synchronizeValidatedDraft(
     draftId: draft.id,
     revision: draft.revision,
   });
-  const local = new Map<string, { content: Buffer; sha256: string }>();
-  for (const file of bundle.files) {
-    const content =
-      file === "opencloud.json"
-        ? Buffer.from(serializeBundleManifest(bundle.manifest))
-        : await readFile(path.join(sourceRoot, ...file.split("/")));
-    local.set(file, {
-      content,
-      sha256: createHash("sha256").update(content).digest("hex"),
-    });
-  }
-
   let revision = draft.revision;
   let appliedCount = 0;
+  const applyAndValidate = async (local: DraftFiles) => {
   for (let iteration = 0; iteration < 10_000; iteration += 1) {
     const current = await control.call("getDraft", {
       appId: bundle.manifest.appId,
@@ -747,16 +930,32 @@ async function synchronizeValidatedDraft(
     });
   }
   await run.markAttempted();
-  const validation = await control.call("validateDraft", {
+  const result = await control.call("validateDraft", {
     appId: bundle.manifest.appId,
     draftId: draft.id,
     body: {},
   });
-  if (!validation.passed) {
+  if (!result.passed) {
     throw new CliContractError(
       "DRAFT_VALIDATION_FAILED",
       "Authoritative server validation failed",
     );
+  }
+  return result;
+  };
+  let validation = await applyAndValidate(upload.files);
+  if (validation.artifactSha256 !== bundle.sha256 && upload.mode === "source") {
+    // The server resolved the author manifest differently (usually an unpinned
+    // runtime.sdk.version). Keep the source but send the canonical manifest,
+    // exactly as bundle mode does.
+    process.stderr.write(
+      `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI; storing the canonical opencloud.json with the release source. Pin runtime.sdk.version to keep your manifest.\n`,
+    );
+    const canonical: DraftFiles = new Map(upload.files);
+    canonical.delete(bundle.sourceManifest);
+    const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
+    canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
+    validation = await applyAndValidate(canonical);
   }
   if (validation.artifactSha256 !== bundle.sha256) {
     throw new Error("Local and server canonical bundle digests do not match");
@@ -1606,6 +1805,10 @@ dev
   .description("Validate, sync, and start or resume an isolated dev preview")
   .argument("<directory>")
   .option("--idempotency-key <key>")
+  .option(
+    "--force",
+    "Start even if a newer release replaced the one this copy is based on",
+  )
   .action(async (directory, options) => {
     const sourceRoot = callerPath(directory);
     await withDevWorkflowLock(sourceRoot, async () => {
@@ -1616,12 +1819,24 @@ dev
     }
     const appId = bundle.manifest.appId;
     const context = await exactAppMutationContext(appId, sourceRoot);
+    const upload = await planDraftUpload(context.control, sourceRoot, bundle);
+    const expectedActiveDeploymentId = await expectedBaseDeployment(
+      context.control,
+      sourceRoot,
+      appId,
+      options.force === true,
+    );
     await context.journal.run(
       mutationIntent({
         commandId: "opencloud app dev start",
         appId,
         safeScope: { appId },
-        safeRequest: { action: "dev-start", artifactSha256: bundle.sha256 },
+        safeRequest: {
+          action: "dev-start",
+          artifactSha256: bundle.sha256,
+          ...(upload.sourceSha256 ? { sourceSha256: upload.sourceSha256 } : {}),
+          ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+        },
         explicitIdempotencyKey: options.idempotencyKey,
         cwd: sourceRoot,
       }),
@@ -1665,19 +1880,23 @@ dev
             sourceRoot,
             bundle,
             run,
+            upload,
             previous?.draftId,
           );
         }
         await run.markAttempted();
-        const session = (await context.control.call(
+        const session = (await settleStaleReleaseRefusal(run, context.control.call(
           "startDevSession",
           {
             appId,
             draftId: synchronized.draftId,
-            body: { apply: true },
+            body: {
+              apply: true,
+              ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+            },
           },
           { idempotencyKey: childIdempotencyKey(run, "dev-start") },
-        )) as DevSessionWire;
+        ))) as DevSessionWire;
         if (
           session.appId !== appId ||
           session.draftId !== synchronized.draftId ||
@@ -1732,12 +1951,17 @@ dev
       throw new Error("The app manifest no longer matches .opencloud/dev.json");
     }
     const context = await exactAppMutationContext(state.appId, sourceRoot);
+    const upload = await planDraftUpload(context.control, sourceRoot, bundle);
     await context.journal.run(
       mutationIntent({
         commandId: "opencloud app dev sync",
         appId: state.appId,
         safeScope: { appId: state.appId, sessionId: state.sessionId },
-        safeRequest: { action: "dev-sync", artifactSha256: bundle.sha256 },
+        safeRequest: {
+          action: "dev-sync",
+          artifactSha256: bundle.sha256,
+          ...(upload.sourceSha256 ? { sourceSha256: upload.sourceSha256 } : {}),
+        },
         explicitIdempotencyKey: options.idempotencyKey,
         cwd: sourceRoot,
       }),
@@ -1749,6 +1973,7 @@ dev
           sourceRoot,
           bundle,
           run,
+          upload,
           state.draftId,
         );
         await run.markAttempted();
@@ -2858,6 +3083,13 @@ dev
           devStopped: true,
           localStateStored: false,
         });
+        await recordReleaseBase(
+          context.control,
+          sourceRoot,
+          state.appId,
+          state.draftId,
+          result.deployment,
+        );
         await outputAsync({
           completed: true,
           appId: state.appId,
@@ -3824,8 +4056,16 @@ test("REQ-001 replace this with the app's primary outcome", async ({
     output({ directory: root, manifest: path.join(root, "opencloud.yaml") });
   });
 
-addOperationOptions(program.command("deploy").argument("<directory>")).action(
-  async (directory, options: OperationOptions) => {
+addOperationOptions(
+  program
+    .command("deploy")
+    .argument("<directory>")
+    .option(
+      "--force",
+      "Deploy even if a newer release replaced the one this copy is based on",
+    ),
+).action(
+  async (directory, options: OperationOptions & { force?: boolean }) => {
     const sourceRoot = callerPath(directory);
     const bundle = await buildBundle(sourceRoot);
     process.stderr.write(
@@ -3833,12 +4073,31 @@ addOperationOptions(program.command("deploy").argument("<directory>")).action(
     );
     const appId = bundle.manifest.appId;
     const context = await exactAppMutationContext(appId, sourceRoot);
+    const upload = await planDraftUpload(context.control, sourceRoot, bundle);
+    const expectedActiveDeploymentId = await expectedBaseDeployment(
+      context.control,
+      sourceRoot,
+      appId,
+      options.force === true,
+    );
+    const deployInput = (draftId: string) => ({
+      appId,
+      draftId,
+      ...(expectedActiveDeploymentId
+        ? { query: { expectedActiveDeploymentId } }
+        : {}),
+    });
     await context.journal.run(
       mutationIntent({
         commandId: "opencloud deploy",
         appId,
         safeScope: { appId },
-        safeRequest: { action: "deploy", artifactSha256: bundle.sha256 },
+        safeRequest: {
+          action: "deploy",
+          artifactSha256: bundle.sha256,
+          ...(upload.sourceSha256 ? { sourceSha256: upload.sourceSha256 } : {}),
+          ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+        },
         explicitIdempotencyKey: options.idempotencyKey,
         cwd: sourceRoot,
       }),
@@ -3853,13 +4112,16 @@ addOperationOptions(program.command("deploy").argument("<directory>")).action(
               "The deployment checkpoint is missing its source draft",
             );
           }
-          started = await context.control.call(
-            "deployDraft",
-            { appId, draftId },
-            {
-              idempotencyKey: childIdempotencyKey(run, "deploy"),
-              timeoutMs: 120_000,
-            },
+          started = await settleStaleReleaseRefusal(
+            run,
+            context.control.call(
+              "deployDraft",
+              deployInput(draftId),
+              {
+                idempotencyKey: childIdempotencyKey(run, "deploy"),
+                timeoutMs: 120_000,
+              },
+            ),
           );
           if (operationFrom(started)?.id !== run.operationId) {
             throw new CliContractError(
@@ -3873,18 +4135,22 @@ addOperationOptions(program.command("deploy").argument("<directory>")).action(
             sourceRoot,
             bundle,
             run,
+            upload,
             undefined,
             "CLI",
           );
           draftId = synchronized.draftId;
           await run.markAttempted();
-          started = await context.control.call(
-            "deployDraft",
-            { appId, draftId },
-            {
-              idempotencyKey: childIdempotencyKey(run, "deploy"),
-              timeoutMs: 120_000,
-            },
+          started = await settleStaleReleaseRefusal(
+            run,
+            context.control.call(
+              "deployDraft",
+              deployInput(draftId),
+              {
+                idempotencyKey: childIdempotencyKey(run, "deploy"),
+                timeoutMs: 120_000,
+              },
+            ),
           );
           const operation = operationFrom(started);
           if (!operation) {
@@ -3905,6 +4171,15 @@ addOperationOptions(program.command("deploy").argument("<directory>")).action(
           started,
           options,
         });
+        if (operationFrom(completed)?.state === "succeeded" && draftId) {
+          await recordReleaseBase(
+            context.control,
+            sourceRoot,
+            appId,
+            draftId,
+            (started as { deployment?: unknown }).deployment,
+          );
+        }
         await outputAsync(completed);
         await run.complete();
       },
@@ -4076,6 +4351,158 @@ operation
       ),
     );
   });
+
+/** Downloads a release's source, or its artifact when it has no source. */
+async function downloadReleaseArchive(
+  control: OpenCloudClient,
+  appId: string,
+  deploymentId: string,
+): Promise<{ directory: string; file: string; kind: ReleaseKind }> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-release-"));
+  const file = path.join(directory, "release.tgz");
+  const release = `/v1/apps/${encodeURIComponent(appId)}/deployments/${encodeURIComponent(deploymentId)}`;
+  try {
+    let kind: ReleaseKind = "source";
+    let response: Response;
+    try {
+      response = await control.download(`${release}/source`);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      kind = "artifact";
+      response = await control.download(`${release}/artifact`);
+    }
+    if (!response.body) throw new Error("OpenCloud returned an empty release archive");
+    await pipeline(
+      Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+      createWriteStream(file, { mode: 0o600 }),
+    );
+    return { directory, file, kind };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+program
+  .command("pull")
+  .description(
+    "Download a release into a directory and record it as that copy's base",
+  )
+  .argument("[directory]", "Target directory", ".")
+  .option(
+    "--app <app-id>",
+    "App to pull; defaults to the directory's recorded release or connected app",
+  )
+  .option("--deployment <deployment-id>", "Release to pull; defaults to the live one")
+  .option("--force", "Overwrite local changes to files the release includes")
+  .action(
+    async (
+      directory: string,
+      options: { app?: string; deployment?: string; force?: boolean },
+    ) => {
+      const target = callerPath(directory);
+      const base = await readReleaseBase(target);
+      const appId = (
+        options.app ??
+        base?.appId ??
+        availableWorkspace(target)?.appId
+      )?.toLowerCase();
+      if (!appId) {
+        throw new CliContractError(
+          "APP_REQUIRED",
+          "Pass --app <app-id>; this directory has no recorded release or connected app",
+        );
+      }
+      if (base && base.appId !== appId && options.force !== true) {
+        throw new CliContractError(
+          "APP_MISMATCH",
+          `This directory is a copy of app ${base.appId}; pass --force to replace it with ${appId}`,
+        );
+      }
+      const control = client(target);
+      if (!(await releaseContracts(control)).releaseSource) {
+        throw new CliContractError(
+          "RELEASE_SOURCE_UNSUPPORTED",
+          "This OpenCloud API cannot download releases yet",
+        );
+      }
+      const deploymentId =
+        options.deployment ??
+        (await control.call("getApp", { appId })).activeDeploymentId;
+      if (!deploymentId) {
+        throw new CliContractError(
+          "NO_LIVE_RELEASE",
+          "This app has no live release to pull",
+        );
+      }
+      const release = await control.call("getDeployment", { appId, deploymentId });
+      const archive = await downloadReleaseArchive(control, appId, deploymentId);
+      try {
+        const files = await readReleaseArchive(archive.file);
+        const tracked = base?.appId === appId ? base : null;
+        const disk = new Map<string, string>();
+        for (const file of new Set([
+          ...files.map((value) => value.path),
+          ...Object.keys(tracked?.files ?? {}),
+        ])) {
+          const absolute = path.join(target, ...file.split("/"));
+          try {
+            if ((await lstat(absolute)).isFile()) {
+              disk.set(file, sha256Hex(await readFile(absolute)));
+            }
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+          }
+        }
+        const plan = planPull({
+          release: files,
+          kind: archive.kind,
+          base: tracked,
+          disk,
+          force: options.force === true,
+        });
+        for (const file of plan.write) {
+          const absolute = path.join(target, ...file.path.split("/"));
+          await mkdir(path.dirname(absolute), { recursive: true });
+          await writeFile(absolute, file.content);
+        }
+        for (const file of plan.remove) {
+          await rm(path.join(target, ...file.split("/")), { force: true });
+        }
+        await writeReleaseBase(target, {
+          schemaVersion: 1,
+          apiUrl: normalizeApiUrl(targetApiUrl(target)),
+          appId,
+          deploymentId: release.id,
+          version: release.version,
+          artifactSha256: release.artifactSha256,
+          sourceSha256:
+            archive.kind === "source" ? (release.source?.sha256 ?? null) : null,
+          files: Object.fromEntries(files.map((file) => [file.path, file.sha256])),
+          recordedAt: new Date().toISOString(),
+        });
+        output({
+          appId,
+          deploymentId: release.id,
+          version: release.version,
+          kind: archive.kind,
+          directory: target,
+          written: plan.write.length,
+          removed: plan.remove.length,
+          unchanged: plan.unchanged,
+          ...(archive.kind === "artifact"
+            ? {
+                warning:
+                  "This release has no recorded source, so only its artifact was written: the canonical manifest, frontend output, migrations, and Function source.",
+              }
+            : {}),
+        });
+      } finally {
+        await rm(archive.directory, { recursive: true, force: true });
+      }
+    },
+  );
 
 const deployment = program
   .command("deployment")

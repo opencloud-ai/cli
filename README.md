@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.12.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.13.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.12.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.12.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.13.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.13.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -271,6 +271,30 @@ repair.
 and any receipt reconciliation wait (default 900 seconds, range 1–1800).
 An interrupted request can continue running on the server; rerun the same
 command to reconcile retained evidence before starting another attempt.
+
+## Release source and newer releases
+
+On a platform that keeps release source, every draft upload carries the whole
+working tree, so each release can be recovered as source. The CLI honours
+`.gitignore` files and never uploads `.git`, `node_modules`, `.opencloud`, or
+`.env*`.
+
+After a successful `deploy`, `app dev promote`, or `pull`, the CLI records the
+release a working copy is based on in `.opencloud/base.json`. The next
+`deploy` or `app dev start` sends it. If someone has released since, OpenCloud
+refuses with `ACTIVE_DEPLOYMENT_CHANGED` and names the latest release. Update
+the copy and reapply your change, or pass `--force` to replace that release
+deliberately:
+
+```bash
+"$OPENCLOUD_CLI" pull "$APP_DIR"
+"$OPENCLOUD_CLI" pull "$NEW_DIR" --app "$APP_ID" --deployment "$DEPLOYMENT_ID"
+```
+
+`pull` downloads the live release, or the one named by `--deployment`. An
+untouched copy fast-forwards and drops files the release removed. Local
+changes the release would overwrite are refused unless `--force`. A release
+without recorded source falls back to its artifact and never removes files.
 
 ## Application email
 
