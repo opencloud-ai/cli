@@ -41,3 +41,12 @@ typed-client, and bundler file is byte-identical to that commit. Browser SDK
 read platform files (`SKILL.md`, `install.sh`, brand assets, private admin
 contracts) and are excluded from the public Vitest configuration like the
 earlier platform-only checks.
+
+## CLI 3.13.0 release source
+
+The contract, typed-client, and bundler snapshots are copied from platform
+commit `e5a8aa0cb97f8fcaf1d7d4ef14c5f4c6410fddd7` (pull request #374), which
+keeps each release's draft source, adds the release source and artifact
+downloads, and accepts `expectedActiveDeploymentId` on deploys and dev starts.
+Every vendored contract, typed-client, and bundler file is byte-identical to
+that commit. Browser SDK 2.3.0 remains the local default.

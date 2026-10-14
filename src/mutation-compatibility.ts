@@ -14,3 +14,33 @@ export async function assertMutationJournalCompatibility(
     );
   }
 }
+
+export interface ReleaseContracts {
+  /** Releases keep their draft source and can be downloaded. */
+  releaseSource: boolean;
+  /** Deploys and dev starts honour expectedActiveDeploymentId. */
+  deployPreconditions: boolean;
+}
+
+const releaseContractCache = new WeakMap<object, Promise<ReleaseContracts>>();
+
+/** Reads the release-source contracts this API advertises, once per client. */
+export function releaseContracts(
+  control: Pick<OpenCloudClient, "call">,
+): Promise<ReleaseContracts> {
+  let cached = releaseContractCache.get(control);
+  if (!cached) {
+    cached = control
+      .call("getPlatformVersion", {}, { cacheControl: "no-cache" })
+      .then((value) => ({
+        releaseSource: value.contracts.releaseSource === 1,
+        deployPreconditions: value.contracts.deployPreconditions === 1,
+      }))
+      .catch((error: unknown) => {
+        releaseContractCache.delete(control);
+        throw error;
+      });
+    releaseContractCache.set(control, cached);
+  }
+  return cached;
+}

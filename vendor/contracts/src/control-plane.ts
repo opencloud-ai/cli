@@ -124,6 +124,10 @@ const platformVersionOutput = z.object({
   releaseId: z.string(),
   contracts: z.object({
     cliMutationJournal: z.literal(1).optional(),
+    /** Releases keep their draft source and can be downloaded. */
+    releaseSource: z.literal(1).optional(),
+    /** Deploys and dev starts honour expectedActiveDeploymentId. */
+    deployPreconditions: z.literal(1).optional(),
   }),
 });
 
@@ -404,6 +408,14 @@ export const controlPlaneDeploymentSchema = z
     error: jsonObject.nullable(),
     createdAt: z.string(),
     activatedAt: z.string().nullable(),
+    source: z
+      .object({
+        sha256,
+        sizeBytes: z.number().int().nonnegative(),
+        fileCount: z.number().int().nonnegative(),
+      })
+      .nullable()
+      .optional(),
   })
   .passthrough();
 
@@ -3013,10 +3025,17 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/drafts/{draftId}/deploy",
     summary: "Deploy a validated draft",
     description:
-      "Deploys exactly the validated draft revision and returns a durable operation.",
+      "Deploys exactly the validated draft revision and returns a durable operation. The release keeps the draft's complete file tree as its source. When expectedActiveDeploymentId is supplied, or the draft was cloned from a release, deployment proceeds only while that release is still the latest one; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED.",
     auth: "bearer",
     scopes: ["app:deploy"],
-    input: draftPath,
+    input: draftPath.extend({
+      query: z
+        .object({
+          expectedActiveDeploymentId: uuid.optional(),
+        })
+        .optional(),
+    }),
+    queryKey: "query",
     output: z.object({
       draft: draftOutput,
       deployment: controlPlaneDeploymentSchema,
@@ -3059,11 +3078,14 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/drafts/{draftId}/dev-sessions",
     summary: "Start a development session",
     description:
-      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment.",
+      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment. A new session starts only while expectedActiveDeploymentId, or the release the draft was cloned from, is still the latest release; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
-      body: z.object({ apply: z.boolean().default(true) }),
+      body: z.object({
+        apply: z.boolean().default(true),
+        expectedActiveDeploymentId: uuid.optional(),
+      }),
     }),
     output: devSessionOutput,
     bodyKey: "body",
@@ -3646,6 +3668,38 @@ export const controlPlaneOperations = {
       idempotentHint: true,
       openWorldHint: false,
     },
+  }),
+  downloadDeploymentSource: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployments/{deploymentId}/source",
+    summary: "Download a release's source",
+    description:
+      "Streams the exact draft file tree a release was validated from as a gzip tar archive. Releases uploaded without a draft, and releases made before release source existed, fail with RELEASE_SOURCE_UNAVAILABLE; download their artifact instead.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: deploymentPath,
+    output: z.unknown(),
+    rawOutput: {
+      contentType: "application/gzip",
+      description: "A gzip tar archive of the release's source files.",
+    },
+    idempotency: "none",
+  }),
+  downloadDeploymentArtifact: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/deployments/{deploymentId}/artifact",
+    summary: "Download a release's artifact",
+    description:
+      "Streams a release's immutable artifact: the canonical manifest, frontend tree, migrations, Function source, and E2E test it serves and runs.",
+    auth: "bearer",
+    scopes: ["app:read"],
+    input: deploymentPath,
+    output: z.unknown(),
+    rawOutput: {
+      contentType: "application/gzip",
+      description: "The release's gzip tar artifact.",
+    },
+    idempotency: "none",
   }),
   rollbackDeployment: operation({
     method: "POST",

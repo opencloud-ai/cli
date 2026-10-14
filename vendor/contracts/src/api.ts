@@ -296,6 +296,18 @@ export interface DeploymentRecord {
   error: Record<string, unknown> | null;
   createdAt: string;
   activatedAt: string | null;
+  /**
+   * The exact draft file tree this release was validated from. Null when the
+   * release was uploaded without a draft or predates release source; absent
+   * from servers that do not record it.
+   */
+  source?: DeploymentSourceRecord | null;
+}
+
+export interface DeploymentSourceRecord {
+  sha256: string;
+  sizeBytes: number;
+  fileCount: number;
 }
 
 export interface DeploymentsPage {

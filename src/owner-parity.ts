@@ -470,6 +470,24 @@ function safeCode(value: unknown, fallback: string): string {
   return /^[A-Z][A-Z0-9_]{1,99}$/.test(code) ? code : fallback;
 }
 
+/** Names the newer release and the two ways forward for a stale copy. */
+function staleReleaseFields(details: unknown): Record<string, unknown> {
+  const value =
+    details && typeof details === "object"
+      ? (details as Record<string, unknown>)
+      : {};
+  const identifier = (field: string) =>
+    typeof value[field] === "string" || value[field] === null
+      ? { [field]: value[field] }
+      : {};
+  return {
+    ...identifier("latestDeploymentId"),
+    ...identifier("latestVersion"),
+    ...identifier("expectedActiveDeploymentId"),
+    hint: "Run opencloud pull <directory> to update this copy and reapply your change, or pass --force to replace the latest release.",
+  };
+}
+
 function apiErrorFields(error: ApiError): Record<string, unknown> {
   const body =
     error.body && typeof error.body === "object"
@@ -479,10 +497,12 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
     body.error && typeof body.error === "object"
       ? (body.error as Record<string, unknown>)
       : {};
+  const code = safeCode(body.code ?? nested.code, `HTTP_${error.status}`);
   return {
-    code: safeCode(body.code ?? nested.code, `HTTP_${error.status}`),
+    code,
     message: redactMessage(body.message ?? nested.message ?? error.message),
     status: error.status,
+    ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(body.details) : {}),
     retryable:
       typeof body.retryable === "boolean"
         ? body.retryable

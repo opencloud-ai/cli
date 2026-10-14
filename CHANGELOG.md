@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.13.0
+
+- Upload the whole working tree with each draft when the platform keeps
+  release source, so every release can be recovered as source. The upload
+  honours `.gitignore` files and never includes `.git`, `node_modules`,
+  `.opencloud`, or `.env*`; links and files over 10 MiB are listed and
+  left out. Bundle inputs, such as ignored build output, always travel. If the
+  platform resolves the author manifest differently, the CLI keeps the source
+  but sends the canonical `opencloud.json`, as before.
+- Record the release a working copy is based on in `.opencloud/base.json`
+  after a successful `deploy`, `app dev promote`, or `pull`. `deploy` and
+  `app dev start` send it, and OpenCloud refuses with
+  `ACTIVE_DEPLOYMENT_CHANGED` when a newer release replaced it. The error
+  names the latest release. Pass `--force` to replace it deliberately; a
+  refusal no longer blocks the next request.
+- Add `pull [directory]` to download the live release, or `--deployment`, into
+  a directory and record it as that copy's base. An untouched copy
+  fast-forwards and drops files the release removed; local changes the release
+  would overwrite are refused unless `--force`. Releases without recorded
+  source fall back to their artifact and never remove files.
+- Refresh the public contract and typed-client snapshots for release source,
+  release downloads, and deploy preconditions.
+
 ## 3.12.0
 
 - Refresh the public contract, typed-client, and bundler snapshots. Local
