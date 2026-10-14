@@ -16,10 +16,13 @@
   names the latest release. Pass `--force` to replace it deliberately; a
   refusal no longer blocks the next request.
 - Add `pull [directory]` to download the live release, or `--deployment`, into
-  a directory and record it as that copy's base. An untouched copy
+  a directory and record it as that copy's base. It uses the directory's
+  connection or, before one exists, the account login. An untouched copy
   fast-forwards and drops files the release removed; local changes the release
   would overwrite are refused unless `--force`. Releases without recorded
-  source fall back to their artifact and never remove files.
+  source fall back to their artifact and never remove files. After merging a
+  release by hand, `pull --deployment <id> --merged` records it as the copy's
+  base without changing any files, so the next deploy is based on it.
 - Support frontends OpenCloud builds. When the manifest declares
   `frontend.build`, local bundling no longer needs the build output, the
   upload leaves any local build out, and the server's validated artifact

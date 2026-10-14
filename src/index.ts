@@ -241,6 +241,17 @@ function client(cwd?: string): OpenCloudClient {
   );
 }
 
+/**
+ * A connected directory's own credential, or otherwise the account login, so
+ * a person can pull an app into a new directory before connecting it.
+ */
+async function directoryOrAccountClient(directory: string): Promise<OpenCloudClient> {
+  if (program.opts<{ token?: string }>().token || availableWorkspace(directory)) {
+    return client(directory);
+  }
+  return managementClient();
+}
+
 async function managementClient(): Promise<OpenCloudClient> {
   const options = program.opts<{ token?: string }>();
   if (options.token) return client();
@@ -4505,12 +4516,28 @@ program
   )
   .option("--deployment <deployment-id>", "Release to pull; defaults to the live one")
   .option("--force", "Overwrite local changes to files the release includes")
+  .option(
+    "--merged",
+    "Record --deployment as this copy's base without changing files, after merging that release's changes yourself",
+  )
   .action(
     async (
       directory: string,
-      options: { app?: string; deployment?: string; force?: boolean },
+      options: { app?: string; deployment?: string; force?: boolean; merged?: boolean },
     ) => {
       const target = callerPath(directory);
+      if (options.merged === true && !options.deployment) {
+        throw new CliContractError(
+          "DEPLOYMENT_REQUIRED",
+          "Pass --deployment <deployment-id> with --merged, naming exactly the release you merged",
+        );
+      }
+      if (options.merged === true && options.force === true) {
+        throw new CliContractError(
+          "INVALID_OPTIONS",
+          "--merged records a base without changing files, so it cannot be combined with --force",
+        );
+      }
       const base = await readReleaseBase(target);
       const appId = (
         options.app ??
@@ -4529,7 +4556,7 @@ program
           `This directory is a copy of app ${base.appId}; pass --force to replace it with ${appId}`,
         );
       }
-      const control = client(target);
+      const control = await directoryOrAccountClient(target);
       if (!(await releaseContracts(control)).releaseSource) {
         throw new CliContractError(
           "RELEASE_SOURCE_UNSUPPORTED",
@@ -4565,13 +4592,20 @@ program
             if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
           }
         }
-        const plan = planPull({
-          release: files,
-          kind: archive.kind,
-          base: tracked,
-          disk,
-          force: options.force === true,
-        });
+        // A merged copy keeps its files; only its base moves to the merged release.
+        const plan = options.merged === true
+          ? {
+              write: [],
+              remove: [],
+              unchanged: files.filter((file) => disk.get(file.path) === file.sha256).length,
+            }
+          : planPull({
+              release: files,
+              kind: archive.kind,
+              base: tracked,
+              disk,
+              force: options.force === true,
+            });
         for (const file of plan.write) {
           const absolute = path.join(target, ...file.path.split("/"));
           await mkdir(path.dirname(absolute), { recursive: true });
@@ -4601,6 +4635,9 @@ program
           written: plan.write.length,
           removed: plan.remove.length,
           unchanged: plan.unchanged,
+          ...(options.merged === true
+            ? { merged: true, differing: files.length - plan.unchanged }
+            : {}),
           ...(archive.kind === "artifact"
             ? {
                 warning:

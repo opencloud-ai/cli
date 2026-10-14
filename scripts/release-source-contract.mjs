@@ -362,6 +362,18 @@ try {
   assert.equal(JSON.parse(conflict.stderr.trim().split("\n").at(-1)).error.code, "LOCAL_CHANGES");
   assert.equal(await readFile(path.join(copy, "frontend/src/app.ts"), "utf8"), "export const mine = 1;\n");
 
+  // 9b. After merging that release by hand, --merged records it as the base
+  //     and keeps every file; it needs the exact release.
+  const merged = "export const mine = 1;\nexport const theirs = 1;\n";
+  await writeFile(path.join(copy, "frontend/src/app.ts"), merged);
+  const unnamed = await runCli(["pull", copy, "--merged"], { status: 1 });
+  assert.equal(JSON.parse(unnamed.stderr.trim().split("\n").at(-1)).error.code, "DEPLOYMENT_REQUIRED");
+  const recorded = JSON.parse((await runCli(["pull", copy, "--deployment", state.activeDeploymentId, "--merged"])).stdout);
+  assert.deepEqual({ merged: recorded.merged, written: recorded.written, removed: recorded.removed, differing: recorded.differing },
+    { merged: true, written: 0, removed: 0, differing: 1 });
+  assert.equal(await readFile(path.join(copy, "frontend/src/app.ts"), "utf8"), merged);
+  assert.equal(JSON.parse(await readFile(path.join(copy, ".opencloud", "base.json"), "utf8")).deploymentId, state.activeDeploymentId);
+
   // 10. A release without source falls back to its artifact, with a warning.
   await externalRelease({ "opencloud.json": "{\"canonical\":true}" }, { withSource: false });
   const artifactCopy = path.join(temporary, "artifact-copy");
@@ -426,7 +438,7 @@ try {
   assert.equal(JSON.parse(unsupported.stderr.trim().split("\n").at(-1)).error.code, "PLATFORM_BUILD_UNSUPPORTED");
   assert.equal(state.drafts.size, drafts);
 
-  process.stdout.write("Release source HTTP contract passed: full-source upload, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull, and platform-built frontends.\n");
+  process.stdout.write("Release source HTTP contract passed: full-source upload, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, and platform-built frontends.\n");
 } finally {
   server.close();
   await rm(temporary, { recursive: true, force: true });
