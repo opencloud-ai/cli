@@ -296,6 +296,18 @@ untouched copy fast-forwards and drops files the release removed. Local
 changes the release would overwrite are refused unless `--force`. A release
 without recorded source falls back to its artifact and never removes files.
 
+When the newer release conflicts with your edits, pull it into a separate
+directory, merge its changes into your copy, and record that your copy now
+includes it. `--merged` changes no files; it needs the exact release you
+merged, so a release that lands meanwhile is still caught by the next deploy:
+
+```bash
+"$OPENCLOUD_CLI" pull "$MERGE_DIR" --app "$APP_ID" --deployment "$DEPLOYMENT_ID"
+# merge $MERGE_DIR into $APP_DIR, then:
+"$OPENCLOUD_CLI" pull "$APP_DIR" --deployment "$DEPLOYMENT_ID" --merged
+"$OPENCLOUD_CLI" deploy "$APP_DIR"
+```
+
 ## Frontends OpenCloud builds
 
 A manifest can ask OpenCloud to build the frontend during validation:
