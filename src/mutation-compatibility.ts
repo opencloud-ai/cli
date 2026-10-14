@@ -20,6 +20,8 @@ export interface ReleaseContracts {
   releaseSource: boolean;
   /** Deploys and dev starts honour expectedActiveDeploymentId. */
   deployPreconditions: boolean;
+  /** Validation builds a frontend that declares frontend.build. */
+  platformBuilds: boolean;
 }
 
 const releaseContractCache = new WeakMap<object, Promise<ReleaseContracts>>();
@@ -35,6 +37,7 @@ export function releaseContracts(
       .then((value) => ({
         releaseSource: value.contracts.releaseSource === 1,
         deployPreconditions: value.contracts.deployPreconditions === 1,
+        platformBuilds: value.contracts.platformBuilds === 1,
       }))
       .catch((error: unknown) => {
         releaseContractCache.delete(control);

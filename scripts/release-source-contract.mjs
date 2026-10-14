@@ -9,7 +9,7 @@ import * as tar from "tar";
 
 // Drives the built CLI against a fake control plane: full-source uploads, the
 // stale-release precondition and --force, the canonical-manifest fallback,
-// older APIs, base recording, and pull.
+// older APIs, base recording, pull, and frontends OpenCloud builds.
 const root = path.resolve(import.meta.dirname, "..");
 const binary = path.join(root, "dist", "index.cjs");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-release-source-contract-"));
@@ -19,13 +19,17 @@ const now = "2026-10-14T12:00:00.000Z";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 const state = {
-  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 },
+  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 },
   drafts: new Map(),
   deployments: new Map(),
   activeDeploymentId: null,
   /** Digest the fake validator reports; null reports the CLI's own digest. */
   validationDigests: [],
   localDigest: null,
+  /** Validations to answer with 429 FRONTEND_BUILD_BUSY first. */
+  validationBusy: 0,
+  /** Diagnostics for a failed validation, as a failed platform build reports. */
+  validationFailure: null,
   requests: [],
 };
 
@@ -180,8 +184,22 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
+      if (state.validationBusy > 0) {
+        state.validationBusy -= 1;
+        return send(response, 429, { statusCode: 429, code: "FRONTEND_BUILD_BUSY", message: "Another frontend build for this app is running; validate again shortly" });
+      }
+      if (state.validationFailure) {
+        draft.status = "validation_failed";
+        return send(response, 200, {
+          id: randomUUID(), draftId: draft.id, revision: draft.revision, passed: false,
+          artifactSha256: null, manifest: null, canonicalSourceManifest: "opencloud.yaml",
+          sourceManifest: null, sourceFiles: [], artifactFiles: [], diagnostics: state.validationFailure,
+          nextAction: "Fix the diagnostics and validate again.", createdAt: now,
+        });
+      }
       draft.status = "validated";
       const reported = state.validationDigests.length ? state.validationDigests.shift() : state.localDigest;
+      draft.validatedDigest = reported;
       return send(response, 200, {
         id: randomUUID(), draftId: draft.id, revision: draft.revision, passed: true,
         artifactSha256: reported, manifest: null, canonicalSourceManifest: "opencloud.yaml",
@@ -205,7 +223,7 @@ const server = createServer(async (request, response) => {
       const operationId = randomUUID();
       const release = {
         id, operationId, version: `planner-20261014-${state.deployments.size + 1}`,
-        artifactSha256: state.localDigest, artifact,
+        artifactSha256: draft.validatedDigest ?? state.localDigest, artifact,
         source: sourceBytes ? { bytes: sourceBytes, sha256: sha256(sourceBytes), fileCount: draft.files.size } : null,
       };
       state.deployments.set(id, release);
@@ -321,7 +339,7 @@ try {
   await runCli(["deploy", app]);
   assert.deepEqual([...lastDraft().files.keys()].sort(), ["frontend/dist/index.html", "opencloud.json"]);
   assert.equal(deployRequest().query, "");
-  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 };
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
 
   // 7. pull writes a release into an empty directory and records its base.
   const live = await externalRelease({ "opencloud.yaml": manifest, "frontend/src/main.ts": "console.log('live');\n" });
@@ -352,7 +370,63 @@ try {
   assert.match(artifact.warning, /no recorded source/);
   assert.equal(await readFile(path.join(artifactCopy, "opencloud.json"), "utf8"), "{\"canonical\":true}");
 
-  process.stdout.write("Release source HTTP contract passed: full-source upload, stale-release precondition and --force, canonical fallback, older APIs, base recording, and pull.\n");
+  // 11. A frontend OpenCloud builds: local validation needs no build output,
+  //     the upload leaves any local build out, and the server's artifact is the release.
+  const built = path.join(temporary, "built");
+  await writeTree(built, {
+    "opencloud.yaml": manifest.replace("  spa: true\n", "  spa: true\n  build:\n    script: build\n"),
+    "package.json": "{\"name\":\"planner\",\"scripts\":{\"build\":\"vite build\"}}\n",
+    "package-lock.json": "{\"lockfileVersion\":3}\n",
+    "frontend/src/main.ts": "console.log('built');\n",
+  });
+  const local = JSON.parse((await runCli(["validate", built])).stdout);
+  assert.ok(local.warnings.some((warning) => warning.code === "FRONTEND_BUILT_BY_PLATFORM"));
+  assert.ok(!local.files.some((name) => name.startsWith("frontend/dist/")));
+  await writeTree(built, { "frontend/dist/index.html": "<!doctype html><title>stale local build</title>\n" });
+  state.localDigest = local.artifactSha256;
+  const serverBuilt = "b".repeat(64);
+  state.validationDigests = [serverBuilt];
+  const builtDeploy = await runCli(["deploy", built]);
+  assert.deepEqual([...lastDraft().files.keys()].sort(), [
+    "frontend/src/main.ts", "opencloud.yaml", "package-lock.json", "package.json",
+  ]);
+  assert.doesNotMatch(builtDeploy.stderr, /canonical opencloud\.json/);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, serverBuilt);
+  const builtBase = JSON.parse(await readFile(path.join(built, ".opencloud", "base.json"), "utf8"));
+  assert.equal(builtBase.deploymentId, state.activeDeploymentId);
+  assert.equal(builtBase.artifactSha256, serverBuilt);
+
+  // 12. While another build for the app runs, the CLI waits and validates again.
+  state.validationBusy = 1;
+  state.validationDigests = ["c".repeat(64)];
+  await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built v2');\n");
+  const waited = await runCli(["deploy", built]);
+  assert.match(waited.stderr, /Another frontend build for this app is running; retrying/);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "c".repeat(64));
+
+  // 13. A failed build prints its diagnostics and deploys nothing.
+  const before = state.activeDeploymentId;
+  state.validationFailure = [{ level: "error", code: "FRONTEND_BUILD_FAILED", path: "package.json", message: "The frontend build failed. npm ERR! Missing script: \"build\"" }];
+  await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built v3');\n");
+  const failedBuild = await runCli(["deploy", built], { status: 1 });
+  assert.match(failedBuild.stderr, /\[FRONTEND_BUILD_FAILED\] package\.json: The frontend build failed/);
+  assert.equal(JSON.parse(failedBuild.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_FAILED");
+  assert.equal(state.activeDeploymentId, before);
+  state.validationFailure = null;
+  // The fixed source deploys straight away; the failed attempt does not block it.
+  await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built v4');\n");
+  state.validationDigests = ["d".repeat(64)];
+  await runCli(["deploy", built]);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "d".repeat(64));
+
+  // 14. An API that cannot build frontends refuses before creating a draft.
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 };
+  const drafts = state.drafts.size;
+  const unsupported = await runCli(["deploy", built], { status: 1 });
+  assert.equal(JSON.parse(unsupported.stderr.trim().split("\n").at(-1)).error.code, "PLATFORM_BUILD_UNSUPPORTED");
+  assert.equal(state.drafts.size, drafts);
+
+  process.stdout.write("Release source HTTP contract passed: full-source upload, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull, and platform-built frontends.\n");
 } finally {
   server.close();
   await rm(temporary, { recursive: true, force: true });

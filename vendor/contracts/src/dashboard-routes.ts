@@ -59,6 +59,7 @@ export const dashboardRoutePaths = {
   activity: "/apps/:appId/activity",
   "operation-detail": "/apps/:appId/activity/:detailId",
   settings: "/apps/:appId/settings",
+  ai: "/apps/:appId/ai",
 } as const;
 
 export type DashboardRouteKey = keyof typeof dashboardRoutePaths;

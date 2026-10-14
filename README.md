@@ -296,6 +296,25 @@ untouched copy fast-forwards and drops files the release removed. Local
 changes the release would overwrite are refused unless `--force`. A release
 without recorded source falls back to its artifact and never removes files.
 
+## Frontends OpenCloud builds
+
+A manifest can ask OpenCloud to build the frontend during validation:
+
+```yaml
+frontend:
+  directory: frontend/dist
+  spa: true
+  build:
+    script: build
+```
+
+OpenCloud runs `npm ci` from the committed `package-lock.json` (without
+lifecycle scripts) and then `npm run build` in an isolated sandbox. The CLI
+does not need, and never uploads, `frontend/dist`; build errors appear as
+validation errors with the end of the build log. The server's validated
+artifact digest identifies the release, so it differs from the local
+`validate` digest.
+
 ## Application email
 
 Inspect retained production message metadata with cursor, alias, direction,
