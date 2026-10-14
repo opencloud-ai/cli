@@ -241,6 +241,17 @@ function client(cwd?: string): OpenCloudClient {
   );
 }
 
+/**
+ * A connected directory's own credential, or otherwise the account login, so
+ * a person can pull an app into a new directory before connecting it.
+ */
+async function directoryOrAccountClient(directory: string): Promise<OpenCloudClient> {
+  if (program.opts<{ token?: string }>().token || availableWorkspace(directory)) {
+    return client(directory);
+  }
+  return managementClient();
+}
+
 async function managementClient(): Promise<OpenCloudClient> {
   const options = program.opts<{ token?: string }>();
   if (options.token) return client();
@@ -4545,7 +4556,7 @@ program
           `This directory is a copy of app ${base.appId}; pass --force to replace it with ${appId}`,
         );
       }
-      const control = client(target);
+      const control = await directoryOrAccountClient(target);
       if (!(await releaseContracts(control)).releaseSource) {
         throw new CliContractError(
           "RELEASE_SOURCE_UNSUPPORTED",

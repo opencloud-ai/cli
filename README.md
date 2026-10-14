@@ -291,8 +291,9 @@ deliberately:
 "$OPENCLOUD_CLI" pull "$NEW_DIR" --app "$APP_ID" --deployment "$DEPLOYMENT_ID"
 ```
 
-`pull` downloads the live release, or the one named by `--deployment`. An
-untouched copy fast-forwards and drops files the release removed. Local
+`pull` downloads the live release, or the one named by `--deployment`, using
+the directory's connection or your account login, so a new directory needs no
+`app connect` first. An untouched copy fast-forwards and drops files the release removed. Local
 changes the release would overwrite are refused unless `--force`. A release
 without recorded source falls back to its artifact and never removes files.
 
