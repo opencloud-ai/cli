@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -66,6 +67,9 @@ const server = createServer(async (request, response) => {
   if (route === `GET /v1/apps/${appId}/custom-integrations`) return send(200, catalog);
   if (route === `GET /v1/apps/${appId}/integration-events`) return send(200, deliveries);
   if (route === `GET ${devBase}/integrations`) return send(200, settings);
+  if (route === `POST ${devBase}/request`) {
+    return send(200, { status: 200, contentType: "text/html; charset=utf-8", requestId: null, body: "<!doctype html><title>Dev</title>" });
+  }
   if (route === `PUT ${devBase}/integrations/crm/mode`) {
     const { mode } = JSON.parse(body);
     return send(200, { ...settings, slots: [{ ...settings.slots[0], mode }] });
@@ -92,11 +96,14 @@ const server = createServer(async (request, response) => {
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
-async function run(args, { status = 0, cwd = temporary } = {}) {
+/** `connected` runs without --api-url or --token, as the directory's connection. */
+async function run(args, { status = 0, cwd = temporary, connected = null } = {}) {
   const env = { ...process.env, OPENCLOUD_MUTATION_JOURNAL_DIR: path.join(temporary, "journal") };
   for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE"]) delete env[key];
+  if (connected) Object.assign(env, { HOME: connected.home, XDG_CONFIG_HOME: connected.configHome });
+  const authority = connected ? [] : ["--api-url", `http://127.0.0.1:${server.address().port}`, "--token", token];
   const result = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [binary, "--api-url", `http://127.0.0.1:${server.address().port}`, "--token", token, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [binary, ...authority, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
@@ -209,6 +216,27 @@ try {
   assert.notEqual(replayed, firstAttempt);
   assert.equal(replayed.key, firstAttempt.key);
   assert.equal(replayed.body, firstAttempt.body);
+
+  // Dev read commands authenticate as the app directory they are given, so a
+  // connected app works from any working directory, like the dev mutations.
+  const apiUrl = `http://127.0.0.1:${server.address().port}`;
+  const connected = { home: path.join(temporary, "home"), configHome: path.join(temporary, "config") };
+  const later = new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString();
+  await writeFile(path.join(appRoot, ".opencloud", "app.json"), JSON.stringify({
+    schemaVersion: 1, apiUrl, appId, appName: "Consumer", appUrl: "https://consumer.example.test",
+    connectedAt: timestamp, credentialExpiresAt: later,
+  }));
+  const credentials = path.join(connected.configHome, "opencloud", "credentials");
+  await mkdir(credentials, { recursive: true, mode: 0o700 });
+  await mkdir(connected.home, { recursive: true });
+  const credentialName = `workspace-${createHash("sha256").update([apiUrl, appId].join("\0")).digest("hex")}`;
+  await writeFile(path.join(credentials, `${credentialName}.json`),
+    `${JSON.stringify({ schemaVersion: 1, kind: "workspace", apiUrl, appId, token, expiresAt: later })}\n`, { mode: 0o600 });
+  const elsewhere = path.join(temporary, "elsewhere");
+  await mkdir(elsewhere);
+  assert.deepEqual(await run(["app", "dev", "integration", "list", appRoot], { cwd: elsewhere, connected }), settings);
+  assert.equal((await run(["app", "dev", "request", appRoot, "/"], { cwd: elsewhere, connected })).status, 200);
+  assert.equal(lastRequest("POST", `${devBase}/request`).body, JSON.stringify({ path: "/", method: "GET" }));
 
   process.stdout.write("Integration command HTTP, input validation, and idempotency contract passed.\n");
 } finally {

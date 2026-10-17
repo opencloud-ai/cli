@@ -1145,6 +1145,70 @@ try {
     verifyPostsBeforeLostReceipt + 2,
   );
 
+  // A frontend OpenCloud builds: the session runs the server-built artifact,
+  // not the local bundle, which leaves the frontend out.
+  const platformVerifyJournal = path.join(
+    temporary,
+    "journal-verify-platform-build",
+  );
+  const platformVerifyRoot = await prepareDevSource(
+    "verify-platform-build-app",
+    platformVerifyJournal,
+  );
+  const localBundleSha256 = artifactSha256;
+  artifactSha256 = "e".repeat(64);
+  activeDevSessionStatus = "active";
+  activeDevRevisionId = revisionId;
+  devVerificationReceipts = [];
+  devVerificationBehavior = "pass";
+  const platformVerifyArguments = [
+    "app",
+    "dev",
+    "verify",
+    platformVerifyRoot,
+    "--idempotency-key",
+    "verify-platform-build-stale",
+    "--interval",
+    "0.05",
+    "--timeout",
+    "2",
+  ];
+  const verifyPostsBeforePlatformBuild = requests.filter((request) =>
+    request.url?.endsWith(`/dev-sessions/${sessionId}/verify`),
+  ).length;
+  // A copy that recorded another server-built artifact is still refused.
+  await writeDevState(platformVerifyRoot, {
+    artifactSha256: localBundleSha256,
+    serverArtifactSha256: "f".repeat(64),
+  });
+  const staleServerArtifact = await runCli(platformVerifyArguments, {
+    journal: platformVerifyJournal,
+    status: 1,
+  });
+  assert.equal(
+    JSON.parse(staleServerArtifact.stderr).error.code,
+    "DEV_VERIFICATION_TARGET_CHANGED",
+  );
+  await writeDevState(platformVerifyRoot, {
+    artifactSha256: localBundleSha256,
+    serverArtifactSha256: artifactSha256,
+  });
+  const platformVerifyRetryArguments = [...platformVerifyArguments];
+  platformVerifyRetryArguments[5] = "verify-platform-build";
+  const platformVerified = await runCli(platformVerifyRetryArguments, {
+    journal: platformVerifyJournal,
+  });
+  assert.equal(
+    JSON.parse(platformVerified.stdout).receipt.artifactSha256,
+    artifactSha256,
+  );
+  assert.equal(
+    requests.filter((request) =>
+      request.url?.endsWith(`/dev-sessions/${sessionId}/verify`),
+    ).length,
+    verifyPostsBeforePlatformBuild + 1,
+  );
+
   const promotionJournal = path.join(temporary, "journal-promotion");
   const sourceRoot = await prepareDevSource("promotion-app", promotionJournal);
   activeDeploymentId = deploymentId;

@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.13.1
+
+- Let `app dev verify` verify an app whose frontend OpenCloud builds. It
+  compared the session's server-built artifact with the local bundle, which
+  leaves the frontend out, so every such verification failed with
+  `DEV_VERIFICATION_TARGET_CHANGED` and the revision could not be promoted.
+  It now expects the server-built artifact recorded by `app dev start` and
+  `app dev sync`.
+- Authenticate `app dev status`, `request`, `requests`, `receipts`,
+  `evidence`, `email list|get`, `notifications list` and `integration list`
+  with the connection of the app directory they are given, as the dev
+  mutations already do. Run from any other directory, they reported that the
+  directory was not connected.
+- Let JSON requests wait as long as their own timeout. Node's fetch gave up on
+  any response slower than 300 seconds, so a validation whose frontend build
+  ran to the platform's five-minute limit, or a long development
+  verification, failed with `fetch failed` while OpenCloud finished it.
+
 ## 3.13.0
 
 - Upload the whole working tree with each draft when the platform keeps
