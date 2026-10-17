@@ -120,7 +120,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.13.0";
+const CLI_VERSION = "3.13.1";
 
 const program = new Command()
   .name("opencloud")
@@ -2137,7 +2137,7 @@ dev
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);
     output(
-      await client().call("getDevSession", {
+      await client(sourceRoot).call("getDevSession", {
         appId: state.appId,
         sessionId: state.sessionId,
       }),
@@ -2159,7 +2159,7 @@ dev
   .action(async (directory, requestPath, options) => {
     const state = await requireDevState(callerPath(directory));
     output(
-      await client().call("requestDevApp", {
+      await client(callerPath(directory)).call("requestDevApp", {
         appId: state.appId,
         sessionId: state.sessionId,
         body: {
@@ -2230,7 +2230,7 @@ devEmail
   .action(async (directory, options) => {
     const state = await requireDevState(callerPath(directory));
     output(
-      await client().call("listDevEmailCaptures", {
+      await client(callerPath(directory)).call("listDevEmailCaptures", {
         appId: state.appId,
         sessionId: state.sessionId,
         query: { limit: devEmailCaptureLimit(options.limit) },
@@ -2246,7 +2246,7 @@ devEmail
   .action(async (directory, messageId) => {
     const state = await requireDevState(callerPath(directory));
     output(
-      await client().call("getDevEmailCapture", {
+      await client(callerPath(directory)).call("getDevEmailCapture", {
         appId: state.appId,
         sessionId: state.sessionId,
         messageId: String(messageId),
@@ -2343,7 +2343,7 @@ devNotifications
   .action(async (directory, options) => {
     const state = await requireDevState(callerPath(directory));
     output(
-      await client().call("listDevNotificationCaptures", {
+      await client(callerPath(directory)).call("listDevNotificationCaptures", {
         appId: state.appId,
         sessionId: state.sessionId,
         query: { limit: devNotificationCaptureLimit(options.limit) },
@@ -2366,7 +2366,7 @@ devIntegration
   .action(async (directory) => {
     const state = await requireDevState(callerPath(directory));
     output(
-      await client().call("getDevSessionIntegrations", {
+      await client(callerPath(directory)).call("getDevSessionIntegrations", {
         appId: state.appId,
         sessionId: state.sessionId,
       }),
@@ -2586,7 +2586,7 @@ dev
       throw new Error("--limit must be an integer between 1 and 200");
     }
     output(
-      await client().call("listDevInvocations", {
+      await client(callerPath(directory)).call("listDevInvocations", {
         appId: state.appId,
         sessionId: state.sessionId,
         query: { limit },
@@ -2608,7 +2608,7 @@ dev
       throw new Error("--limit must be an integer between 1 and 200");
     }
     output(
-      await client().call("listDevReceipts", {
+      await client(callerPath(directory)).call("listDevReceipts", {
         appId: bundle.manifest.appId,
         query: { limit },
       }),
@@ -2623,7 +2623,7 @@ dev
     const sourceRoot = callerPath(directory);
     const bundle = await localBundle(sourceRoot);
     const localState = await readDevState(sourceRoot);
-    const receipts = await client().call("listDevReceipts", {
+    const receipts = await client(sourceRoot).call("listDevReceipts", {
       appId: bundle.manifest.appId,
       query: { limit: 50 },
     });
@@ -2706,12 +2706,16 @@ dev
           checkpoint?.activeRevisionId ?? session.activeRevision?.id;
         const artifactSha256 =
           checkpoint?.artifactSha256 ?? session.activeRevision?.artifactSha256;
+        // For an app OpenCloud builds, the session runs the server-built
+        // artifact, not the local bundle, which leaves the frontend out.
+        const sessionArtifactSha256 =
+          state.serverArtifactSha256 ?? state.artifactSha256;
         if (
           !activeRevisionId ||
           !artifactSha256 ||
           session.activeRevision?.id !== activeRevisionId ||
           session.activeRevision.artifactSha256 !== artifactSha256 ||
-          state.artifactSha256 !== artifactSha256
+          sessionArtifactSha256 !== artifactSha256
         ) {
           throw new CliContractError(
             "DEV_VERIFICATION_TARGET_CHANGED",

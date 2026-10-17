@@ -5,10 +5,15 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
+import { slowResponseFetch } from "./slow-response-fetch.js";
 
-/** CLI disk transfers remain outside the portable platform client snapshot. */
+/**
+ * CLI disk transfers remain outside the portable platform client snapshot.
+ * JSON requests may wait past global fetch's 300-second header limit, for
+ * example while validation builds the frontend; see slowResponseFetch.
+ */
 export class OpenCloudClient extends PlatformClient {
-  constructor(private readonly transferOptions: ClientOptions) { super(transferOptions); }
+  constructor(private readonly transferOptions: ClientOptions) { super({ fetch: slowResponseFetch, ...transferOptions }); }
 
   private async transferHeaders(): Promise<Record<string, string>> {
     const token = this.transferOptions.tokenProvider ? await this.transferOptions.tokenProvider() : this.transferOptions.token;
