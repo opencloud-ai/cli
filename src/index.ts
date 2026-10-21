@@ -449,7 +449,8 @@ async function exactAppMutationContext(
 async function ownerAccountLogin(
   cwd?: string,
 ): Promise<{ control: OpenCloudClient; apiUrl: string } | null> {
-  if (program.opts<{ token?: string }>().token) return null;
+  const options = program.opts<{ apiUrl?: string; token?: string }>();
+  if (options.token) return null;
   const session = availableSession();
   if (
     session?.state === "ready" &&
@@ -457,6 +458,18 @@ async function ownerAccountLogin(
     session.authorityMode === "app_owner_v1"
   ) {
     return null;
+  }
+  // A connected directory still names its installation, as with its own
+  // credential.
+  const binding = availableWorkspace(cwd);
+  if (
+    binding &&
+    options.apiUrl &&
+    normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(binding.apiUrl)
+  ) {
+    throw new Error(
+      `This workspace is connected to ${binding.apiUrl}; remove --api-url or reconnect it.`,
+    );
   }
   const apiUrl = normalizeApiUrl(targetApiUrl(cwd));
   if (!(await credentialStore.loadAccount(apiUrl))) return null;
@@ -474,6 +487,14 @@ async function ownerMutationContext(
   const login = await ownerAccountLogin(cwd);
   if (!login) return exactAppMutationContext(appIdValue, cwd);
   const appId = String(appIdValue).toLowerCase();
+  // Like every exact-app mutation, refuse another app than the directory's.
+  const binding = availableWorkspace(cwd);
+  if (binding && binding.appId.toLowerCase() !== appId) {
+    throw new CliContractError(
+      "MUTATION_APP_BINDING_MISMATCH",
+      `This workspace is connected to app ${binding.appId}; no mutation was started for ${appId}`,
+    );
+  }
   // The login, not the directory, holds this authority, so its journal stays
   // with the account's configuration wherever the command runs.
   const journal = await MutationJournal.open({

@@ -9,9 +9,12 @@
   credential and were refused, or failed outside a connected directory. The
   mutations journal with the account login instead of the directory. An
   explicit `--token` or a hosted Agent session still takes precedence, and
-  without an account login the directory's credential is sent as before.
-  OpenCloud accepts the login only from the app's owner; installations that
-  do not support it yet refuse it.
+  without an account login the directory's credential is sent as before. In
+  a connected directory the commands still refuse another app
+  (`MUTATION_APP_BINDING_MISMATCH`) and another installation's `--api-url`.
+  OpenCloud accepts the login for changes only from the person who created
+  the app; other admins use App Settings. Installations that do not support
+  it yet refuse it.
 
 ## 3.14.0
 

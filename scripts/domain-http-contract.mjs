@@ -61,24 +61,25 @@ async function signIn() {
   })}\n`, { mode: 0o600 });
 }
 
-async function run(args, { cwd = temporary, token, journal } = {}) {
+async function run(args, { cwd = temporary, token, journal, status = 0, target = apiUrl } = {}) {
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome };
   for (const key of ["INIT_CWD", "OPENCLOUD_TOKEN", "OPENCLOUD_MUTATION_JOURNAL_DIR", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL"]) delete env[key];
   if (token) env.OPENCLOUD_TOKEN = token;
   if (journal) env.OPENCLOUD_MUTATION_JOURNAL_DIR = journal;
   const result = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [binary, "--api-url", apiUrl, "app", "domain", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [binary, "--api-url", target, "app", "domain", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", chunk => stdout += chunk);
     child.stderr.on("data", chunk => stderr += chunk);
     child.on("error", reject);
     child.on("close", status => resolve({ status, stdout, stderr }));
   });
-  assert.equal(result.status, 0, JSON.stringify(result));
-  assert.deepEqual(JSON.parse(result.stdout), settings);
+  assert.equal(result.status, status, JSON.stringify(result));
   for (const secret of [flagToken, accountAccess, accountRefresh, workspaceToken]) {
     assert.ok(!`${result.stdout}${result.stderr}`.includes(secret), "credential exposed");
   }
+  if (status !== 0) return JSON.parse(result.stderr.trim());
+  assert.deepEqual(JSON.parse(result.stdout), settings);
 }
 const mutations = [
   ["add", "POST", "", { hostname: "example.test" }],
@@ -116,6 +117,14 @@ try {
   await exercise(`Bearer ${accountAccess}`, { cwd: appRoot });
   assert.equal(await journalEntries(path.join(configHome, "opencloud", "mutation-journals")), mutations.length);
   assert.equal(await journalEntries(path.join(appRoot, ".opencloud", "agent-mutations")), 0);
+  // The connected directory still refuses another app or installation.
+  const before = requests.length;
+  const otherApp = "00000000-0000-4000-8000-000000000002";
+  const mismatch = await run(["add", otherApp, "example.test"], { cwd: appRoot, status: 1 });
+  assert.equal(mismatch.error.code, "MUTATION_APP_BINDING_MISMATCH");
+  const elsewhere = await run(["get", appId], { cwd: appRoot, status: 1, target: "http://127.0.0.1:9" });
+  assert.match(JSON.stringify(elsewhere), /This workspace is connected to/);
+  assert.equal(requests.length, before);
 
   // Without a login, the directory's credential is still sent, as before.
   await rm(accountFile);
