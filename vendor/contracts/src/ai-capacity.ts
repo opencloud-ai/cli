@@ -110,6 +110,11 @@ export const appAiSetupSchema = z.object({
     /** The viewer's default account that their own work would use. */
     viewerAccount: aiAccountSummarySchema.nullable(),
     allowedPeople: z.number().int().nonnegative(),
+    /**
+     * The viewer owns this app outside a company, so their own account may pay
+     * for all of its work (automatic work and app features included).
+     */
+    viewerPaysForAll: z.boolean(),
   }).strict(),
   shared: z.array(appAiSharedEntrySchema).max(20),
   /** Null on personal installations and for apps outside an organisation. */

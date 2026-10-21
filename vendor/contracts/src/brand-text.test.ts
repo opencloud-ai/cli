@@ -96,7 +96,7 @@ describe("brand text", () => {
     expect(rendered).toContain("call `connect_sprout` for a returning user");
     expect(rendered).toContain("`sprout-skill` is a supplemental MCP");
     expect(rendered).toContain(
-      'curl -fsSL https://sprout.is/install.sh | bash\ntest "$(sprout --cli-version)" = "3.12.0"',
+      'curl -fsSL https://sprout.is/install.sh | bash\ntest "$(sprout --cli-version)" = "3.13.1"',
     );
     expect(rendered).toContain("installs the `sprout` command");
     expect(rendered).toContain("sprout app connect \"$APP_ID\"");

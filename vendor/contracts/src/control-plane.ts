@@ -17,13 +17,14 @@ import {
   organisationMemberViewSchema,
   setOrganisationMemberRoleRequestSchema,
   organisationInvitationSchema,
+  organisationInvitationPreviewSchema,
   createOrganisationInvitationRequestSchema,
 } from "./organisation-directory.js";
 export * from "./organisation-directory.js";
 import { accountDeletionRequestSchema, accountDeletionSchema, accountStatusSchema } from "./account-lifecycle.js";
 export * from "./account-lifecycle.js";
-import { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
-export { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema } from "./control-plane-records.js";
+import { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema, credentialIdentityUserSchema } from "./control-plane-records.js";
+export { appEmailSuspensionSchema, controlPlaneAppSchema, controlPlaneAppDeploymentTruthSchema, controlPlaneOperationSchema, credentialIdentityUserSchema } from "./control-plane-records.js";
 import { appDomainAddSchema, appDomainSettingsSchema } from "./app-domains.js";
 import { installationCapabilitiesSchema, installationViewSchema } from "./installation.js";
 import {
@@ -32,6 +33,8 @@ import {
   billingPlanChangeRequestSchema,
   billingPlanChangeResultSchema,
   billingRedirectSchema,
+  organisationBillingCheckoutRequestSchema,
+  organisationBillingSchema,
 } from "./billing.js";
 import {
   alertAggregationSchema,
@@ -119,8 +122,23 @@ const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const secretName = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const jsonObject = z.record(z.string(), z.unknown());
 const emptyBody = z.object({});
+/** The organisation must start or restart its Cloud subscription before its
+ * people can build. Admins see the checkout; everyone else waits for one. */
+const accountWelcomeSubscriptionSchema = z.object({
+  organisationId: uuid,
+  organisationName: z.string(),
+  state: z.enum(["subscription_required", "lapsed"]),
+  canManage: z.boolean(),
+  /** Up to three admins to ask, for people who can't subscribe themselves. */
+  admins: z.array(z.string()).max(3),
+  currency: z.literal("usd"),
+  /** Minor units per billed person each month. */
+  perPerson: z.number().int().nonnegative(),
+  /** Zero when the organisation already had a subscription. */
+  trialDays: z.number().int().nonnegative(),
+});
 const accountWelcomeSchema = z.object({
-  step: z.enum(["confirm_email", "name", "organisation", "complete"]),
+  step: z.enum(["confirm_email", "name", "organisation", "subscription", "complete"]),
   displayName: z.string(), email: z.email(), continueUrl: z.url(),
   /** Installation switch: when true, building needs an organisation and an
    * account on its way to building must create or join one; when false the
@@ -128,6 +146,8 @@ const accountWelcomeSchema = z.object({
   organisationsEnabled: z.boolean().default(true),
   /** The confirmed email's domain can be claimed for automatic joining. */
   emailDomainJoin: z.boolean().default(true),
+  /** Present only on the subscription step. */
+  subscription: accountWelcomeSubscriptionSchema.nullable().optional(),
 });
 const welcomeReturnSchema = z.string().max(2048).optional();
 const platformVersionOutput = z.object({
@@ -183,6 +203,43 @@ export const dashboardPasswordUpdateSchema = z
     message: "Passwords do not match",
     path: ["confirmPassword"],
   });
+
+/** How the calling credential was obtained. */
+export const credentialIdentityKindSchema = z.enum([
+  /** `opencloud login`. */
+  "account_login",
+  /** One app's credential: `opencloud app connect` or `app credential-create`. */
+  "app_credential",
+  /** The hosted Agent's exact-app owner credential. */
+  "agent_app_owner",
+  /** A legacy hosted Agent run grant. */
+  "agent_run",
+  /** A first-project onboarding grant. */
+  "onboarding",
+  /** A signed-in browser. */
+  "browser_session",
+  /** A hosted MCP connection. */
+  "mcp",
+  /** `opencloud-platform login`. */
+  "platform_admin_cli",
+  /** The installation's bootstrap token. */
+  "operator",
+]);
+
+/** Who the calling credential acts for. Never contains a secret. */
+export const credentialIdentitySchema = z.object({
+  /** The person whose authority the credential carries; null only for the
+   * installation's bootstrap token. An app credential acts for its creator,
+   * and the hosted Agent for the person who delegated to it. */
+  user: credentialIdentityUserSchema.nullable(),
+  credential: z.object({
+    kind: credentialIdentityKindSchema,
+    /** Set when the credential is bound to one app. */
+    appId: uuid.nullable(),
+    expiresAt: z.iso.datetime({ offset: true }).nullable(),
+  }),
+});
+export type CredentialIdentity = z.infer<typeof credentialIdentitySchema>;
 
 export const accountMcpTokenLifetimeSchema = z.union([
   z.literal(1),
@@ -1614,6 +1671,25 @@ export const controlPlaneOperations = {
     description: "Create a provider-hosted customer portal session for payment methods, invoices and cancellation.",
     auth: "user", scopes: [], input: emptyBody, output: billingRedirectSchema, idempotency: "required",
   }),
+  getOrganisationBilling: operation({
+    method: "GET", path: "/v1/organisations/{organisationId}/billing",
+    summary: "Read organisation billing",
+    description: "Read the organisation's Cloud subscription, its members and live apps, and the estimated charge. Members can read; only admins can manage.",
+    auth: "user", scopes: [], input: z.object({ organisationId: uuid }), output: organisationBillingSchema, idempotency: "none",
+  }),
+  createOrganisationBillingCheckoutSession: operation({
+    method: "POST", path: "/v1/organisations/{organisationId}/billing/checkout-sessions",
+    summary: "Start or restart the organisation subscription",
+    description: "Create a provider-hosted checkout that starts the organisation's Cloud subscription; a card is required. The first subscription starts with the trial; restarting after one bills straight away. `from: welcome` returns to the sign-up flow. Organisation admins only.",
+    auth: "user", scopes: [], input: z.object({ organisationId: uuid, body: organisationBillingCheckoutRequestSchema.optional() }),
+    bodyKey: "body", output: billingRedirectSchema, idempotency: "required",
+  }),
+  createOrganisationBillingPortalSession: operation({
+    method: "POST", path: "/v1/organisations/{organisationId}/billing/portal-sessions",
+    summary: "Open the organisation billing portal",
+    description: "Create a provider-hosted customer portal session for the organisation's payment method, invoices, tax details and cancellation. Organisation admins only.",
+    auth: "user", scopes: [], input: z.object({ organisationId: uuid }), output: billingRedirectSchema, idempotency: "required",
+  }),
   getOrganisationWeeklyCapacity: operation({
     method:"GET",path:"/v1/organisations/{organisationId}/weekly-capacity",
     summary:"Read weekly employee limits",description:"Read the current period and default; members see their own allowance and admins see employee overrides. Automation shares the organisation budget.",
@@ -1760,6 +1836,23 @@ export const controlPlaneOperations = {
     output: z.object({ revoked: z.literal(true) }),
     idempotency: "required",
   }),
+  resendOrganisationInvitation: operation({
+    method: "POST", path: "/v1/organisations/{organisationId}/invitations/{invitationId}/resend",
+    summary: "resend organisation invitation", description: "Email an open or expired invitation again with a new link that replaces the earlier one and expires in 7 days. Accepted and revoked invitations cannot be resent. Organisation administrators only.",
+    auth: "user", scopes: [],
+    input: z.object({ organisationId: uuid, invitationId: uuid }),
+    output: organisationInvitationSchema,
+    idempotency: "required",
+  }),
+  inspectOrganisationInvitation: operation({
+    method: "POST", path: "/v1/organisation-invitations/{invitationId}/inspect",
+    summary: "inspect organisation invitation", description: "Read an invitation with its link token before accepting it: the organisation, the invited address, and whether the signed-in account can accept it. Changes nothing.",
+    auth: "user", scopes: [],
+    input: z.object({ invitationId: uuid, body: acceptOrganisationInvitationRequestSchema }),
+    output: organisationInvitationPreviewSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
   acceptOrganisationInvitation: operation({
     method: "POST", path: "/v1/organisation-invitations/{invitationId}/accept",
     summary: "accept organisation invitation", description: "accept organisation invitation. Authority is evaluated by the organisation directory.",
@@ -1783,7 +1876,7 @@ export const controlPlaneOperations = {
   }),
   completeAccountWelcome: operation({
     method:"POST",path:"/v1/auth/welcome/complete",summary:"Complete or skip organisation setup",
-    description:"Remember completion after the user's name is saved. On organisation installations, an account on its way to building must first create or join an organisation (ORGANISATION_SETUP_REQUIRED); completion then continues to the organisation's dashboard instead of the Agent.",
+    description:"Remember completion after the user's name is saved. On organisation installations, an account on its way to building, or arriving from an invitation link, must first create or join an organisation (ORGANISATION_SETUP_REQUIRED); completion then continues to the organisation's dashboard instead of the Agent or the invitation page.",
     auth:"user",scopes:[],input:z.object({body:z.object({returnTo:welcomeReturnSchema})}),
     bodyKey:"body",output:accountWelcomeSchema,idempotency:"none",
   }),
@@ -1807,6 +1900,18 @@ export const controlPlaneOperations = {
       /** Installation switches; when absent clients keep the original behaviour. */
       capabilities: installationCapabilitiesSchema.optional(),
     }),
+    idempotency: "none",
+  }),
+  getCurrentIdentity: operation({
+    method: "GET",
+    path: "/v1/auth/identity",
+    summary: "Get the identity behind the current credential",
+    description:
+      "Returns the person the calling credential acts for, how the credential was obtained, its app when it is bound to one, and when it expires. Any credential may read its own identity; the response never contains a token.",
+    auth: "bearer",
+    scopes: [],
+    input: emptyBody,
+    output: credentialIdentitySchema,
     idempotency: "none",
   }),
   updateDashboardProfile: operation({

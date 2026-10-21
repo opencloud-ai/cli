@@ -75,6 +75,7 @@ export const OPENCLOUD_CLI_COMMANDS = Object.freeze([
   "onboard",
   "onboard-complete",
   "operation",
+  "pull",
   "secret",
   "usage",
   "validate",

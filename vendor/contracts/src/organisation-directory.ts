@@ -33,6 +33,12 @@ export const workspaceMembershipSchema = z.object({
   userId: z.uuid(),
   role: workspaceRoleSchema,
 });
+/** The invitation email. `retrying`: an attempt failed and repeats shortly;
+ * `unknown`: the provider may or may not have sent it. */
+export const organisationInvitationDeliverySchema = z.object({
+  state: z.enum(["sending", "retrying", "sent", "unknown"]),
+  sentAt: z.iso.datetime().nullable(),
+});
 export const organisationInvitationSchema = z.object({
   id: z.uuid(),
   organisationId: z.uuid(),
@@ -41,6 +47,28 @@ export const organisationInvitationSchema = z.object({
   expiresAt: z.iso.datetime(),
   acceptedAt: z.iso.datetime().nullable(),
   revokedAt: z.iso.datetime().nullable(),
+  createdAt: z.iso.datetime().optional(),
+  /** The inviting admin's name, or their email without one. */
+  invitedBy: z.string().nullable().optional(),
+  /** Null once the invitation is accepted or revoked. */
+  delivery: organisationInvitationDeliverySchema.nullable().optional(),
+});
+/** What the holder of an invitation link sees before accepting it. */
+export const organisationInvitationPreviewSchema = z.object({
+  invitationId: z.uuid(),
+  organisationId: z.uuid(),
+  organisationName: z.string(),
+  organisationRole: organisationRoleSchema,
+  recipientEmail: z.email(),
+  invitedBy: z.string().nullable(),
+  expiresAt: z.iso.datetime(),
+  status: z.enum(["pending", "accepted", "revoked", "expired"]),
+  /** The signed-in account's email, and whether it is the invited address. */
+  accountEmail: z.email(),
+  emailMatches: z.boolean(),
+  /** `member`: already in this organisation. `other_organisation`: the
+   * account belongs to another company, so it cannot accept. */
+  membership: z.enum(["none", "member", "other_organisation"]),
 });
 export const organisationContextSchema = z.object({
   organisation: organisationSchema,
@@ -108,6 +136,9 @@ export type OrganisationMembership = z.infer<
 export type WorkspaceMembership = z.infer<typeof workspaceMembershipSchema>;
 export type OrganisationInvitation = z.infer<
   typeof organisationInvitationSchema
+>;
+export type OrganisationInvitationPreview = z.infer<
+  typeof organisationInvitationPreviewSchema
 >;
 export type OrganisationContext = z.infer<typeof organisationContextSchema>;
 export type OrganisationRole = z.infer<typeof organisationRoleSchema>;

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   brandEmailCopySchema,
+  brandHomeCopySchema,
   brandManifestSchema,
   brandPackIds,
   DEFAULT_BRAND_PACK_ID,
@@ -123,6 +124,28 @@ describe("brand packs", () => {
           emailChange: { ...copy.emailChange, subject },
         }).success,
         subject,
+      ).toBe(false);
+    }
+  });
+
+  it("links example apps only to https demos", () => {
+    const copy = loadBrandPack("sprout").homeCopy;
+    expect(copy).not.toBeNull();
+    if (!copy) return;
+    expect(brandHomeCopySchema.safeParse(copy).success).toBe(true);
+    const [first, ...rest] = copy.gallery.apps;
+    if (!first) throw new Error("Sprout has no example apps");
+    for (const change of [
+      { demo: "http://chores.example" },
+      { demo: "javascript:alert(1)" },
+      { demo: "chores.example" },
+    ]) {
+      expect(
+        brandHomeCopySchema.safeParse({
+          ...copy,
+          gallery: { ...copy.gallery, apps: [{ ...first, ...change }, ...rest] },
+        }).success,
+        JSON.stringify(change),
       ).toBe(false);
     }
   });

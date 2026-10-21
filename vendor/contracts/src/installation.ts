@@ -15,6 +15,8 @@ export const installationCapabilitiesSchema = z
     platformAi: z.boolean().default(false),
     /** App AI may use subscription sign-ins, not only provider API keys. */
     appAiSubscriptionConnections: z.boolean().default(true),
+    /** Organisations can start a metered Cloud subscription (per person). */
+    organisationBilling: z.boolean().default(false),
   })
   .strip();
 
