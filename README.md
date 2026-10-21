@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.14.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.15.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.14.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.14.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.15.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.15.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -544,6 +544,19 @@ HTTPS status. Cloudflare proxying may be enabled from the start. Each hostname
 must be configured separately. Mutations use the normal persistent retry journal;
 `--idempotency-key` overrides its stable key when needed. Read with get to inspect
 status without starting a new check.
+
+From a terminal, OpenCloud accepts domain changes only from the person who
+created the app, so these commands use your own account login
+(`opencloud login`), even in a connected directory: the directory's app
+credential cannot change a domain. Other app admins use App Settings →
+Domains. In a connected directory the commands still refuse another app and
+another installation's `--api-url`. Their journal is kept with the account
+login, not the directory. An explicit `--token` or a hosted Agent session
+still takes precedence, and without an account login the directory's
+credential is used as before. An installation that does not yet accept the
+account login for domain changes refuses it with 403; use App Settings →
+Domains there. The journal keeps a refused request, so to try a different
+hostname afterwards pass a new `--idempotency-key`.
 
 Schema 3 apps can declare routes alongside Functions and frontend configuration:
 

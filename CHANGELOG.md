@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.15.0
+
+- Let the app's owner manage its custom domain from their own login. `app
+  domain get`, `add`, `check` and `remove` now use the account login from
+  `opencloud login`, even in a connected directory, whose app credential
+  OpenCloud never accepts for domain changes. Before, they sent that app
+  credential and were refused, or failed outside a connected directory. The
+  mutations journal with the account login instead of the directory. An
+  explicit `--token` or a hosted Agent session still takes precedence, and
+  without an account login the directory's credential is sent as before. In
+  a connected directory the commands still refuse another app
+  (`MUTATION_APP_BINDING_MISMATCH`) and another installation's `--api-url`.
+  OpenCloud accepts the login for changes only from the person who created
+  the app; other admins use App Settings. Installations that do not support
+  it yet refuse it.
+
 ## 3.14.0
 
 - Add `whoami`, which names the person the CLI acts as, how its credential
