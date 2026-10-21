@@ -11,6 +11,7 @@ export const dashboardRoutePaths = {
   "organisation-member": "/organisations/:organisationId/people/:memberId",
   "organisation-capacity": "/organisations/:organisationId/capacity",
   "organisation-activity": "/organisations/:organisationId/activity",
+  "organisation-billing": "/organisations/:organisationId/billing",
   workspace: "/organisations/:organisationId/workspaces/:workspaceId",
   "workspace-apps": "/organisations/:organisationId/workspaces/:workspaceId/apps",
   "workspace-settings": "/organisations/:organisationId/workspaces/:workspaceId/settings",

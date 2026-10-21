@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.13.1` in
+OpenCloud application skills pin an exact CLI release. To install `v3.14.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.13.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.13.1.tgz"
+OPENCLOUD_CLI_VERSION="v3.14.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.14.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -44,6 +44,7 @@ select an app and connect its source directory:
 ```bash
 "$OPENCLOUD_CLI" auth status
 "$OPENCLOUD_CLI" login
+"$OPENCLOUD_CLI" whoami
 "$OPENCLOUD_CLI" app list
 cd /absolute/path/to/app
 "$OPENCLOUD_CLI" app connect "$APP_ID"
@@ -56,6 +57,17 @@ CLI. It does not start a localhost callback or ask anyone to paste a code,
 email link, cookie, password, or token. Use `login --no-browser` when the
 terminal cannot open a browser, or `login --force` to replace an unusable
 stored login.
+
+`auth status` and `login` name the signed-in person in `user`: their ID,
+email, and display name. `whoami` reports who the CLI acts as, how its
+credential was obtained (`credential.kind`), and where the CLI found it
+(`credential.source`). It uses an explicit `--token` or `OPENCLOUD_TOKEN`
+first, then the account login, the directory's app credential, and a hosted
+Agent session. An app credential acts for the person who created it, and the
+hosted Agent for the person who delegated to it. Check `user` before
+creating or changing apps, and run `login --force` to sign in as someone else.
+An OpenCloud installation that does not report identities yet returns
+`user: null` with a `userUnavailable` reason, and `whoami` fails.
 
 The 15-minute account access token and rotating 30-day refresh token are stored
 in the operating-system credential service under `ai.opencloud.cli`. A

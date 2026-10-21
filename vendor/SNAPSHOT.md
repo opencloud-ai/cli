@@ -54,3 +54,13 @@ local bundle leave that frontend out. `contracts/src/ai-capacity.ts` is new
 because the public operation type graph now imports it. Every vendored
 contract, typed-client, and bundler source file is byte-identical to that
 commit. Browser SDK 2.3.0 remains the local default.
+
+## CLI 3.14.0 signed-in identity
+
+The contract, typed-client, and bundler snapshots are copied from platform
+commit `f08e2e699c4b5b35df507525454cb93cf356368b` (pull request #404), which
+adds `GET /v1/auth/identity` (`getCurrentIdentity`). It also brings the
+contracts merged since #378 (organisation billing, brand packs, organisation
+directory, and installation capabilities). Every vendored contract,
+typed-client, and bundler source file is byte-identical to that commit.
+Browser SDK 2.3.0 remains the local default.

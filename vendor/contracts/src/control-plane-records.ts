@@ -120,3 +120,10 @@ export const appEmailSuspensionSchema = z.object({
     maxComplaintRatePercent: z.number().nonnegative(),
   }),
 });
+
+/** The person a credential acts for. Never contains a secret. */
+export const credentialIdentityUserSchema = z.object({
+  id: uuid,
+  email: z.email().nullable(),
+  displayName: z.string().max(160).nullable(),
+});

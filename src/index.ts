@@ -47,6 +47,12 @@ import {
 import { CredentialStore } from "./credential-store.js";
 import { runtimeSessionTokenProvider } from "./runtime-session-token.js";
 import { doctorDiagnostics } from "./doctor.js";
+import {
+  IDENTITY_UNSUPPORTED,
+  readIdentity,
+  signedInUser,
+  type IdentitySource,
+} from "./identity.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
 import {
   collectOption,
@@ -120,7 +126,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.13.1";
+const CLI_VERSION = "3.14.0";
 
 const program = new Command()
   .name("opencloud")
@@ -253,26 +259,57 @@ async function directoryOrAccountClient(directory: string): Promise<OpenCloudCli
 }
 
 async function managementClient(): Promise<OpenCloudClient> {
+  return (await managementAuthority()).control;
+}
+
+/** The credential account-level commands use, and where it was found. */
+async function managementAuthority(): Promise<{
+  control: OpenCloudClient;
+  apiUrl: string;
+  source: IdentitySource;
+}> {
   const options = program.opts<{ token?: string }>();
-  if (options.token) return client();
+  if (options.token) {
+    const control = client();
+    return {
+      control,
+      apiUrl: normalizeApiUrl(targetApiUrl()),
+      source: "environment-or-flag",
+    };
+  }
   const apiUrl = normalizeApiUrl(targetApiUrl());
   const account = await credentialStore.loadAccount(apiUrl);
   if (account) {
     const fresh = await freshAccountCredential(credentialStore, apiUrl);
-    return new OpenCloudClient({
+    return {
+      control: new OpenCloudClient({
+        apiUrl,
+        token: fresh.credential.accessToken,
+      }),
       apiUrl,
-      token: fresh.credential.accessToken,
-    });
+      source: "account-login",
+    };
   }
-  if (availableWorkspace()) return client();
+  const binding = availableWorkspace();
+  if (binding) {
+    return {
+      control: client(),
+      apiUrl: normalizeApiUrl(binding.apiUrl),
+      source: "workspace-credential",
+    };
+  }
   const legacy = availableSession();
   if (legacy?.state === "ready") {
-    return new OpenCloudClient({
-      apiUrl: legacy.apiUrl,
-      ...(legacy.schemaVersion === 2 && legacy.authorityMode === "app_owner_v1"
-        ? { tokenProvider: runtimeSessionTokenProvider(legacy, availableSession) }
-        : { token: legacy.token }),
-    });
+    return {
+      control: new OpenCloudClient({
+        apiUrl: legacy.apiUrl,
+        ...(legacy.schemaVersion === 2 && legacy.authorityMode === "app_owner_v1"
+          ? { tokenProvider: runtimeSessionTokenProvider(legacy, availableSession) }
+          : { token: legacy.token }),
+      }),
+      apiUrl: normalizeApiUrl(legacy.apiUrl),
+      source: "session-file",
+    };
   }
   throw new Error("No OpenCloud account login was found. Run opencloud login.");
 }
@@ -1356,13 +1393,16 @@ program
         output({
           state: "authenticated",
           apiUrl,
+          ...(await signedInUser(
+            new OpenCloudClient({ apiUrl, token: fresh.credential.accessToken }),
+          )),
           credential: {
             backend: fresh.backend,
             storedIn: fresh.location,
             accessExpiresAt: fresh.credential.accessExpiresAt,
             refreshExpiresAt: fresh.credential.refreshExpiresAt,
           },
-          next: "Run opencloud app list, then opencloud app connect <app-id> in the app directory.",
+          next: "Already signed in. To sign in as someone else, run opencloud login --force. Otherwise run opencloud app list, then opencloud app connect <app-id> in the app directory.",
         });
         return;
       } catch {
@@ -1392,6 +1432,9 @@ program
     output({
       state: "authenticated",
       apiUrl,
+      ...(await signedInUser(
+        new OpenCloudClient({ apiUrl, token: account.accessToken }),
+      )),
       browserOpened,
       credential: {
         backend: stored.backend,
@@ -1423,9 +1466,13 @@ auth
         }
       | { state: "needs_login"; reason: string }
       | null = null;
+    let user: Awaited<ReturnType<typeof signedInUser>> = { user: null };
     if (existing) {
       try {
         const fresh = await freshAccountCredential(credentialStore, apiUrl);
+        user = await signedInUser(
+          new OpenCloudClient({ apiUrl, token: fresh.credential.accessToken }),
+        );
         account = {
           state: "authenticated",
           backend: fresh.backend,
@@ -1447,6 +1494,7 @@ auth
     output({
       authenticated: account?.state === "authenticated",
       apiUrl,
+      ...user,
       account,
       workspace: binding
         ? {
@@ -1505,6 +1553,24 @@ program
   .command("logout")
   .description("Revoke and clear the CLI login")
   .action(logout);
+
+program
+  .command("whoami")
+  .description("Show who the CLI is signed in as and which credential it uses")
+  .action(async () => {
+    const authority = await managementAuthority();
+    const identity = await readIdentity(authority.control);
+    if (!identity) {
+      throw new Error(
+        `${IDENTITY_UNSUPPORTED} Run opencloud auth status for the local login state.`,
+      );
+    }
+    output({
+      apiUrl: authority.apiUrl,
+      user: identity.user,
+      credential: { ...identity.credential, source: authority.source },
+    });
+  });
 
 program
   .command("onboard")

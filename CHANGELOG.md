@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.14.0
+
+- Add `whoami`, which names the person the CLI acts as, how its credential
+  was obtained, and where the CLI found it. An app credential acts for the
+  person who created it, and the hosted Agent for the person who delegated to
+  it.
+- Name the signed-in person in `login` and `auth status`, so people and
+  agents can check the account before they change anything. When a login
+  already exists, `login` says how to sign in as someone else.
+- Installations that do not report identities yet keep working: `login` and
+  `auth status` return `user: null` with a `userUnavailable` reason, and
+  `whoami` explains that the installation does not report it.
+- Refresh the public contract and typed-client snapshots for the platform's
+  signed-in identity endpoint, `GET /v1/auth/identity`.
+
 ## 3.13.1
 
 - Let `app dev verify` verify an app whose frontend OpenCloud builds. It

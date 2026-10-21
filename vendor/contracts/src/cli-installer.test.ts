@@ -62,8 +62,8 @@ destination="\${2:?}"
 url="\${3:?}"
 printf '%s\\n' "$url" >> "$FAKE_CURL_LOG"
 case "$url" in
-  */checksums.txt) printf '%s  opencloud-cli-3.12.0.tgz\\n' "$FAKE_CLI_CHECKSUM" > "$destination" ;;
-  */opencloud-cli-3.12.0.tgz) printf '%s' "$FAKE_CLI_ARCHIVE" > "$destination" ;;
+  */checksums.txt) printf '%s  opencloud-cli-3.13.1.tgz\\n' "$FAKE_CLI_CHECKSUM" > "$destination" ;;
+  */opencloud-cli-3.13.1.tgz) printf '%s' "$FAKE_CLI_ARCHIVE" > "$destination" ;;
   *) exit 1 ;;
 esac
 `,
@@ -87,7 +87,7 @@ entrypoint="$prefix/node_modules/@opencloud/cli/dist/index.cjs"
 mkdir -p "$(dirname "$entrypoint")" "$prefix/node_modules/.bin"
 cat > "$entrypoint" <<'CLI'
 #!/usr/bin/env bash
-if [[ "\${1:-}" == "--cli-version" ]]; then printf '3.12.0\\n'; exit 0; fi
+if [[ "\${1:-}" == "--cli-version" ]]; then printf '3.13.1\\n'; exit 0; fi
 printf 'api=%s args=%s\\n' "\${OPENCLOUD_API_URL:-default}" "$*"
 CLI
 chmod 0644 "$entrypoint"
@@ -132,7 +132,7 @@ describe("CLI installer rendering", () => {
 
   it("installs the pinned release plus a wrapper bound to the installation", async () => {
     const script = renderCliInstaller(template, sprout);
-    expect(script).toContain('CLI_VERSION="3.12.0"');
+    expect(script).toContain('CLI_VERSION="3.13.1"');
     expect(script).toContain("Sprout CLI installer: %s");
     expect(script).not.toMatch(/OpenCloud CLI|opencloud doctor/);
     const environment = await fixture();
@@ -140,18 +140,18 @@ describe("CLI installer rendering", () => {
     const result = run(script, environment.environment);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain(
-      `Sprout CLI 3.12.0 installed at ${environment.binDirectory}/sprout`,
+      `Sprout CLI 3.13.1 installed at ${environment.binDirectory}/sprout`,
     );
     expect(result.stdout).toContain("Add the CLI to PATH, then run sprout doctor:");
     expect(script).toContain("printf 'Run: sprout doctor\\n'");
     // The same verified release, downloaded with its published checksums.
     expect((await readFile(environment.curlLog, "utf8")).trim().split("\n")).toEqual([
-      "https://github.com/opencloud-ai/cli/releases/download/v3.12.0/opencloud-cli-3.12.0.tgz",
-      "https://github.com/opencloud-ai/cli/releases/download/v3.12.0/checksums.txt",
+      "https://github.com/opencloud-ai/cli/releases/download/v3.13.1/opencloud-cli-3.13.1.tgz",
+      "https://github.com/opencloud-ai/cli/releases/download/v3.13.1/checksums.txt",
     ]);
     const executablePath = join(
       environment.root,
-      "install/3.12.0/node_modules/.bin/opencloud",
+      "install/3.13.1/node_modules/.bin/opencloud",
     );
     expect(await readlink(join(environment.binDirectory, "opencloud"))).toBe(
       executablePath,
@@ -175,7 +175,7 @@ describe("CLI installer rendering", () => {
     });
     expect(explicit.stdout.trim()).toBe("api=https://api.other.example args=doctor");
     const version = spawnSync(wrapper, ["--cli-version"], { encoding: "utf8" });
-    expect(version.stdout.trim()).toBe("3.12.0");
+    expect(version.stdout.trim()).toBe("3.13.1");
 
     // Re-running replaces the managed wrapper.
     const again = run(script, environment.environment);

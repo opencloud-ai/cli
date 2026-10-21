@@ -294,9 +294,17 @@ export const brandEmailCopySchema = z
     organisationInvitation: z
       .object({
         subject: copy(160),
+        eyebrow: copy(80),
+        heading: copy(120),
         intro: copy(),
+        organisationLabel: copy(40),
+        roleLabel: copy(40),
+        adminRole: copy(40),
+        memberRole: copy(40),
+        recipientLabel: copy(40),
         instruction: copy(),
         action: copy(80),
+        linkHint: copy(120),
         footnote: copy(),
         textInstruction: copy(),
         textFootnote: copy(),
@@ -313,8 +321,12 @@ export const brandEmailCopySchema = z
         explanation: copy(),
         completionOriginalWindow: copy(),
         completion: copy(),
+        /** For a link that lasts until the account's confirmation deadline. */
+        completionUntil: copy(),
         action: copy(80),
         textAction: copy(120),
+        /** For a link that lasts until the account's confirmation deadline. */
+        textActionUntil: copy(120),
       })
       .strict(),
     emailChange: z
@@ -378,20 +390,31 @@ const homeWords = z
   .min(1)
   .max(16);
 
-/** An example app's own address, such as `plot14.sprout.is`. */
+/** An example app's own address, such as `chores.sprout.is`. */
 const homeAddress = z
   .string()
   .max(80)
   .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/);
 
+/** A published demo app that visitors can open, such as `https://chores.sprout.is`. */
+const homeDemoUrl = z
+  .string()
+  .max(200)
+  .url()
+  .refine((value) => value.startsWith("https://"), "Use an https:// address");
+
 /** The app illustrations the consumer homepage can draw; content picks which and in what order. */
 export const brandHomeAppIllustrations = [
   "home",
-  "club",
+  "family",
   "kitchen",
+  "gifts",
   "trips",
-  "kids",
-  "hobbies",
+  "admin",
+  "reading",
+  "dinners",
+  "party",
+  "mealtrain",
 ] as const;
 
 /** The care illustrations for the "looked after" cards. */
@@ -457,6 +480,9 @@ export const brandHomeCopySchema = z
         growLabel: homeText(40),
         growNote: homeText(200),
         addressLabel: homeText(40),
+        /** The button that opens an example's published demo. */
+        demoAction: homeText(40),
+        demoNote: homeText(120),
         apps: z
           .array(
             z
@@ -467,6 +493,7 @@ export const brandHomeCopySchema = z
                 forWhom: homeText(80),
                 blurb: homeText(240),
                 address: homeAddress,
+                demo: homeDemoUrl.optional(),
                 words: homeWords,
                 moreLabel: homeText(60),
                 more: z.array(homeText(60)).max(6),

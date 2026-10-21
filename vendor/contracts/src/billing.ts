@@ -328,3 +328,68 @@ export const billingAdminAccountSchema = z.object({
   prioritySupport: z.boolean(),
 });
 export type BillingAdminAccount = z.infer<typeof billingAdminAccountSchema>;
+
+/**
+ * Organisation Cloud billing: one metered subscription per organisation,
+ * billed per person each period. Billed people are everyone in the organisation, or one
+ * person for every ten live apps if that's more. Personal-plan billing above is a separate installation mode.
+ */
+export const organisationBillingSchema = z.object({
+  /** Whether this installation sells organisation subscriptions at all. */
+  enabled: z.boolean(),
+  /**
+   * Whether the organisation may build under subscription enforcement.
+   * `grace` keeps everything working until `graceEndsAt`; `lapsed` means
+   * building stopped and live apps are paused.
+   */
+  standing: z.object({
+    state: z.enum(["not_enforced", "exempt", "subscribed", "grace", "subscription_required", "lapsed"]),
+    canBuild: z.boolean(),
+    graceEndsAt: isoTimestamp.nullable(),
+  }),
+  /** Payments are configured (provider credentials and setup exist). */
+  available: z.boolean(),
+  /** The viewer is an organisation admin who may start or manage the subscription. */
+  canManage: z.boolean(),
+  prices: z.object({
+    currency: z.literal("usd"),
+    /** Minor units. */
+    perPerson: z.number().int().positive(),
+    /** Live apps each billed person covers. */
+    liveAppsPerPerson: z.number().int().positive(),
+    trialDays: z.number().int().min(0).max(365),
+  }),
+  subscription: z
+    .object({
+      status: billingSubscriptionStatusSchema,
+      trialEndsAt: isoTimestamp.nullable(),
+      currentPeriodStart: isoTimestamp.nullable(),
+      currentPeriodEnd: isoTimestamp.nullable(),
+      cancelAtPeriodEnd: z.boolean(),
+    })
+    .nullable(),
+  usage: z.object({
+    /** Start of the counted period: the billing period, or the calendar month without one. */
+    periodStart: isoTimestamp,
+    /** Everyone in the organisation now: members who joined or accepted an invitation and weren't removed. */
+    members: z.number().int().min(0),
+    liveApps: z.number().int().min(0),
+    /** Live apps the billed people cover. */
+    includedLiveApps: z.number().int().min(0),
+    /** Members, or one for every ten live apps if that's more. */
+    billedPeople: z.number().int().min(0),
+    /** Minor units, before tax. Zero while trialing. */
+    estimatedAmount: z.number().int().min(0),
+  }),
+});
+export type OrganisationBilling = z.infer<typeof organisationBillingSchema>;
+
+/** Optional: the sign-up paywall returns to the welcome flow instead of the Billing page. */
+export const organisationBillingCheckoutRequestSchema = z
+  .object({
+    from: z.enum(["billing", "welcome"]).default("billing"),
+    /** Where the welcome flow continues afterwards; the welcome page re-validates it. */
+    returnTo: z.string().max(2048).optional(),
+  })
+  .strict();
+export type OrganisationBillingCheckoutRequest = z.input<typeof organisationBillingCheckoutRequestSchema>;

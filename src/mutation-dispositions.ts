@@ -385,7 +385,11 @@ export const nonJournalMutationInventory = {
     sourceFile: "src/account-auth.ts",
     sourceFunction: "freshAccountCredential",
     operation: "postForm",
-    commanderLeaves: ["opencloud login", "opencloud auth status"],
+    commanderLeaves: [
+      "opencloud login",
+      "opencloud auth status",
+      "opencloud whoami",
+    ],
     entryPoints: ["account-backed management", "workspace credential renewal"],
     recovery: "rotating_credential_reauthenticate",
     reason:
