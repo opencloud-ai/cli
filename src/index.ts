@@ -126,7 +126,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.14.0";
+const CLI_VERSION = "3.15.0";
 
 const program = new Command()
   .name("opencloud")
@@ -440,6 +440,56 @@ async function exactAppMutationContext(
   return { control, journal };
 }
 
+/**
+ * Custom domains need the app owner, and a connected directory's app
+ * credential can never change them. Domain commands therefore use the
+ * person's own account login when there is one; --token and the Agent
+ * runtime's owner session keep their precedence.
+ */
+async function ownerAccountLogin(
+  cwd?: string,
+): Promise<{ control: OpenCloudClient; apiUrl: string } | null> {
+  if (program.opts<{ token?: string }>().token) return null;
+  const session = availableSession();
+  if (
+    session?.state === "ready" &&
+    session.schemaVersion === 2 &&
+    session.authorityMode === "app_owner_v1"
+  ) {
+    return null;
+  }
+  const apiUrl = normalizeApiUrl(targetApiUrl(cwd));
+  if (!(await credentialStore.loadAccount(apiUrl))) return null;
+  const fresh = await freshAccountCredential(credentialStore, apiUrl);
+  return {
+    control: new OpenCloudClient({ apiUrl, token: fresh.credential.accessToken }),
+    apiUrl,
+  };
+}
+
+async function ownerMutationContext(
+  appIdValue: unknown,
+  cwd?: string,
+): Promise<ExactAppMutationContext> {
+  const login = await ownerAccountLogin(cwd);
+  if (!login) return exactAppMutationContext(appIdValue, cwd);
+  const appId = String(appIdValue).toLowerCase();
+  // The login, not the directory, holds this authority, so its journal stays
+  // with the account's configuration wherever the command runs.
+  const journal = await MutationJournal.open({
+    directory: resolveMutationJournalDirectory({
+      configuredDirectory: process.env[MUTATION_JOURNAL_ENV],
+      configDirectory: credentialStore.configDirectory,
+      apiUrl: login.apiUrl,
+      appId,
+    }),
+    apiUrl: login.apiUrl,
+    appId,
+  });
+  await assertMutationJournalCompatibility(login.control);
+  return { control: login.control, journal };
+}
+
 interface JournalMutationInput {
   commandId: MutationCommandId;
   appId: unknown;
@@ -447,6 +497,8 @@ interface JournalMutationInput {
   safeRequest: unknown;
   explicitIdempotencyKey?: string | undefined;
   retireDevStoppedWorkflow?: boolean | undefined;
+  /** Owner-only commands an app credential cannot run; see ownerAccountLogin. */
+  ownerAccountLogin?: boolean | undefined;
   cwd?: string | undefined;
 }
 
@@ -469,7 +521,9 @@ async function outputReplayMutation<T>(
   start: (control: OpenCloudClient, idempotencyKey: string) => Promise<T>,
   render: (value: T) => unknown | Promise<unknown> = (value) => value,
 ): Promise<void> {
-  const context = await exactAppMutationContext(input.appId, input.cwd);
+  const context = input.ownerAccountLogin === true
+    ? await ownerMutationContext(input.appId, input.cwd)
+    : await exactAppMutationContext(input.appId, input.cwd);
   await context.journal.run(mutationIntent(input), async (run) => {
     run.failIfUnknown();
     await run.markAttempted();
@@ -1749,7 +1803,10 @@ const domain = app.command("domain").description("Manage the app's single custom
 
 domain.command("get").argument("<app-id>")
   .description("Read domain setup and DNS instructions without starting checks")
-  .action(async (appId) => output(await client().call("getAppDomain", { appId })));
+  .action(async (appId) => {
+    const control = (await ownerAccountLogin())?.control ?? client();
+    output(await control.call("getAppDomain", { appId }));
+  });
 
 domain.command("add").argument("<app-id>").argument("<hostname>")
   .description("Claim one custom hostname and return TXT and traffic DNS instructions")
@@ -1760,6 +1817,7 @@ domain.command("add").argument("<app-id>").argument("<hostname>")
       commandId: "opencloud app domain add", appId,
       safeScope: { appId }, safeRequest: body,
       explicitIdempotencyKey: options.idempotencyKey,
+      ownerAccountLogin: true,
     }, (control, key) => control.call("addAppDomain", { appId, body }, { idempotencyKey: key }));
   });
 
@@ -1771,6 +1829,7 @@ domain.command("check").argument("<app-id>")
       commandId: "opencloud app domain check", appId,
       safeScope: { appId }, safeRequest: { action: "check-domain" },
       explicitIdempotencyKey: options.idempotencyKey,
+      ownerAccountLogin: true,
     }, (control, key) => control.call("checkAppDomain", { appId }, { idempotencyKey: key }));
   });
 
@@ -1782,6 +1841,7 @@ domain.command("remove").argument("<app-id>")
       commandId: "opencloud app domain remove", appId,
       safeScope: { appId }, safeRequest: { action: "remove-domain" },
       explicitIdempotencyKey: options.idempotencyKey,
+      ownerAccountLogin: true,
     }, (control, key) => control.call("removeAppDomain", { appId }, { idempotencyKey: key }));
   });
 
