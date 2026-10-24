@@ -126,7 +126,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.15.0";
+const CLI_VERSION = "3.15.1";
 
 const program = new Command()
   .name("opencloud")

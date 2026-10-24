@@ -23,3 +23,17 @@ jobs:
       - run: npm run build
       - run: npm run verify:version
       - run: node dist/index.cjs --cli-version
+
+  macos:
+    # The mutation journal opens directories differently on each platform,
+    # so the app mutation paths run on macOS too.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:contract

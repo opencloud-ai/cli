@@ -1,3 +1,4 @@
+import { closeSync, constants as fsConstants, openSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -18,6 +19,7 @@ import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
   MutationJournalError,
+  anchorsDirectoryDescriptors,
   assertAppOwnerMutationJournalDirectory,
   linuxMountInfoContains,
   resolveMutationJournalDirectory,
@@ -178,7 +180,7 @@ describe("mutation journal", () => {
     ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_ROOT_CHANGED" });
   });
 
-  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+  it.runIf(anchorsDirectoryDescriptors())(
     "completes through the retained root descriptor and blocks a cold duplicate after a swap",
     async () => {
       const root = await temporaryDirectory();
@@ -222,7 +224,7 @@ describe("mutation journal", () => {
     },
   );
 
-  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+  it.runIf(anchorsDirectoryDescriptors())(
     "anchors entry I/O and rejects a replaced internal directory on cold open",
     async () => {
       const directory = path.join(await temporaryDirectory(), "journal");
@@ -260,6 +262,98 @@ describe("mutation journal", () => {
       ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_ROOT_CHANGED" });
     },
   );
+
+  it("anchors directory descriptors only on Linux", () => {
+    expect(anchorsDirectoryDescriptors("linux")).toBe(true);
+    for (const platform of ["darwin", "win32", "freebsd"] as const) {
+      expect(anchorsDirectoryDescriptors(platform)).toBe(false);
+    }
+  });
+
+  it.runIf(process.platform === "darwin")(
+    "cannot reach a directory or its files through /dev/fd on macOS",
+    async () => {
+      const directory = await temporaryDirectory();
+      await writeFile(path.join(directory, "entry"), "", { mode: 0o600 });
+      const handle = openSync(
+        directory,
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY,
+      );
+      try {
+        expect(() =>
+          openSync(
+            `/dev/fd/${handle}`,
+            fsConstants.O_RDONLY | fsConstants.O_DIRECTORY,
+          ),
+        ).toThrow(expect.objectContaining({ code: "ENOTDIR" }));
+        // The file exists, but /dev/fd does not look inside the directory.
+        closeSync(openSync(path.join(directory, "entry"), fsConstants.O_RDONLY));
+        expect(() =>
+          openSync(`/dev/fd/${handle}/entry`, fsConstants.O_RDONLY),
+        ).toThrow(
+          expect.objectContaining({
+            code: expect.stringMatching(/^(?:ENOENT|ENOTDIR)$/),
+          }),
+        );
+      } finally {
+        closeSync(handle);
+      }
+    },
+  );
+
+  it("re-checks directories by path where descriptors cannot anchor them", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+    try {
+      const root = await temporaryDirectory();
+      const directory = path.join(root, "journal");
+      const journal = await MutationJournal.open({
+        directory,
+        apiUrl: API_URL,
+        appId: APP_ID,
+      });
+      const restart = {
+        commandId: "opencloud app restart" as const,
+        safeScope: { appId: APP_ID },
+        safeRequest: { action: "restart" },
+      };
+      await journal.run(restart, async (run) => {
+        await run.markAttempted();
+        await run.complete();
+      });
+      const [entry] = await readdir(path.join(directory, "entries"));
+      expect(
+        JSON.parse(
+          await readFile(
+            path.join(directory, "entries", String(entry)),
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({ state: "completed", attemptCount: 1 });
+
+      // With no descriptor to write through, a root swapped mid-run fails the
+      // run instead of completing it, and a cold open refuses the replacement.
+      let effects = 0;
+      await expect(
+        journal.run(
+          { ...restart, safeRequest: { action: "restart-again" } },
+          async (run) => {
+            await run.markAttempted();
+            await rename(directory, path.join(root, "journal-original"));
+            await mkdir(directory, { mode: 0o700 });
+            effects += 1;
+            await run.complete();
+          },
+        ),
+      ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_ROOT_CHANGED" });
+      expect(effects).toBe(1);
+      await expect(
+        MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID }),
+      ).rejects.toMatchObject({ code: "MUTATION_JOURNAL_ROOT_CHANGED" });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
 
   it("rejects a replaced lock directory from its cold identity witness", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");

@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { cliConfigDirectory } from "./cli-config-directory.mjs";
 
 const binary = path.resolve(import.meta.dirname, "../dist/index.cjs");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-identity-contract-"));
@@ -43,7 +44,7 @@ const apiUrl = `http://127.0.0.1:${server.address().port}`;
 // fresh login never writes to the OS keyring.
 const home = path.join(temporary, "home");
 const configHome = path.join(temporary, "config");
-const credentials = path.join(configHome, "opencloud", "credentials");
+const credentials = path.join(cliConfigDirectory({ home, configHome }), "credentials");
 await mkdir(credentials, { recursive: true, mode: 0o700 });
 await mkdir(home, { recursive: true });
 const accountName = `account-${createHash("sha256").update(apiUrl).digest("hex")}`;
