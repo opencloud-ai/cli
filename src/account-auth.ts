@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { withCliHeaders } from "./cli-http.js";
 import {
   CredentialStore,
   type AccountCredential,
@@ -290,7 +291,7 @@ async function requestJson<T>(
   url: string,
   request: typeof fetch,
 ): Promise<T> {
-  const response = await request(url, {
+  const response = await withCliHeaders(request)(url, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(15_000),
   });
@@ -303,7 +304,7 @@ function postForm(
   values: Record<string, string>,
   request: typeof fetch,
 ): Promise<Response> {
-  return request(url, {
+  return withCliHeaders(request)(url, {
     method: "POST",
     headers: {
       accept: "application/json",

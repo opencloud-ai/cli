@@ -5,15 +5,26 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
+import { withCliHeaders } from "./cli-http.js";
 import { slowResponseFetch } from "./slow-response-fetch.js";
 
 /**
  * CLI disk transfers remain outside the portable platform client snapshot.
  * JSON requests may wait past global fetch's 300-second header limit, for
  * example while validation builds the frontend; see slowResponseFetch.
+ * Every request carries the CLI's user-agent and an x-request-id.
  */
 export class OpenCloudClient extends PlatformClient {
-  constructor(private readonly transferOptions: ClientOptions) { super({ fetch: slowResponseFetch, ...transferOptions }); }
+  private readonly transferFetch: typeof fetch;
+
+  constructor(private readonly transferOptions: ClientOptions) {
+    const attribution = { apiUrl: transferOptions.apiUrl };
+    super({
+      ...transferOptions,
+      fetch: withCliHeaders(transferOptions.fetch ?? slowResponseFetch, attribution),
+    });
+    this.transferFetch = withCliHeaders(transferOptions.fetch, attribution);
+  }
 
   private async transferHeaders(): Promise<Record<string, string>> {
     const token = this.transferOptions.tokenProvider ? await this.transferOptions.tokenProvider() : this.transferOptions.token;
@@ -28,7 +39,7 @@ export class OpenCloudClient extends PlatformClient {
     if (!metadata.isFile()) throw new Error("Upload source must be a file");
     const source = createReadStream(filePath);
     try {
-      const response = await (this.transferOptions.fetch ?? fetch)(`${this.transferOptions.apiUrl.replace(/\/$/, "")}${requestPath}`, {
+      const response = await this.transferFetch(`${this.transferOptions.apiUrl.replace(/\/$/, "")}${requestPath}`, {
         method, headers: { ...headers, accept: "application/json",
           ...(options.contentType ? { "content-type": options.contentType } : {}),
           "content-length": String(metadata.size), "idempotency-key": options.idempotencyKey ?? randomUUID() },
@@ -42,7 +53,7 @@ export class OpenCloudClient extends PlatformClient {
   }
 
   async download(requestPath: string, timeoutMs = 120_000): Promise<Response> {
-    const response = await (this.transferOptions.fetch ?? fetch)(`${this.transferOptions.apiUrl.replace(/\/$/, "")}${requestPath}`, {
+    const response = await this.transferFetch(`${this.transferOptions.apiUrl.replace(/\/$/, "")}${requestPath}`, {
       method: "GET", headers: { ...await this.transferHeaders(), accept: "*/*" },
       signal: AbortSignal.timeout(timeoutMs),
     });

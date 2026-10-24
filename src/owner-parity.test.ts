@@ -13,6 +13,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api-client.js";
+import { apiErrorFromResponse } from "../vendor/control-plane-client/src/errors.js";
+import { withCliHeaders } from "./cli-http.js";
 import {
   CliContractError,
   OperationTerminalError,
@@ -292,5 +294,65 @@ describe("owner-parity CLI helpers", () => {
       operationErrorCode: "FUNCTION_FAILED",
     });
     expect(failed).not.toHaveProperty("error.operation.error.secret");
+  });
+
+  it("quotes the answer's x-request-id when the error body has none", () => {
+    const fromHeader = structuredCliError(
+      apiErrorFromResponse(
+        new Response(null, { status: 502, headers: { "x-request-id": "cli-header-id" } }),
+        "<html>Bad gateway</html>",
+      ),
+    );
+    expect(fromHeader.error).toEqual({
+      code: "HTTP_502",
+      message: "OpenCloud API returned HTTP 502",
+      status: 502,
+      retryable: true,
+      requestId: "cli-header-id",
+    });
+    const fromBody = structuredCliError(
+      apiErrorFromResponse(
+        new Response(null, { status: 500, headers: { "x-request-id": "header-id" } }),
+        { message: "failed", requestId: "body-id" },
+      ),
+    );
+    expect(fromBody.error.requestId).toBe("body-id");
+  });
+
+  it("keeps a network failure's cause code and request ID", async () => {
+    const refused = Object.assign(
+      new Error("connect ECONNREFUSED 127.0.0.1:4010 Bearer oc_owner_do-not-leak"),
+      { code: "ECONNREFUSED" },
+    );
+    const failure = new TypeError("fetch failed", { cause: refused });
+    await expect(
+      withCliHeaders(async () => {
+        throw failure;
+      })("https://api.example.test/v1/apps"),
+    ).rejects.toBe(failure);
+    const output = structuredCliError(failure);
+    expect(output.error).toMatchObject({
+      code: "CLI_ERROR",
+      message: "fetch failed",
+      retryable: false,
+      cause: {
+        code: "ECONNREFUSED",
+        message: "connect ECONNREFUSED 127.0.0.1:4010 [REDACTED]",
+      },
+      requestId: expect.stringMatching(/^cli-/),
+    });
+    // Several addresses fail as one AggregateError without a message.
+    const aggregate = Object.assign(
+      new AggregateError([new Error("connect ECONNREFUSED ::1:4010")], ""),
+      { code: "ECONNREFUSED" },
+    );
+    expect(
+      structuredCliError(new TypeError("fetch failed", { cause: aggregate })).error.cause,
+    ).toEqual({ code: "ECONNREFUSED", message: "connect ECONNREFUSED ::1:4010" });
+    expect(structuredCliError(new Error("plain")).error).toEqual({
+      code: "CLI_ERROR",
+      message: "plain",
+      retryable: false,
+    });
   });
 });

@@ -45,6 +45,7 @@ import {
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
+import { setCliVersion } from "./cli-http.js";
 import { runtimeSessionTokenProvider } from "./runtime-session-token.js";
 import { doctorDiagnostics } from "./doctor.js";
 import {
@@ -133,6 +134,7 @@ import {
 } from "./owner-parity.js";
 
 const CLI_VERSION = "3.15.2";
+setCliVersion(CLI_VERSION);
 
 const program = new Command()
   .name("opencloud")
