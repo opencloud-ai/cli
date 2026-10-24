@@ -53,6 +53,12 @@ import {
   signedInUser,
   type IdentitySource,
 } from "./identity.js";
+import {
+  archiveFileDigests,
+  compareValidatedArtifact,
+  describeArtifactMismatch,
+  type ArtifactComparison,
+} from "./artifact-identity.js";
 import { devDataRequest, type DevDataAction } from "./dev-data.js";
 import {
   collectOption,
@@ -126,7 +132,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 
-const CLI_VERSION = "3.15.1";
+const CLI_VERSION = "3.15.2";
 
 const program = new Command()
   .name("opencloud")
@@ -627,7 +633,10 @@ interface LocalDevState {
   sessionId: string;
   /** The local bundle digest, which detects local changes. */
   artifactSha256: string;
-  /** The session's server-built artifact, for an app OpenCloud builds. */
+  /**
+   * The session's artifact when its digest differs from the local bundle's:
+   * an app OpenCloud builds, or the same files compressed by another zlib.
+   */
   serverArtifactSha256?: string;
   updatedAt: string;
 }
@@ -1128,21 +1137,37 @@ async function synchronizeValidatedDraft(
       validation,
     };
   }
-  if (validation.artifactSha256 !== bundle.sha256 && upload.mode === "source") {
+  let identity = await validatedArtifactIdentity(control, bundle, draft.id, validation);
+  if (
+    identity.artifactSha256 === null &&
+    identity.comparison.manifestKeys.length &&
+    upload.mode === "source"
+  ) {
     // The server resolved the author manifest differently (usually an unpinned
     // runtime.sdk.version). Keep the source but send the canonical manifest,
     // exactly as bundle mode does.
     process.stderr.write(
-      `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI; storing the canonical opencloud.json with the release source. Pin runtime.sdk.version to keep your manifest.\n`,
+      `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI (${identity.comparison.manifestKeys.join(", ")}); storing the canonical opencloud.json with the release source.\n`,
     );
     const canonical: DraftFiles = new Map(upload.files);
     canonical.delete(bundle.sourceManifest);
     const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
     canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
     validation = await applyAndValidate(canonical);
+    identity = await validatedArtifactIdentity(control, bundle, draft.id, validation);
   }
-  if (validation.artifactSha256 !== bundle.sha256) {
-    throw new Error("Local and server canonical bundle digests do not match");
+  if (identity.artifactSha256 === null) {
+    throw new CliContractError(
+      "ARTIFACT_MISMATCH",
+      describeArtifactMismatch(
+        identity.comparison,
+        bundle.sha256,
+        validation.artifactSha256,
+      ) +
+        (identity.draftChanged
+          ? " The draft changed while OpenCloud validated it; run the command again."
+          : ""),
+    );
   }
   await run.checkpointStage({
     stage: "validated",
@@ -1153,8 +1178,65 @@ async function synchronizeValidatedDraft(
   return {
     appId: bundle.manifest.appId,
     draftId: draft.id,
-    artifactSha256: bundle.sha256,
+    artifactSha256: identity.artifactSha256,
     validation,
+  };
+}
+
+/**
+ * The release digest of a draft OpenCloud validated from this bundle's
+ * files: the local digest when both archives match byte for byte, or
+ * OpenCloud's when it built the same files and manifest but its zlib
+ * compressed them differently. Otherwise the differences are returned.
+ */
+async function validatedArtifactIdentity(
+  control: OpenCloudClient,
+  bundle: Awaited<ReturnType<typeof buildBundle>>,
+  draftId: string,
+  validation: {
+    revision: number;
+    artifactSha256: string | null;
+    manifest: unknown;
+    artifactFiles: string[];
+  },
+): Promise<
+  | { artifactSha256: string }
+  | { artifactSha256: null; comparison: ArtifactComparison; draftChanged: boolean }
+> {
+  if (validation.artifactSha256 === bundle.sha256) {
+    return { artifactSha256: bundle.sha256 };
+  }
+  const appId = bundle.manifest.appId;
+  const [current, remoteFiles] = await Promise.all([
+    control.call("getDraft", { appId, draftId }),
+    control.call("listDraftFiles", { appId, draftId }),
+  ]);
+  const comparison = compareValidatedArtifact({
+    localManifest: bundle.manifest,
+    localFiles: bundle.files,
+    localDigests: archiveFileDigests(bundle.archive),
+    remoteDigests: new Map(
+      remoteFiles
+        .filter((file) => !file.deleted)
+        .map((file) => [file.path, file.sha256]),
+    ),
+    validation,
+  });
+  // The listing describes what OpenCloud validated only if nothing changed since.
+  if (
+    comparison.sameContent &&
+    validation.artifactSha256 &&
+    current.revision === validation.revision
+  ) {
+    process.stderr.write(
+      `OpenCloud's zlib compressed the same files differently from this runtime's (zlib ${process.versions.zlib}), so OpenCloud's digest ${validation.artifactSha256} identifies the release.\n`,
+    );
+    return { artifactSha256: validation.artifactSha256 };
+  }
+  return {
+    artifactSha256: null,
+    comparison,
+    draftChanged: current.revision !== validation.revision,
   };
 }
 
@@ -2124,10 +2206,15 @@ dev
             draftId: retained.draftId,
             body: {},
           });
-          if (
-            !validation.passed ||
-            validation.artifactSha256 !== bundle.sha256
-          ) {
+          const identity = validation.passed
+            ? await validatedArtifactIdentity(
+                context.control,
+                bundle,
+                retained.draftId,
+                validation,
+              )
+            : null;
+          if (!identity?.artifactSha256) {
             throw new CliContractError(
               "MUTATION_REPLAY_MISMATCH",
               "The journaled development draft no longer validates to the exact local artifact",
@@ -2136,7 +2223,7 @@ dev
           synchronized = {
             appId,
             draftId: retained.draftId,
-            artifactSha256: bundle.sha256,
+            artifactSha256: identity.artifactSha256,
             validation,
           };
         } else {
@@ -2853,8 +2940,9 @@ dev
           checkpoint?.activeRevisionId ?? session.activeRevision?.id;
         const artifactSha256 =
           checkpoint?.artifactSha256 ?? session.activeRevision?.artifactSha256;
-        // For an app OpenCloud builds, the session runs the server-built
-        // artifact, not the local bundle, which leaves the frontend out.
+        // The session runs OpenCloud's artifact, whose digest differs from the
+        // local bundle's for an app OpenCloud builds (the local bundle leaves
+        // the frontend out) or when another zlib compressed the same files.
         const sessionArtifactSha256 =
           state.serverArtifactSha256 ?? state.artifactSha256;
         if (
@@ -3131,9 +3219,10 @@ dev
           result.draft.id !== state.draftId ||
           result.deployment.appId !== state.appId ||
           result.deployment.artifactSha256 !==
-            (platformBuilt(bundle)
-              ? (state.serverArtifactSha256 ?? result.deployment.artifactSha256)
-              : bundle.sha256)
+            (state.serverArtifactSha256 ??
+              (platformBuilt(bundle)
+                ? result.deployment.artifactSha256
+                : bundle.sha256))
         ) {
           throw new CliContractError(
             "MUTATION_REPLAY_MISMATCH",
