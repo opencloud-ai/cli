@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.15.2
+
+- Fix `app dev start`, `dev sync` and `deploy` refusing a draft OpenCloud
+  had validated, with "Local and server canonical bundle digests do not
+  match", when the CLI runs on Node built against a system zlib (such as
+  Homebrew's Node or a Linux distribution's package), on Bun or on Deno. A
+  bundle's digest is the SHA-256 of its gzip archive, and those runtimes
+  compress the same tar differently from the official Node builds OpenCloud
+  runs. When the digests differ, the CLI now checks that OpenCloud built the
+  same files with the same bytes and the same resolved manifest. If so,
+  OpenCloud's digest identifies the release, as it already did for frontends
+  OpenCloud builds, and `dev verify` and `dev promote` follow it.
+- Retry with the canonical `opencloud.json` only when OpenCloud resolved the
+  manifest differently, and name the keys. Before, the CLI always retried and
+  asked to pin `runtime.sdk.version`, even when the manifest matched.
+- When OpenCloud's artifact really differs, the `ARTIFACT_MISMATCH` error
+  names both digests and the files and manifest keys that differ.
+- A contract test now bundles each uploaded draft and compresses it with
+  another zlib setting. CI and the release workflow also run the tests and
+  contracts on Node built against a system zlib.
+
 ## 3.15.1
 
 - Fix every app change on macOS. Since 3.7.0, each command that changes an

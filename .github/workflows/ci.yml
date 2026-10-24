@@ -37,3 +37,20 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run test:contract
+
+  system-zlib:
+    # Node built against a system zlib (Homebrew's, a Linux distribution's)
+    # compresses bundle archives differently from official Node builds, so
+    # its digests differ from OpenCloud's for the same files.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test with Alpine's Node, which links the system zlib
+        run: |
+          docker run --rm -v "$PWD:/cli" -w /cli alpine:3.22 sh -euc '
+            apk add --no-cache nodejs npm openssl
+            node -p "\"Node \" + process.version + \", zlib \" + process.versions.zlib"
+            npm ci
+            npm test
+            npm run test:contract
+          '

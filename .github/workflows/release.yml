@@ -23,8 +23,23 @@ jobs:
       - run: npm test
       - run: npm run test:contract
 
+  system-zlib:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test with Alpine's Node, which links the system zlib
+        run: |
+          docker run --rm -v "$PWD:/cli" -w /cli alpine:3.22 sh -euc '
+            apk add --no-cache nodejs npm openssl
+            npm ci
+            npm test
+            npm run test:contract
+          '
+
   release:
-    needs: macos
+    needs: [macos, system-zlib]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
