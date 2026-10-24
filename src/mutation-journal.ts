@@ -840,32 +840,42 @@ async function anchoredDirectoryStats(directory: string): Promise<Stats> {
   }
 }
 
+/**
+ * Whether the journal can work inside a directory through a retained
+ * descriptor. On Linux, /proc/self/fd/<n> stands in for openat(2): paths
+ * below it resolve inside the directory the descriptor holds, even after the
+ * directory is renamed or replaced. macOS's /dev/fd/<n> reopens a descriptor
+ * but is not a directory, so opening anything below it, or opening it with
+ * O_DIRECTORY, fails with ENOTDIR. Elsewhere the journal re-checks each
+ * directory's identity by path before and after every write.
+ */
+export function anchorsDirectoryDescriptors(
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "linux";
+}
+
 async function retainDirectoryAnchor(
   directory: string,
   requireDescriptorPath = false,
 ): Promise<RetainedDirectoryAnchor> {
-  const flags =
-    fsConstants.O_RDONLY |
-    (process.platform === "win32"
-      ? 0
-      : fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
-  if (
-    requireDescriptorPath &&
-    !["linux", "darwin"].includes(process.platform)
-  ) {
+  if (requireDescriptorPath && !anchorsDirectoryDescriptors()) {
     throw new MutationJournalError(
       "UNSUPPORTED_MUTATION_JOURNAL_PLATFORM",
       "This platform cannot retain an inode-anchored mutation journal directory",
     );
   }
-  if (!["linux", "darwin"].includes(process.platform)) {
+  if (!anchorsDirectoryDescriptors()) {
     return {
       handle: null,
       identity: await directoryIdentity(directory),
       anchoredPath: directory,
     };
   }
-  const handle = openSync(directory, flags);
+  const handle = openSync(
+    directory,
+    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+  );
   try {
     const metadata = fstatSync(handle);
     if (!metadata.isDirectory()) {
@@ -885,12 +895,7 @@ async function retainDirectoryAnchor(
         "The mutation journal root changed while its anchor was retained",
       );
     }
-    const anchoredPath =
-      process.platform === "linux"
-        ? `/proc/self/fd/${handle}`
-        : process.platform === "darwin"
-          ? `/dev/fd/${handle}`
-          : directory;
+    const anchoredPath = `/proc/self/fd/${handle}`;
     const anchoredIdentity = await anchoredDirectoryStats(anchoredPath);
     if (
       anchoredIdentity.dev !== identity.dev ||
@@ -952,7 +957,7 @@ async function secureRegularFile(file: string): Promise<boolean> {
 
 async function syncDirectory(directory: string): Promise<void> {
   if (process.platform === "win32") return;
-  const descriptorRoot = /^\/(?:proc\/self|dev)\/fd\/\d+$/.test(directory);
+  const descriptorRoot = /^\/proc\/self\/fd\/\d+$/.test(directory);
   const handle = await open(
     directory,
     fsConstants.O_RDONLY |
