@@ -1,5 +1,40 @@
 # Changelog
 
+## 3.16.0
+
+- Send OpenCloud an error report when a command fails unexpectedly, so a
+  fault like 3.7.0 to 3.15.0's failure of every app change on macOS is found
+  without a bug report. Reports cover CLI errors and crashes, API answers of
+  500 or above, requests that got no answer, and durable operations that
+  failed or whose outcome is unknown. Outcomes the caller resolves are not
+  reported: other API answers, usage errors, a missing or expired login, an
+  invalid manifest, an app that fails validation or verification, `--help`
+  and `--version`. A report names the command without its values, the
+  error, the CLI version, the operating system and the runtime, including
+  its zlib. It goes to the API the command used, with a credential the
+  command has for that API, and is otherwise anonymous; the CLI never opens
+  the OS credential store to send one. The home directory, credentials, URL
+  query strings, file excerpts and argument and option values are removed
+  first. Sending waits at most 2.5 seconds, is never retried and never
+  changes the output or exit code. Platforms without
+  `POST /v1/platform-errors/reports` answer 404, which the CLI ignores.
+- Add `telemetry status`, `enable` and `disable`. `OPENCLOUD_TELEMETRY=0`, or
+  any `DO_NOT_TRACK` other than `0`, turns reports off, and
+  `OPENCLOUD_TELEMETRY=log` prints them to standard error instead of sending
+  them. In a terminal, the first report prints a one-time notice; agents
+  reading a pipe never see it.
+- Name the CLI in a `user-agent` header, such as
+  `opencloud-cli/3.16.0 (darwin arm64; node 22.12.0)`, and send
+  `x-request-id: cli-<uuid>` with every API request that has none.
+- Structured errors quote the answer's `x-request-id` when its body has no
+  `requestId`. A request that got no answer names the request ID the CLI sent
+  and its cause, such as `"cause": {"code": "ECONNREFUSED", ...}`, instead of
+  only `fetch failed`.
+- `scripts/error-report-contract.mjs` runs the built CLI against a fake
+  control plane: which failures are reported, the exact report fields and
+  limits, credentials and redaction, crashes, opt-outs, log mode, and report
+  endpoints that fail, refuse or never answer.
+
 ## 3.15.2
 
 - Fix `app dev start`, `dev sync` and `deploy` refusing a draft OpenCloud

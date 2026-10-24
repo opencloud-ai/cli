@@ -146,7 +146,7 @@ import {
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
 
-const CLI_VERSION = "3.15.2";
+const CLI_VERSION = "3.16.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
