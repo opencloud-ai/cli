@@ -212,6 +212,8 @@ function send(response, status, value) {
 
 const server = createServer(async (request, response) => {
   const body = await bodyOf(request);
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const record = {
     method: request.method,
     url: request.url,

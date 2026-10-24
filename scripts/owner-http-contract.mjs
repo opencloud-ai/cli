@@ -32,6 +32,8 @@ async function requestBody(request) {
 
 const server = createServer(async (request, response) => {
   const body = await requestBody(request);
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   requests.push({
     method: request.method,
     url: request.url,

@@ -14,6 +14,8 @@ const missingId = "00000000-0000-4000-8000-000000000004";
 const userId = "00000000-0000-4000-8000-000000000005";
 const requests = [];
 const server = createServer((request, response) => {
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://localhost");
   requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams) });
   assert.equal(request.headers.authorization, "Bearer synthetic-history-authority");

@@ -53,6 +53,8 @@ let dropNextInjection = false;
 const server = createServer(async (request, response) => {
   let body = "";
   for await (const chunk of request) body += chunk;
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://localhost");
   requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams), key: request.headers["idempotency-key"], body });
   const send = (status, value) => {

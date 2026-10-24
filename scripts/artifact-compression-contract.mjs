@@ -142,6 +142,8 @@ async function serverBuild(draft) {
 
 const server = createServer(async (request, response) => {
   const body = await bodyOf(request);
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://contract.test");
   state.requests.push({ method: request.method, path: url.pathname });
   const parts = url.pathname.split("/").filter(Boolean);
@@ -279,6 +281,8 @@ async function runCli(argumentsList, { status = 0, remote = true } = {}) {
     delete environment[key];
   }
   environment.OPENCLOUD_MUTATION_JOURNAL_DIR = path.join(temporary, "journal");
+  // Without the fake API, an error report would go to the default installation.
+  if (!remote) environment.OPENCLOUD_TELEMETRY = "0";
   const prefix = remote
     ? ["--api-url", `http://127.0.0.1:${server.address().port}`, "--token", "synthetic-compression"]
     : [];

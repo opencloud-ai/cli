@@ -137,6 +137,8 @@ async function bodyOf(request) {
 
 const server = createServer(async (request, response) => {
   const body = await bodyOf(request);
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://contract.test");
   state.requests.push({ method: request.method, path: url.pathname, query: url.search, body });
   const parts = url.pathname.split("/").filter(Boolean);

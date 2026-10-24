@@ -583,6 +583,42 @@ braces (`/users{/:id}`), and named wildcards use `*path`. Query strings remain
 request data: `/pixel.jpg?param1=test123` matches `/pixel.jpg`; do not put the query
 string in the route pattern. Existing schema 2 artifacts remain readable.
 
+## Error reports
+
+When a command fails unexpectedly, the CLI sends OpenCloud a short error report
+so the problem can be found and fixed, and support can follow up. It reports
+CLI errors and crashes, API answers with status 500 or above, requests that got
+no answer, and durable operations that failed or whose outcome is unknown. Other
+API answers (validation, permission, not found, conflict, limits), usage errors,
+`--help`, `--version` and `telemetry` commands are not reported.
+
+A report contains the command without its values (for example
+`app dev start`), the names of the options used, the error's name, code,
+message and stack trace, request and operation IDs, the HTTP status, the
+connected app's ID, the CLI version, operating system, architecture and runtime,
+and whether the CLI ran in CI, a terminal or the hosted Agent. It goes to the
+API the command used, linked to the account of the credential the command used,
+or else the stored login. Before sending, the CLI replaces your home directory
+with `~` and removes credentials, URL query strings, file excerpts, and
+argument, option and environment values from error messages. Reports never
+include argument or option values, file contents, source code, environment
+variables or credentials.
+
+Sending waits at most 2.5 seconds, is never retried, and never changes a
+command's output or exit code. In a terminal, the first report prints a
+one-time notice. To turn reports off, or check the setting:
+
+```bash
+"$OPENCLOUD_CLI" telemetry disable
+"$OPENCLOUD_CLI" telemetry status
+```
+
+`OPENCLOUD_TELEMETRY=0` (or `false`, `off`, `no`) turns reports off and `=1`
+(or `true`, `on`, `yes`) turns them on, over the saved setting. Any
+`DO_NOT_TRACK` value other than `0` turns them off and takes precedence.
+`OPENCLOUD_TELEMETRY=log` prints each report to standard error instead of
+sending it, so you can see exactly what would be sent.
+
 ## Develop
 
 ```bash

@@ -45,7 +45,17 @@ import {
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
-import { setCliVersion } from "./cli-http.js";
+import {
+  lastUsedApiUrl,
+  setCliVersion,
+  usedApiCredential,
+} from "./cli-http.js";
+import {
+  ErrorReporter,
+  TELEMETRY_SETTINGS_FILE,
+  describeInvocation,
+  type FailureSource,
+} from "./error-reports.js";
 import { runtimeSessionTokenProvider } from "./runtime-session-token.js";
 import { doctorDiagnostics } from "./doctor.js";
 import {
@@ -167,6 +177,23 @@ const program = new Command()
 
 const credentialStore = new CredentialStore();
 
+/** What an error report may say about the running command; never values. */
+const invocation: {
+  route: string | null;
+  optionNames: readonly string[];
+  privateValues: readonly string[];
+  /** The last connected directory the command read. */
+  workspace: { apiUrl: string; appId: string } | null;
+} = { route: null, optionNames: [], privateValues: [], workspace: null };
+
+program.hook("preAction", (_program, actionCommand) => {
+  try {
+    Object.assign(invocation, describeInvocation(actionCommand));
+  } catch {
+    // Report bookkeeping never stops a command.
+  }
+});
+
 function sessionFile(): string {
   return resolveSessionFile(
     program.opts<{ sessionFile?: string }>().sessionFile,
@@ -186,8 +213,73 @@ function availableSession(): OpenCloudSession | null {
 }
 
 function availableWorkspace(cwd?: string) {
-  return loadWorkspaceBinding(workspaceFile(cwd));
+  const binding = loadWorkspaceBinding(workspaceFile(cwd));
+  if (binding) {
+    invocation.workspace = { apiUrl: binding.apiUrl, appId: binding.appId };
+  }
+  return binding;
 }
+
+function quietly<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where an error report goes, and with which credential: the API the
+ * command used and the token it sent there, else the configured API with
+ * the command's --token or the stored account login for that API.
+ */
+function failureSource(): FailureSource {
+  const options = program.opts<{ apiUrl?: string; token?: string }>();
+  const session = quietly(() => availableSession());
+  const workspace = invocation.workspace ?? quietly(() => availableWorkspace());
+  const ready = session?.state === "ready" ? session : null;
+  const api = (value: string | null | undefined) =>
+    value ? quietly(() => normalizeApiUrl(value)) : null;
+  const apiUrl = api(
+    lastUsedApiUrl() ??
+      options.apiUrl ??
+      workspace?.apiUrl ??
+      session?.apiUrl ??
+      DEFAULT_API_URL,
+  );
+  // client() sends --token or OPENCLOUD_TOKEN to this API.
+  const tokenApiUrl = api(options.apiUrl ?? workspace?.apiUrl ?? session?.apiUrl);
+  return {
+    context: {
+      route: invocation.route,
+      optionNames: invocation.optionNames,
+      privateValues: invocation.privateValues,
+      appId: workspace?.appId ?? ready?.appId ?? null,
+      hostedAgent: ready?.schemaVersion === 2,
+    },
+    apiUrl,
+    commandCredential: () =>
+      apiUrl
+        ? (usedApiCredential(apiUrl) ??
+          (options.token && tokenApiUrl === apiUrl ? options.token : null))
+        : null,
+    accountCredential: async () => {
+      if (!apiUrl) return null;
+      const account = await credentialStore.loadAccount(apiUrl);
+      return account &&
+        api(account.credential.apiUrl) === apiUrl &&
+        Date.parse(account.credential.accessExpiresAt) > Date.now() + 5_000
+        ? account.credential.accessToken
+        : null;
+    },
+  };
+}
+
+const errorReporter = new ErrorReporter({
+  settingsFile: path.join(credentialStore.configDirectory, TELEMETRY_SETTINGS_FILE),
+  source: failureSource,
+});
+errorReporter.installCrashMonitor();
 
 function targetApiUrl(cwd?: string): string {
   return (
@@ -1900,6 +1992,31 @@ program
           : null,
       }),
     );
+  });
+
+const telemetry = program
+  .command("telemetry")
+  .description("Inspect or change automatic error reports to OpenCloud");
+
+telemetry
+  .command("status")
+  .description("Show whether error reports are sent, and which setting decides")
+  .action(() => output(errorReporter.status()));
+
+telemetry
+  .command("enable")
+  .description("Send error reports to OpenCloud (the default)")
+  .action(() => {
+    errorReporter.configure(true);
+    output(errorReporter.status());
+  });
+
+telemetry
+  .command("disable")
+  .description("Stop sending error reports")
+  .action(() => {
+    errorReporter.configure(false);
+    output(errorReporter.status());
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
@@ -5941,7 +6058,7 @@ alertRule
     );
   });
 
-program.parseAsync().catch((error: unknown) => {
+program.parseAsync().catch(async (error: unknown) => {
   if (
     error &&
     typeof error === "object" &&
@@ -5954,4 +6071,6 @@ program.parseAsync().catch((error: unknown) => {
   }
   process.stderr.write(`${JSON.stringify(structuredCliError(error))}\n`);
   process.exitCode = 1;
+  // After the output, without changing it or the exit code; at most 2.5 s.
+  await errorReporter.reportFailure(error).catch(() => undefined);
 });

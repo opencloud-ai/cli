@@ -26,6 +26,8 @@ const identities = {
 // Installations released before identities answer the route with 404.
 let legacy = false;
 const server = createServer((request, response) => {
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const send = (status, value) => {
     response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify(value));
