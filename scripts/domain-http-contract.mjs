@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { cliConfigDirectory } from "./cli-config-directory.mjs";
 
 const binary = path.resolve(import.meta.dirname, "../dist/index.cjs");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-domain-contract-"));
@@ -39,7 +40,8 @@ const apiUrl = `http://127.0.0.1:${server.address().port}`;
 // account login, each in a throwaway config directory.
 const home = path.join(temporary, "home");
 const configHome = path.join(temporary, "config");
-const credentials = path.join(configHome, "opencloud", "credentials");
+const configDirectory = cliConfigDirectory({ home, configHome });
+const credentials = path.join(configDirectory, "credentials");
 const appRoot = path.join(temporary, "app");
 await mkdir(credentials, { recursive: true, mode: 0o700 });
 await mkdir(home, { recursive: true });
@@ -115,7 +117,7 @@ try {
   // Domains need the app owner; a connected directory's app credential can't
   // change them, so the owner's own login is used and journals with the account.
   await exercise(`Bearer ${accountAccess}`, { cwd: appRoot });
-  assert.equal(await journalEntries(path.join(configHome, "opencloud", "mutation-journals")), mutations.length);
+  assert.equal(await journalEntries(path.join(configDirectory, "mutation-journals")), mutations.length);
   assert.equal(await journalEntries(path.join(appRoot, ".opencloud", "agent-mutations")), 0);
   // The connected directory still refuses another app or installation.
   const before = requests.length;

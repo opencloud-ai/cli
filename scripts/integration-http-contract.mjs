@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { cliConfigDirectory } from "./cli-config-directory.mjs";
 
 const binary = path.resolve(import.meta.dirname, "../dist/index.cjs");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-integration-contract-"));
@@ -226,7 +227,7 @@ try {
     schemaVersion: 1, apiUrl, appId, appName: "Consumer", appUrl: "https://consumer.example.test",
     connectedAt: timestamp, credentialExpiresAt: later,
   }));
-  const credentials = path.join(connected.configHome, "opencloud", "credentials");
+  const credentials = path.join(cliConfigDirectory(connected), "credentials");
   await mkdir(credentials, { recursive: true, mode: 0o700 });
   await mkdir(connected.home, { recursive: true });
   const credentialName = `workspace-${createHash("sha256").update([apiUrl, appId].join("\0")).digest("hex")}`;
