@@ -845,9 +845,10 @@ async function anchoredDirectoryStats(directory: string): Promise<Stats> {
  * descriptor. On Linux, /proc/self/fd/<n> stands in for openat(2): paths
  * below it resolve inside the directory the descriptor holds, even after the
  * directory is renamed or replaced. macOS's /dev/fd/<n> reopens a descriptor
- * but is not a directory, so opening anything below it, or opening it with
- * O_DIRECTORY, fails with ENOTDIR. Elsewhere the journal re-checks each
- * directory's identity by path before and after every write.
+ * but is not a directory: opening it with O_DIRECTORY fails with ENOTDIR,
+ * and paths below it never reach the directory's files. Elsewhere the
+ * journal re-checks each directory's identity by path before and after
+ * every write.
  */
 export function anchorsDirectoryDescriptors(
   platform: NodeJS.Platform = process.platform,

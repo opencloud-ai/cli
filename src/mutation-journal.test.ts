@@ -286,9 +286,15 @@ describe("mutation journal", () => {
             fsConstants.O_RDONLY | fsConstants.O_DIRECTORY,
           ),
         ).toThrow(expect.objectContaining({ code: "ENOTDIR" }));
+        // The file exists, but /dev/fd does not look inside the directory.
+        closeSync(openSync(path.join(directory, "entry"), fsConstants.O_RDONLY));
         expect(() =>
           openSync(`/dev/fd/${handle}/entry`, fsConstants.O_RDONLY),
-        ).toThrow(expect.objectContaining({ code: "ENOTDIR" }));
+        ).toThrow(
+          expect.objectContaining({
+            code: expect.stringMatching(/^(?:ENOENT|ENOTDIR)$/),
+          }),
+        );
       } finally {
         closeSync(handle);
       }

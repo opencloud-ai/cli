@@ -7,12 +7,12 @@
   `deploy` and `secret set`, failed on macOS with `ENOTDIR: not a
   directory, open '/dev/fd/<n>'` before contacting OpenCloud. The mutation
   journal worked inside its directories through `/dev/fd/<n>`, but on macOS
-  that path reopens a descriptor and cannot be used as a directory. Outside
-  Linux the journal now uses the directories' own paths and checks each
-  directory's identity before and after every write, as it already did on
-  Windows. A directory replaced during a command still fails that command,
-  and the next one refuses the replacement. Linux, including the hosted
-  Agent, still works through `/proc/self/fd/<n>`.
+  that path reopens a descriptor and can't be opened as a directory or reach
+  the files inside it. Outside Linux the journal now uses the directories'
+  own paths and checks each directory's identity before and after every
+  write, as it already did on Windows. A directory replaced during a command
+  still fails that command, and the next one refuses the replacement. Linux,
+  including the hosted Agent, still works through `/proc/self/fd/<n>`.
 - Run the tests and the contract suite on macOS in CI, and on macOS before
   each release.
 
