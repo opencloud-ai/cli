@@ -14,6 +14,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
+import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
 
 export interface OperationOptions {
@@ -129,9 +130,14 @@ export async function jsonOption(input: {
   }
   let value = input.defaultValue;
   if (input.inline !== undefined || input.file !== undefined) {
+    // A file the caller named that cannot be read is theirs to fix.
     const source =
       input.inline ??
-      (await readFile(input.resolvePath(String(input.file)), "utf8"));
+      (await readFile(input.resolvePath(String(input.file)), "utf8").catch(
+        (error: unknown) => {
+          throw callerFailure(error);
+        },
+      ));
     try {
       value = JSON.parse(source);
     } catch (error) {

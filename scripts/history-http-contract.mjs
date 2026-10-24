@@ -48,7 +48,7 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 
 async function run(args, expectedStatus = 0) {
   const env = { ...process.env, OPENCLOUD_TOKEN: "synthetic-history-authority" };
-  for (const key of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL", "OPENCLOUD_MUTATION_JOURNAL_DIR"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL", "OPENCLOUD_MUTATION_JOURNAL_DIR", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) delete env[key];
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binary, "--api-url", `http://127.0.0.1:${server.address().port}`, ...args], { cwd: temporary, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";

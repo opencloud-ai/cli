@@ -251,7 +251,7 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
 async function runCli(argumentsList, { cwd = temporary, status = 0 } = {}) {
   const environment = { ...process.env };
-  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE"]) {
+  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) {
     delete environment[key];
   }
   environment.OPENCLOUD_MUTATION_JOURNAL_DIR = path.join(temporary, "journal");

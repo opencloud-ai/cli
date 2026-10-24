@@ -38,6 +38,8 @@ const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** accept, missing (404), error (500), slow (never answers) or reset. */
 let reportMode = "accept";
+/** How the login token endpoint answers a refresh: revoked (400 invalid_grant) or down (500). */
+let tokenMode = "revoked";
 const requests = [];
 const reports = [];
 
@@ -63,6 +65,11 @@ const server = createServer(async (request, response) => {
   if (request.url === "/version") {
     return send(200, { version: "9.9.9", commit: "contract", builtAt: "2026-10-24T00:00:00Z", releaseId: "contract", contracts: { cliMutationJournal: 1 } });
   }
+  if (request.method === "POST" && request.url === "/oauth/token") {
+    return tokenMode === "revoked"
+      ? send(400, { error: "invalid_grant", error_description: "The refresh token was revoked" })
+      : send(500, {});
+  }
   if (request.url === "/v1/apps") return send(200, []);
   if (request.url === `/v1/apps/${appId}`) return send(503, { code: "CAPACITY_UNAVAILABLE", message: "Capacity is busy", retryable: true });
   if (request.url === `/v1/apps/${slowAppId}`) return setTimeout(() => send(200, { id: slowAppId }), 1_500);
@@ -77,11 +84,13 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const apiUrl = `http://127.0.0.1:${server.address().port}`;
 
 const crashInjector = path.join(home, "crash.cjs");
-await writeFile(crashInjector, `// Crashes the running command, as a bug in a callback would.
+await writeFile(crashInjector, `// Crashes the running command, as a bug in a callback would, quoting its
+// last argument.
 if (process.argv[1] && process.argv[1].endsWith("index.cjs")) {
+  const argument = process.argv.at(-1);
   setTimeout(() => {
-    if (process.env.CONTRACT_CRASH === "rejection") Promise.reject(new Error("contract rejection"));
-    else throw new TypeError("contract crash");
+    if (process.env.CONTRACT_CRASH === "rejection") Promise.reject(new Error("contract rejection for " + argument));
+    else throw new TypeError("contract crash for " + argument);
   }, 100);
 }
 `);
@@ -231,33 +240,19 @@ try {
   assert.equal(operationReport.context.operationErrorCode, "RESTART_FAILED");
   assert.equal(operationReport.context.options, "--api-url,--idempotency-key,--interval,--timeout,--token");
 
-  // A CLI-internal failure before any request, from a connected directory:
-  // the directory's app, without the argument's value.
-  const project = path.join(home, "project");
-  await mkdir(path.join(project, ".opencloud"), { recursive: true });
-  await writeFile(path.join(project, ".opencloud", "app.json"), JSON.stringify({
-    schemaVersion: 1, apiUrl, appId, appName: "Contract", appUrl: "https://contract.example.test",
-    connectedAt: "2026-10-24T00:00:00.000Z", credentialExpiresAt: "2099-01-01T00:00:00.000Z",
-  }));
-  const mismatch = await reported(["app", "restart", missingAppId, "--idempotency-key", "contract-mismatch-1"], { cwd: project });
-  assert.equal(mismatch.status, 1);
-  assert.equal(structured(mismatch.stderr).error.code, "MUTATION_APP_BINDING_MISMATCH");
-  const mismatchReport = parsedReport(mismatch.sent[0]);
-  assert.equal(mismatchReport.appId, appId);
-  assert.equal(mismatchReport.errorCode, "MUTATION_APP_BINDING_MISMATCH");
-  assert.equal(mismatchReport.message, `This workspace is connected to app ${appId}; no mutation was started for [VALUE]`);
-  assert.equal(mismatch.sent[0].headers.authorization, `Bearer ${token}`);
-
-  // Paths in the home directory are reported from ~, and parser excerpts never.
+  // A CLI failure before any request: paths in the home directory are
+  // reported from ~, and parsers' excerpts of files never.
   const broken = path.join(home, "broken");
   await mkdir(path.join(broken, ".opencloud"), { recursive: true });
   await writeFile(path.join(broken, ".opencloud", "app.json"), JSON.stringify({ schemaVersion: 1 }));
   const invalid = await reported(["app", "list"], { cwd: broken });
   assert.equal(invalid.status, 1);
+  assert.equal(invalid.sent[0].headers.authorization, `Bearer ${token}`);
   assert.equal(parsedReport(invalid.sent[0]).message, "Invalid OpenCloud workspace binding: ~/broken/.opencloud/app.json");
-  await mkdir(path.join(home, "corrupt", ".opencloud"), { recursive: true });
-  await writeFile(path.join(home, "corrupt", ".opencloud", "dev.json"), '{"sessionId": s3cret-session-value');
-  const corrupt = await reported(["app", "dev", "status", path.join(home, "corrupt")]);
+  const corruptApp = path.join(home, "corrupt");
+  await mkdir(path.join(corruptApp, ".opencloud"), { recursive: true });
+  await writeFile(path.join(corruptApp, ".opencloud", "dev.json"), '{"sessionId": s3cret-session-value');
+  const corrupt = await reported(["app", "dev", "status", corruptApp]);
   assert.equal(corrupt.status, 1);
   // The local error quotes the file, as before; the report does not.
   assert.match(corrupt.stderr, /s3cret/);
@@ -265,44 +260,76 @@ try {
   assert.ok(!corrupt.sent[0].body.includes("s3cret"), "a file excerpt was reported");
   assert.equal(parsedReport(corrupt.sent[0]).route, "app dev status");
 
-  // Without a credential the report is anonymous; the stored login is used next.
-  const anonymous = await reported(["app", "list"], { authority: false });
+  // Without a credential for the API the report is anonymous; a login kept in
+  // the protected file is used, but never the OS credential service.
+  const anonymous = await reported(["app", "list"], { cwd: broken, authority: false });
   assert.equal(anonymous.status, 1);
   assert.equal(anonymous.sent[0].headers.authorization, undefined);
   parsedReport(anonymous.sent[0]);
   const credentials = path.join(configDirectory, "credentials");
-  await mkdir(credentials, { recursive: true, mode: 0o700 });
-  await writeFile(
-    path.join(credentials, `account-${createHash("sha256").update(apiUrl).digest("hex")}.json`),
-    `${JSON.stringify({
-      schemaVersion: 1, kind: "account", apiUrl, issuer: "https://auth.example.test",
-      tokenEndpoint: "https://auth.example.test/token", revocationEndpoint: "https://auth.example.test/revoke",
-      accessToken: accountToken, accessExpiresAt: "2099-01-01T00:00:00.000Z",
-      refreshToken: "synthetic-refresh", refreshExpiresAt: "2099-01-01T00:00:00.000Z",
-    })}\n`,
-    { mode: 0o600 },
-  );
-  const empty = path.join(temporary, "empty-app");
-  await mkdir(empty);
-  const unbundled = await reported(["app", "dev", "start", empty, "--idempotency-key", "contract-start-1"], { authority: false });
-  assert.equal(unbundled.status, 1);
-  assert.equal(unbundled.sent[0].headers.authorization, `Bearer ${accountToken}`);
-  const unbundledReport = parsedReport(unbundled.sent[0]);
-  assert.equal(unbundledReport.route, "app dev start");
-  assert.equal(unbundledReport.errorCode, "CLI_ERROR");
-  assert.equal(unbundledReport.message, "No opencloud.yaml, opencloud.yml, or opencloud.json found");
+  const storeLogin = async (accessExpiresAt) => {
+    await mkdir(credentials, { recursive: true, mode: 0o700 });
+    await writeFile(
+      path.join(credentials, `account-${createHash("sha256").update(apiUrl).digest("hex")}.json`),
+      `${JSON.stringify({
+        schemaVersion: 1, kind: "account", apiUrl, issuer: apiUrl,
+        tokenEndpoint: `${apiUrl}/oauth/token`, revocationEndpoint: `${apiUrl}/oauth/revoke`,
+        accessToken: accountToken, accessExpiresAt,
+        refreshToken: "synthetic-refresh", refreshExpiresAt: "2099-01-01T00:00:00.000Z",
+      })}\n`,
+      { mode: 0o600 },
+    );
+  };
+  await storeLogin("2099-01-01T00:00:00.000Z");
+  const signedIn = await reported(["app", "dev", "status", corruptApp], { authority: false });
+  assert.equal(signedIn.status, 1);
+  assert.equal(signedIn.sent[0].headers.authorization, `Bearer ${accountToken}`);
+  assert.equal(parsedReport(signedIn.sent[0]).route, "app dev status");
+
+  // A login that cannot be refreshed: revoked is the caller's to replace, an
+  // outage of the token endpoint is reported (anonymously: the login expired).
+  await storeLogin("2000-01-01T00:00:00.000Z");
+  const revoked = await reported(["login"], { authority: false });
+  assert.equal(revoked.status, 1);
+  assert.match(structured(revoked.stderr).error.message, /could not be refreshed/);
+  assert.equal(revoked.sent.length, 0);
+  tokenMode = "down";
+  const outage = await reported(["login"], { authority: false });
+  assert.equal(outage.status, 1);
+  assert.equal(revoked.stderr, outage.stderr);
+  assert.equal(outage.sent.length, 1);
+  assert.equal(outage.sent[0].headers.authorization, undefined);
+  assert.equal(parsedReport(outage.sent[0]).route, "login");
   await rm(credentials, { recursive: true, force: true });
 
-  // Outcomes for the caller are not reported.
-  for (const args of [
-    ["app", "get", missingAppId],
-    ["app", "nope"],
-    ["app", "get"],
-    ["app", "credential-create", appId, "--name", "n", "--token-file", path.join(temporary, "t"), "--idempotency-key", "contract-usage-1", "--expires-in-hours", "999"],
-    ["app", "--help"],
-    ["--cli-version"],
+  // Outcomes for the caller are not reported: API 4xx answers, usage errors,
+  // a missing login, an invalid manifest, and another app than the directory's.
+  const project = path.join(home, "project");
+  await mkdir(path.join(project, ".opencloud"), { recursive: true });
+  await writeFile(path.join(project, ".opencloud", "app.json"), JSON.stringify({
+    schemaVersion: 1, apiUrl, appId, appName: "Contract", appUrl: "https://contract.example.test",
+    connectedAt: "2026-10-24T00:00:00.000Z", credentialExpiresAt: "2099-01-01T00:00:00.000Z",
+  }));
+  const empty = path.join(temporary, "empty-app");
+  await mkdir(empty);
+  const unknownKey = path.join(temporary, "unknown-key-app");
+  await mkdir(unknownKey);
+  await writeFile(path.join(unknownKey, "opencloud.yaml"), `schemaVersion: 3\nappId: ${appId}\nname: Contract\nmanifestSecret: s3cret-manifest-value\n`);
+  for (const [args, options] of [
+    [["app", "get", missingAppId]],
+    [["app", "nope"]],
+    [["app", "get"]],
+    [["app", "credential-create", appId, "--name", "n", "--token-file", path.join(temporary, "t"), "--idempotency-key", "contract-usage-1", "--expires-in-hours", "999"]],
+    [["app", "list"], { authority: false }],
+    [["app", "dev", "start", empty, "--idempotency-key", "contract-start-1"]],
+    [["validate", unknownKey]],
+    [["app", "restart", missingAppId, "--idempotency-key", "contract-mismatch-1"], { cwd: project }],
+    [["app", "--help"]],
+    [["--cli-version"]],
   ]) {
-    const result = await reported(args);
+    const result = await reported(args, options);
+    const shown = args.includes("--help") || args.includes("--cli-version");
+    assert.equal(result.status, shown ? 0 : 1, `${args.join(" ")}\n${result.stderr}`);
     assert.equal(result.sent.length, 0, `${args.join(" ")} was reported`);
   }
 
@@ -316,28 +343,33 @@ try {
     assert.equal(result.status, baseline.status, mode);
     assert.equal(result.stdout, baseline.stdout, mode);
     assert.equal(sameIds(result.stderr), sameIds(baseline.stderr), mode);
-    assert.ok(result.elapsedMs < baseline.elapsedMs + 4_000, `${mode} kept the CLI alive for ${result.elapsedMs} ms`);
+    // The report waits at most 2.5 s.
+    assert.ok(result.elapsedMs < baseline.elapsedMs + 3_500, `${mode} kept the CLI alive for ${result.elapsedMs} ms`);
   }
   reportMode = "accept";
 
-  // Crashes are reported, and Node still prints them and exits as usual.
+  // Crashes are reported, and Node still prints them and exits as usual. The
+  // connected directory names the app; the argument's value is removed.
   for (const crash of ["exception", "rejection"]) {
     const env = { NODE_OPTIONS: `--require ${crashInjector}`, CONTRACT_CRASH: crash };
-    const quiet = await reported(["app", "get", slowAppId], { env: { ...env, OPENCLOUD_TELEMETRY: "0" } });
-    const result = await reported(["app", "get", slowAppId], { env });
+    const quiet = await reported(["app", "get", slowAppId], { cwd: project, env: { ...env, OPENCLOUD_TELEMETRY: "0" } });
+    const result = await reported(["app", "get", slowAppId], { cwd: project, env });
     assert.equal(quiet.sent.length, 0);
     assert.equal(result.status, 1);
     assert.equal(result.status, quiet.status);
     assert.equal(result.stdout, quiet.stdout);
     assert.equal(result.stderr, quiet.stderr);
-    assert.match(result.stderr, crash === "exception" ? /TypeError: contract crash/ : /Error: contract rejection/);
+    assert.match(result.stderr, crash === "exception" ? /TypeError: contract crash for / : /Error: contract rejection for /);
     assert.equal(result.sent.length, 1);
     const crashReport = parsedReport(result.sent[0]);
     assert.equal(crashReport.kind, "cli_crash");
+    assert.equal(crashReport.message, `contract ${crash === "exception" ? "crash" : "rejection"} for [VALUE]`);
     assert.match(crashReport.stack, /\(~\/crash\.cjs:\d+:\d+\)/);
     assert.equal(crashReport.route, "app get");
+    assert.equal(crashReport.appId, appId);
     assert.equal(crashReport.context.crashOrigin, crash === "exception" ? "uncaughtException" : "unhandledRejection");
     assert.equal(result.sent[0].headers.authorization, `Bearer ${token}`);
+    assert.ok(!result.sent[0].body.includes(slowAppId), "an argument value was reported");
   }
 
   // Opting out, and the status that explains it.

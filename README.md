@@ -588,21 +588,25 @@ string in the route pattern. Existing schema 2 artifacts remain readable.
 When a command fails unexpectedly, the CLI sends OpenCloud a short error report
 so the problem can be found and fixed, and support can follow up. It reports
 CLI errors and crashes, API answers with status 500 or above, requests that got
-no answer, and durable operations that failed or whose outcome is unknown. Other
-API answers (validation, permission, not found, conflict, limits), usage errors,
-`--help`, `--version` and `telemetry` commands are not reported.
+no answer, and durable operations that failed or whose outcome is unknown.
+Outcomes that are yours to resolve are not reported: other API answers
+(validation, permission, not found, conflict, limits), usage errors, a missing
+or expired login, an invalid manifest, an app that fails OpenCloud's
+validation or verification, `--help`, `--version` and `telemetry` commands.
 
 A report contains the command without its values (for example
 `app dev start`), the names of the options used, the error's name, code,
 message and stack trace, request and operation IDs, the HTTP status, the
 connected app's ID, the CLI version, operating system, architecture and runtime,
 and whether the CLI ran in CI, a terminal or the hosted Agent. It goes to the
-API the command used, linked to the account of the credential the command used,
-or else the stored login. Before sending, the CLI replaces your home directory
-with `~` and removes credentials, URL query strings, file excerpts, and
-argument, option and environment values from error messages. Reports never
-include argument or option values, file contents, source code, environment
-variables or credentials.
+API the command used or is configured for (by default `api.opencloud.ai`) and
+is linked to your account when the command has a credential for that API;
+otherwise it is anonymous. The CLI never opens the OS credential store just to
+send a report. Before sending, it replaces your home directory with `~` and
+removes credentials, URL query strings, file excerpts, and argument, option
+and environment values from error messages. Reports never include argument or
+option values, file contents, source code, environment variables or
+credentials.
 
 Sending waits at most 2.5 seconds, is never retried, and never changes a
 command's output or exit code. In a terminal, the first report prints a

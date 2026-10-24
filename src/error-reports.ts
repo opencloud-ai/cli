@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { CommanderError, type Command } from "commander";
 import { ApiError } from "./api-client.js";
+import { isCallerFailure } from "./caller-failure.js";
 import {
   cliUserAgent,
   getCliVersion,
@@ -178,14 +179,23 @@ export function errorReportStatus(settings: ErrorReportSettings): {
 }
 
 /**
- * CLI codes for a missing or invalid argument, option or input, which, like
- * Commander's usage errors, say nothing about a fault in the CLI or
- * OpenCloud. Every other CLI code is reported.
+ * CLI codes for outcomes the caller resolves, which, like Commander's usage
+ * errors and API 4xx answers, are not faults in the CLI or OpenCloud: a
+ * missing or invalid argument, option or input, a refusal to overwrite or
+ * replace without --force, another unresolved mutation, something that does
+ * not exist or is too large, and an app that failed the validation OpenCloud
+ * ran. Every other code is reported.
  */
-const USAGE_ERROR_CODES = new Set([
+const CALLER_OUTCOME_CODES = new Set([
+  "ACTIVE_DEPLOYMENT_CHANGED",
+  "APP_MISMATCH",
   "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
   "APP_REQUIRED",
+  "BACKUP_NOT_FOUND",
   "DEPLOYMENT_REQUIRED",
+  "DEV_SESSION_NOT_FOUND",
+  "DEV_VERIFICATION_FAILED",
+  "DRAFT_VALIDATION_FAILED",
   "INVALID_DRAFT_CHANGES",
   "INVALID_IDEMPOTENCY_KEY",
   "INVALID_INTEGRATION_EVENT",
@@ -194,9 +204,16 @@ const USAGE_ERROR_CODES = new Set([
   "INVALID_JSON_SHAPE",
   "INVALID_OPTION",
   "INVALID_OPTIONS",
+  "LOCAL_CHANGES",
+  "MUTATION_APP_BINDING_MISMATCH",
+  "MUTATION_AUTHORITY_SOURCE_CONFLICT",
+  "MUTATION_IN_PROGRESS",
+  "NO_LIVE_RELEASE",
   "OUTPUT_FILE_EXISTS",
+  "PLATFORM_BUILD_UNSUPPORTED",
   "SECRET_INPUT_REQUIRED",
   "SECRET_TOO_LARGE",
+  "SOURCE_TOO_LARGE",
   "TOKEN_FILE_EXISTS",
 ]);
 
@@ -215,18 +232,42 @@ function isCommanderError(error: unknown): boolean {
 /**
  * A failure is reported when the CLI itself failed, OpenCloud answered 5xx
  * or not at all, or a durable operation failed or has an unknown outcome.
- * API 4xx answers, usage errors and cancelled operations are outcomes for
- * the caller, not faults.
+ * API 4xx answers, usage errors, a missing login, an invalid manifest and
+ * cancelled operations are outcomes for the caller, not faults.
  */
 export function isReportableFailure(error: unknown): boolean {
-  if (isCommanderError(error)) return false;
+  if (isCommanderError(error) || isCallerFailure(error)) return false;
   if (error instanceof ApiError) {
     return error.status >= 500 || record(error.operation)?.state === "failed";
   }
   if (error instanceof OperationTerminalError) {
     return error.operation.state === "failed";
   }
-  return !USAGE_ERROR_CODES.has(String(structuredCliError(error).error.code));
+  return !CALLER_OUTCOME_CODES.has(String(structuredCliError(error).error.code));
+}
+
+/**
+ * An error the bundler raises on purpose about the app's source: its own
+ * plain Error, a manifest schema error, or a YAML or JSON parse error. A
+ * TypeError, RangeError or system error from the bundler is a fault.
+ */
+export function isSourceValidationError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // Node raises system and internal errors as plain Errors too.
+  const raised = error as { syscall?: unknown; errno?: unknown; code?: unknown };
+  if (
+    typeof raised.syscall === "string" ||
+    typeof raised.errno === "number" ||
+    (typeof raised.code === "string" && raised.code.startsWith("ERR_"))
+  ) {
+    return false;
+  }
+  return (
+    error.constructor === Error ||
+    error.constructor === SyntaxError ||
+    error.name === "ZodError" ||
+    error.name.startsWith("YAML")
+  );
 }
 
 export function isTelemetryRoute(route: string | null): boolean {
@@ -236,84 +277,161 @@ export function isTelemetryRoute(route: string | null): boolean {
 export interface RedactionOptions {
   /** Replaced with `~`. */
   homeDirectory?: string | null | undefined;
+  /** Replaced with `<tmp>`; on Windows it can name the user. */
+  temporaryDirectory?: string | null | undefined;
   /** Argument, option and environment values, replaced with `[VALUE]`. */
   privateValues?: readonly string[] | undefined;
+  /** Whether paths ignore case, as on Windows and macOS; defaults to this platform. */
+  ignorePathCase?: boolean | undefined;
 }
 
-const openCloudToken = /\boc_[A-Za-z0-9][A-Za-z0-9_-]{7,}/g;
+const openCloudToken = /\b(?:oc|github_pat)_[A-Za-z0-9][A-Za-z0-9_-]{7,}/g;
 const basicCredential = /\bBasic\s+[A-Za-z0-9+/=._-]{8,}/gi;
 const secretName =
-  "[A-Za-z0-9_.-]*?(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|authorization|cookie|credential)[A-Za-z0-9_.-]*";
-const secretAssignment = new RegExp(`\\b(${secretName})=[^\\s"'&,;)]+`, "gi");
-const secretJsonValue = new RegExp(
-  `("${secretName}"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`,
-  "gi",
-);
-const urlPattern = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+  /password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|signature|authorization|cookie|credential/i;
+/**
+ * name=value, name: value, "name": "value" and { name: 'value' }. A name
+ * starts after a separator and has at most 64 characters, so matching stays
+ * linear on long runs of name characters.
+ */
+const assignment =
+  /(?<![A-Za-z0-9_.-])(["']?)([A-Za-z0-9_.-]{1,64})\1(\s*[:=]\s*)("(?:[^"\\\n]|\\.){0,2000}"|'(?:[^'\\\n]|\\.){0,2000}'|[^\s"'&,;)\]}]{1,2000})/g;
+const urlPattern = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+/** File systems that ignore case, where a path can be written either way. */
+const caseInsensitivePaths =
+  process.platform === "win32" || process.platform === "darwin";
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Values that can identify something; numbers, booleans and one or two characters cannot. */
+/** Values that can identify something; short numbers, booleans and one or two characters cannot. */
 function scrubbableValues(values: readonly string[]): string[] {
   return [...new Set(values)]
     .filter(
       (value) =>
         typeof value === "string" &&
         value.length >= 3 &&
-        !/^(?:[+-]?\d+(?:\.\d+)?|true|false|null)$/i.test(value),
+        !/^(?:[+-]?\d{1,5}(?:\.\d+)?|true|false|null)$/i.test(value),
     )
     .sort((left, right) => right.length - left.length);
 }
 
-/** Matches text only where it is not part of a longer word, number or name. */
-function standalone(text: string, nameCharacters = "A-Za-z0-9"): RegExp {
-  return new RegExp(
-    `(?<![${nameCharacters}])${escapeRegExp(text)}(?![${nameCharacters}])`,
-    "g",
+const wordCharacter = /[A-Za-z0-9]/;
+const pathNameCharacter = /[A-Za-z0-9._-]/;
+
+/**
+ * Replaces target wherever it is not part of a longer word or name. Plain
+ * searching has no size limit, unlike a regular expression of a long value.
+ */
+function replaceStandalone(
+  text: string,
+  target: string,
+  replacement: string,
+  nameCharacter: RegExp,
+  ignoreCase: boolean,
+): string {
+  // Case folding that changes lengths (rare Unicode) falls back to exact matching.
+  const fold =
+    ignoreCase &&
+    text.toLowerCase().length === text.length &&
+    target.toLowerCase().length === target.length;
+  const haystack = fold ? text.toLowerCase() : text;
+  const needle = fold ? target.toLowerCase() : target;
+  if (!needle) return text;
+  let result = "";
+  let copied = 0;
+  for (let index = haystack.indexOf(needle); index >= 0; ) {
+    const end = index + needle.length;
+    const before = text.charAt(index - 1);
+    const after = text.charAt(end);
+    if ((!before || !nameCharacter.test(before)) && (!after || !nameCharacter.test(after))) {
+      result += text.slice(copied, index) + replacement;
+      copied = end;
+      index = haystack.indexOf(needle, end);
+    } else {
+      index = haystack.indexOf(needle, index + 1);
+    }
+  }
+  return result + text.slice(copied);
+}
+
+/** A directory as written and as resolved, such as macOS's /private/var. */
+function directoryForms(directory: string | null | undefined): string[] {
+  if (!directory || directory.length < 2 || path.parse(directory).root === directory) {
+    return [];
+  }
+  let resolved = directory;
+  try {
+    resolved = realpathSync(directory);
+  } catch {
+    // A directory that does not exist is only matched as written.
+  }
+  return [...new Set([directory, resolved].flatMap((form) => [form, form.replaceAll("\\", "/")]))];
+}
+
+/** Strips URL credentials, query strings and fragments, keeping trailing punctuation. */
+function withoutUrlExtras(url: string): string {
+  const trailing = /[).,;:!\]]*$/.exec(url)?.[0] ?? "";
+  return (
+    url
+      .slice(0, url.length - trailing.length)
+      .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#@\s]*@/i, "$1")
+      .replace(/[?#].*$/, "") + trailing
   );
 }
 
-/** The home directory as written and as resolved, such as macOS's /private/var. */
-function homeDirectoryForms(home: string | null | undefined): string[] {
-  if (!home || home.length < 2 || path.parse(home).root === home) return [];
-  let resolved = home;
-  try {
-    resolved = realpathSync(home);
-  } catch {
-    // A home directory that does not exist is only matched as written.
-  }
-  return [...new Set([home, resolved].flatMap((form) => [form, form.replaceAll("\\", "/")]))]
-    .sort((left, right) => right.length - left.length);
+function redactAssignment(
+  match: string,
+  quote: string,
+  name: string,
+  separator: string,
+  value: string,
+): string {
+  if (!secretName.test(name) || /^\[(?:REDACTED|VALUE)\b/.test(value)) return match;
+  const redacted = value.startsWith('"')
+    ? '"[REDACTED]"'
+    : value.startsWith("'")
+      ? "'[REDACTED]'"
+      : "[REDACTED]";
+  return `${quote}${name}${quote}${separator}${redacted}`;
 }
 
-/** Strips URL credentials, query strings and fragments. */
-function withoutUrlExtras(url: string): string {
-  return url
-    .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#@\s]*@/i, "$1")
-    .replace(/[?#][^)\]]*/, "");
+/**
+ * Removes private values, the home and temporary directories, credentials
+ * and URL queries. The patterns are built once for all of a report's text.
+ */
+function createRedactor(options: RedactionOptions): (value: string) => string {
+  const ignorePathCase = options.ignorePathCase ?? caseInsensitivePaths;
+  const replacements: Array<(text: string) => string> = [
+    ...scrubbableValues(options.privateValues ?? []).map(
+      (secret) => (text: string) =>
+        replaceStandalone(text, secret, "[VALUE]", wordCharacter, true),
+    ),
+    // /home/alice, but not /home/alice.old or /mnt/home/alice. The longest
+    // form goes first, as the temporary directory can be in the home directory.
+    ...[
+      ...directoryForms(options.temporaryDirectory).map((form) => [form, "<tmp>"] as const),
+      ...directoryForms(options.homeDirectory).map((form) => [form, "~"] as const),
+    ]
+      .sort(([left], [right]) => right.length - left.length)
+      .map(
+        ([directory, replacement]) => (text: string) =>
+          replaceStandalone(text, directory, replacement, pathNameCharacter, ignorePathCase),
+      ),
+  ];
+  return (value) => {
+    let text = value;
+    for (const replace of replacements) text = replace(text);
+    return redactCredentials(text)
+      .replace(openCloudToken, "[REDACTED]")
+      .replace(basicCredential, "Basic [REDACTED]")
+      .replace(assignment, redactAssignment)
+      .replace(urlPattern, withoutUrlExtras);
+  };
 }
 
-/** Removes private values, the home directory, credentials and URL queries. */
 export function redactReportText(
   value: string,
   options: RedactionOptions = {},
 ): string {
-  let text = value;
-  for (const secret of scrubbableValues(options.privateValues ?? [])) {
-    text = text.replace(standalone(secret), "[VALUE]");
-  }
-  // /home/alice, but not /home/alice.old or /mnt/home/alice.
-  for (const home of homeDirectoryForms(options.homeDirectory)) {
-    text = text.replace(standalone(home, "A-Za-z0-9._-"), "~");
-  }
-  return redactCredentials(text)
-    .replace(openCloudToken, "[REDACTED]")
-    .replace(basicCredential, "Basic [REDACTED]")
-    .replace(secretJsonValue, '$1"[REDACTED]"')
-    .replace(secretAssignment, "$1=[REDACTED]")
-    .replace(urlPattern, withoutUrlExtras);
+  return createRedactor(options)(value);
 }
 
 /**
@@ -382,6 +500,7 @@ export interface ReportInput extends FailureContext {
   exitCode: number;
   env: NodeJS.ProcessEnv;
   homeDirectory: string | null;
+  temporaryDirectory?: string | null | undefined;
   stdoutIsTTY: boolean;
 }
 
@@ -491,17 +610,21 @@ export function buildErrorReport(
   input: ReportInput,
 ): CliErrorReport {
   const structured = structuredCliError(error).error;
-  const redact = (text: string) =>
-    redactReportText(text, {
-      homeDirectory: input.homeDirectory,
-      privateValues: input.privateValues,
-    });
+  const redact = createRedactor({
+    homeDirectory: input.homeDirectory,
+    temporaryDirectory: input.temporaryDirectory,
+    privateValues: input.privateValues,
+  });
   const name = errorName(error);
-  // Redaction can shorten a message, so it runs on more than the limit, but bounded.
+  // Redaction can shorten a message, so it runs on more than the limit, but
+  // bounded; a word cut at that bound is dropped, as it would no longer match.
+  const fullMessage = messageOf(error, structured);
+  const boundedMessage =
+    fullMessage.length > LIMITS.message * 4
+      ? fullMessage.slice(0, LIMITS.message * 4).replace(/\S*$/, "")
+      : fullMessage;
   const message = truncate(
-    redact(
-      withoutSourceExcerpts(messageOf(error, structured).slice(0, LIMITS.message * 4)),
-    ).trim() || "OpenCloud command failed",
+    redact(withoutSourceExcerpts(boundedMessage)).trim() || "OpenCloud command failed",
     LIMITS.message,
   );
   const cause = errorCause(error);
@@ -585,16 +708,27 @@ function collectStrings(value: unknown, into: string[]): void {
   }
 }
 
-/** The route, option names and private values of the command about to run. */
+/**
+ * The route, option names and private values of the command about to run.
+ * A value that names a path is also kept resolved, as messages show it.
+ */
 export function describeInvocation(
   command: Command,
+  cwd?: string,
 ): Pick<FailureContext, "route" | "optionNames" | "privateValues"> {
+  let base: string | null;
+  try {
+    base = cwd ?? process.env.INIT_CWD ?? process.cwd();
+  } catch {
+    // The working directory was removed; values are still removed as given.
+    base = null;
+  }
   const route: string[] = [];
   for (let current: Command | null = command; current?.parent; current = current.parent) {
     route.unshift(current.name());
   }
   const optionNames = new Set<string>();
-  const privateValues: string[] = [];
+  const values: string[] = [];
   for (let current: Command | null = command; current; current = current.parent) {
     for (const option of current.options) {
       const key = option.attributeName();
@@ -604,16 +738,18 @@ export function describeInvocation(
       // A --no-x and its --x share one value.
       if (option.negate ? value !== false : value === false) continue;
       optionNames.add(option.long ?? option.short ?? key);
-      if (!option.argChoices) collectStrings(value, privateValues);
+      if (!option.argChoices) collectStrings(value, values);
     }
   }
   command.registeredArguments.forEach((argument, index) => {
-    if (!argument.argChoices) collectStrings(command.processedArgs[index], privateValues);
+    if (!argument.argChoices) collectStrings(command.processedArgs[index], values);
   });
   return {
     route: route.length ? truncate(route.join(" "), LIMITS.route) : null,
     optionNames: [...optionNames].sort(),
-    privateValues,
+    privateValues: values.flatMap((value) =>
+      base && value && !value.includes("://") ? [value, path.resolve(base, value)] : [value],
+    ),
   };
 }
 
@@ -622,10 +758,112 @@ export interface FailureSource {
   context: FailureContext;
   /** The API the command used, else the one it is configured for. */
   apiUrl: string | null;
-  /** The bearer token the command used or was given for apiUrl. */
-  commandCredential(): string | null;
-  /** The stored account login for apiUrl, while its access token is valid. */
-  accountCredential(): Promise<string | null>;
+  /** A bearer token that belongs to apiUrl, or null to report anonymously. */
+  credential(): string | null;
+}
+
+/** A stored credential, as the credential store holds it. */
+export type StoredApiCredential =
+  | { kind: "account"; apiUrl: string; accessToken: string; accessExpiresAt: string }
+  | { kind: "workspace"; apiUrl: string; appId: string; token: string; expiresAt: string };
+
+export interface ReportAuthorityInput {
+  /** The API base URL of the command's last request. */
+  lastUsedApiUrl: string | null;
+  /** --api-url or OPENCLOUD_API_URL. */
+  apiUrlOption?: string | undefined;
+  /** --token or OPENCLOUD_TOKEN. */
+  tokenOption?: string | undefined;
+  /** The connected directory's binding. */
+  workspace: { apiUrl: string; appId: string } | null;
+  session: {
+    state: string;
+    apiUrl: string;
+    schemaVersion?: number;
+    appId?: string;
+    token?: string;
+  } | null;
+  defaultApiUrl: string;
+  /** Canonical API URL, or throws when it is not one. */
+  normalize: (apiUrl: string) => string;
+  /** The bearer token this process sent to an API. */
+  usedCredential: (apiUrl: string) => string | null;
+  /** Credentials this process already loaded or saved, newest last. */
+  knownCredentials: () => readonly StoredApiCredential[];
+  /** The stored account login, read without the OS credential service. */
+  storedAccount: (apiUrl: string) => StoredApiCredential | null;
+  now?: number | undefined;
+}
+
+/**
+ * The API a report goes to, the app it concerns, and its credential: the
+ * token the command sent to that API; else its --token where the command
+ * would send it; else the runtime session's; else a login or workspace
+ * credential this process already loaded; else a login kept in the
+ * protected file. The OS credential service is never opened for a report:
+ * it can block or prompt. Nothing that belongs to another API is used.
+ */
+export function resolveReportAuthority(
+  input: ReportAuthorityInput,
+): Pick<FailureSource, "apiUrl" | "credential"> &
+  Pick<FailureContext, "appId" | "hostedAgent"> {
+  const canonical = (value: string | null | undefined): string | null => {
+    if (!value) return null;
+    try {
+      return input.normalize(value);
+    } catch {
+      return null;
+    }
+  };
+  const session = input.session?.state === "ready" ? input.session : null;
+  const apiUrl = canonical(
+    input.lastUsedApiUrl ??
+      input.apiUrlOption ??
+      input.workspace?.apiUrl ??
+      input.session?.apiUrl ??
+      input.defaultApiUrl,
+  );
+  // client() sends --token to this API, and a ready session's token to its own.
+  const tokenApiUrl = canonical(
+    input.apiUrlOption ?? input.workspace?.apiUrl ?? input.session?.apiUrl,
+  );
+  const appId = input.workspace?.appId ?? session?.appId ?? null;
+  const valid = (credential: StoredApiCredential | null): string | null => {
+    if (!credential || canonical(credential.apiUrl) !== apiUrl) return null;
+    // Another app's credential would attribute the report to that app.
+    if (credential.kind === "workspace" && appId && credential.appId !== appId) return null;
+    const expiresAt =
+      credential.kind === "account" ? credential.accessExpiresAt : credential.expiresAt;
+    return Date.parse(expiresAt) > (input.now ?? Date.now()) + 5_000
+      ? credential.kind === "account"
+        ? credential.accessToken
+        : credential.token
+      : null;
+  };
+  return {
+    apiUrl,
+    appId,
+    hostedAgent: session?.schemaVersion === 2,
+    credential: () => {
+      if (!apiUrl) return null;
+      const used = input.usedCredential(apiUrl);
+      if (used) return used;
+      if (input.tokenOption && tokenApiUrl === apiUrl) return input.tokenOption;
+      if (
+        !input.workspace &&
+        session &&
+        typeof session.token === "string" &&
+        canonical(session.apiUrl) === apiUrl
+      ) {
+        return session.token;
+      }
+      for (const credential of [...input.knownCredentials()].reverse()) {
+        const token = valid(credential);
+        if (token) return token;
+      }
+      return valid(input.storedAccount(apiUrl));
+    },
+  };
 }
 
 export interface CrashReportRequest {
@@ -685,31 +923,10 @@ function sendFromChildProcess(request: CrashReportRequest): void {
   });
 }
 
-/** Resolves to null instead of waiting past the signal or rejecting. */
-function settleBy<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | null> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve(null);
-      return;
-    }
-    const abort = () => resolve(null);
-    signal.addEventListener("abort", abort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", abort);
-        resolve(value);
-      },
-      () => {
-        signal.removeEventListener("abort", abort);
-        resolve(null);
-      },
-    );
-  });
-}
-
 interface PreparedReport {
   settings: ErrorReportSettings;
-  source: FailureSource;
+  apiUrl: string | null;
+  token: string | null;
   body: string;
 }
 
@@ -744,22 +961,19 @@ export class ErrorReporter {
     try {
       const prepared = this.prepare(error, "cli_error");
       if (typeof prepared === "string") return prepared;
-      const { settings, source, body } = prepared;
+      const { settings, apiUrl, token, body } = prepared;
       if (settings.mode === "log") {
         this.stderr.write(`${body}\n`);
         return "logged";
       }
-      if (!source.apiUrl) return "no_destination";
+      if (!apiUrl) return "no_destination";
       this.showNoticeOnce(settings, (text) => this.stderr.write(text));
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       timer.unref?.();
       try {
-        const token =
-          source.commandCredential() ??
-          (await settleBy(source.accountCredential(), controller.signal));
         const response = await withCliHeaders(this.options.fetch)(
-          `${source.apiUrl}${ERROR_REPORT_ENDPOINT}`,
+          `${apiUrl}${ERROR_REPORT_ENDPOINT}`,
           {
             method: "POST",
             headers: {
@@ -791,17 +1005,16 @@ export class ErrorReporter {
       if (record(error)?.code === "EPIPE") return "not_reportable";
       const prepared = this.prepare(error, "cli_crash", origin);
       if (typeof prepared === "string") return prepared;
-      const { settings, source, body } = prepared;
+      const { settings, apiUrl, token, body } = prepared;
       const write = this.options.writeSync ?? ((text: string) => writeSync(2, text));
       if (settings.mode === "log") {
         write(`${body}\n`);
         return "logged";
       }
-      if (!source.apiUrl) return "no_destination";
+      if (!apiUrl) return "no_destination";
       this.showNoticeOnce(settings, write);
-      const token = source.commandCredential();
       (this.options.sendSync ?? sendFromChildProcess)({
-        url: `${source.apiUrl}${ERROR_REPORT_ENDPOINT}`,
+        url: `${apiUrl}${ERROR_REPORT_ENDPOINT}`,
         headers: {
           "content-type": "application/json",
           "user-agent": cliUserAgent(),
@@ -840,11 +1053,11 @@ export class ErrorReporter {
     if (settings.mode === "off") return "disabled";
     // One report per process, however it ends.
     this.reported = true;
-    const credential = source.commandCredential();
+    const token = source.credential();
     const privateValues = [
       ...source.context.privateValues,
       ...environmentValues(this.env),
-      ...(credential ? [credential] : []),
+      ...(token ? [token] : []),
     ];
     const report = buildErrorReport(error, {
       ...source.context,
@@ -857,9 +1070,10 @@ export class ErrorReporter {
       env: this.env,
       homeDirectory:
         this.options.homeDirectory === undefined ? os.homedir() : this.options.homeDirectory,
+      temporaryDirectory: process.platform === "win32" ? os.tmpdir() : null,
       stdoutIsTTY: this.options.stdoutIsTTY ?? process.stdout.isTTY === true,
     });
-    return { settings, source, body: serializeReport(report) };
+    return { settings, apiUrl: source.apiUrl, token, body: serializeReport(report) };
   }
 
   /** Before the first report sent by default, tell a person in a terminal once. */

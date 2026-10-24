@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { callerFailure } from "./caller-failure.js";
 import { withCliHeaders } from "./cli-http.js";
 import {
   CredentialStore,
@@ -46,12 +47,17 @@ interface TokenResponse {
 }
 
 export function normalizeApiUrl(value: string): string {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    throw callerFailure(error);
+  }
   if (!['https:', 'http:'].includes(url.protocol)) {
-    throw new Error("OpenCloud API URL must use HTTPS or HTTP for local testing");
+    throw callerFailure(new Error("OpenCloud API URL must use HTTPS or HTTP for local testing"));
   }
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error("OpenCloud API URL cannot contain credentials, query, or fragment");
+    throw callerFailure(new Error("OpenCloud API URL cannot contain credentials, query, or fragment"));
   }
   return url.href.replace(/\/+$/, "");
 }
@@ -148,14 +154,14 @@ export async function completeDeviceAuthorization(
       continue;
     }
     if (error.code === "access_denied") {
-      throw new Error("OpenCloud CLI login was cancelled in the browser");
+      throw callerFailure(new Error("OpenCloud CLI login was cancelled in the browser"));
     }
     if (error.code === "expired_token") {
-      throw new Error("OpenCloud CLI login expired; run opencloud login again");
+      throw callerFailure(new Error("OpenCloud CLI login expired; run opencloud login again"));
     }
     throw new Error(`OpenCloud CLI login failed: ${error.message}`);
   }
-  throw new Error("OpenCloud CLI login expired; run opencloud login again");
+  throw callerFailure(new Error("OpenCloud CLI login expired; run opencloud login again"));
 }
 
 export async function freshAccountCredential(
@@ -166,10 +172,10 @@ export async function freshAccountCredential(
   const normalizedApiUrl = normalizeApiUrl(apiUrl);
   const stored = await store.loadAccount(normalizedApiUrl);
   if (!stored) {
-    throw new Error("No OpenCloud account login was found. Run opencloud login.");
+    throw callerFailure(new Error("No OpenCloud account login was found. Run opencloud login."));
   }
   if (Date.parse(stored.credential.refreshExpiresAt) <= Date.now()) {
-    throw new Error("OpenCloud account login expired. Run opencloud login again.");
+    throw callerFailure(new Error("OpenCloud account login expired. Run opencloud login again."));
   }
   if (Date.parse(stored.credential.accessExpiresAt) > Date.now() + 60_000) {
     return stored;
@@ -185,11 +191,12 @@ export async function freshAccountCredential(
   );
   if (!response.ok) {
     const error = await oauthError(response);
-    throw new Error(
-      error.code === "invalid_grant"
-        ? "OpenCloud account login expired or was revoked. Run opencloud login again."
-        : `Could not refresh OpenCloud login: ${error.message}`,
-    );
+    if (error.code === "invalid_grant") {
+      throw callerFailure(
+        new Error("OpenCloud account login expired or was revoked. Run opencloud login again."),
+      );
+    }
+    throw new Error(`Could not refresh OpenCloud login: ${error.message}`);
   }
   const refreshed = accountCredential(
     {

@@ -3,9 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os";
 import path from "node:path";
 import { Command, CommanderError } from "commander";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import YAML from "yaml";
+import { z } from "zod";
+import { freshAccountCredential, normalizeApiUrl } from "./account-auth.js";
 import { ApiError } from "./api-client.js";
+import { callerFailure } from "./caller-failure.js";
 import { resetApiUsage, setCliVersion } from "./cli-http.js";
+import { CredentialStore, type AccountCredential } from "./credential-store.js";
+import { devDataRequest } from "./dev-data.js";
 import {
   ERROR_REPORT_ENDPOINT,
   ERROR_REPORT_NOTICE,
@@ -16,11 +22,15 @@ import {
   readTelemetrySettings,
   redactReportText,
   resolveErrorReportSettings,
+  isSourceValidationError,
+  resolveReportAuthority,
   serializeReport,
   type CrashReportRequest,
   type FailureSource,
+  type ReportAuthorityInput,
   type ReportInput,
 } from "./error-reports.js";
+import { backgroundJobsQuery } from "./jobs.js";
 import { MutationJournalError } from "./mutation-journal.js";
 import {
   CliContractError,
@@ -98,8 +108,7 @@ function source(overrides: Partial<FailureSource> = {}): FailureSource {
       hostedAgent: false,
     },
     apiUrl: "https://api.example.test",
-    commandCredential: () => "used-token",
-    accountCredential: async () => "account-token",
+    credential: () => "used-token",
     ...overrides,
   };
 }
@@ -228,10 +237,65 @@ describe("which failures are reported", () => {
       new CliContractError("INVALID_OPTION", "--limit must be an integer"),
       new MutationJournalError("APP_OWNER_IDEMPOTENCY_KEY_REQUIRED", "required"),
       new CliContractError("TOKEN_FILE_EXISTS", "exists"),
+      new CliContractError("MUTATION_APP_BINDING_MISMATCH", "another app"),
+      new CliContractError("DRAFT_VALIDATION_FAILED", "invalid source"),
+      new CliContractError("DEV_VERIFICATION_FAILED", "the app failed"),
       new OperationTerminalError({ id: OPERATION_ID, state: "cancelled" }),
+      callerFailure(new Error("No OpenCloud account login was found. Run opencloud login.")),
     ]) {
       expect(isReportableFailure(error), String(error)).toBe(false);
     }
+  });
+
+  it("treats the bundler's validation of the app's source as the caller's, but not its faults", () => {
+    const parse = (run: () => unknown) => {
+      try {
+        run();
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected a failure");
+    };
+    for (const error of [
+      new Error("No opencloud.yaml, opencloud.yml, or opencloud.json found"),
+      parse(() => YAML.parse("key: [unclosed")),
+      parse(() => JSON.parse("{")),
+      parse(() => z.object({ name: z.string() }).strict().parse({ name: 1 })),
+    ]) {
+      expect(isSourceValidationError(error), String(error)).toBe(true);
+    }
+    for (const error of [
+      new TypeError("Cannot read properties of null (reading 'schemaVersion')"),
+      new RangeError("Invalid array length"),
+      Object.assign(new Error("EACCES: permission denied, open 'opencloud.yaml'"), { code: "EACCES", errno: -13, syscall: "open" }),
+      Object.assign(new Error("Premature close"), { code: "ERR_STREAM_PREMATURE_CLOSE" }),
+      "a thrown string",
+    ]) {
+      expect(isSourceValidationError(error), String(error)).toBe(false);
+    }
+  });
+
+  it("treats a missing login, a refused login and usage mistakes as the caller's", async () => {
+    const failure = async (run: () => unknown) => {
+      try {
+        await run();
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected a failure");
+    };
+    const store = new CredentialStore(
+      path.join(os.tmpdir(), `opencloud-no-login-${process.pid}`),
+      async () => null,
+    );
+    const missing = await failure(() => freshAccountCredential(store, "https://api.example.test"));
+    expect(missing).toMatchObject({ message: "No OpenCloud account login was found. Run opencloud login." });
+    expect(isReportableFailure(missing)).toBe(false);
+    expect(isReportableFailure(await failure(() => normalizeApiUrl("not a url")))).toBe(false);
+    expect(isReportableFailure(await failure(() => backgroundJobsQuery({ limit: "0" })))).toBe(false);
+    expect(isReportableFailure(await failure(() => devDataRequest("items", "create", { values: "{" })))).toBe(false);
+    // The same message from a fault elsewhere is still reported.
+    expect(isReportableFailure(new Error("No OpenCloud account login was found. Run opencloud login."))).toBe(true);
   });
 });
 
@@ -272,17 +336,81 @@ describe("redaction", () => {
     expect(text).toContain("/home/alicea/elsewhere");
   });
 
+  it("removes quoted, colon-separated and inspected secret values", () => {
+    const text = redactReportText(
+      [
+        'password="hunter2 with spaces" client_secret=\'quoted-secret\'',
+        "password: colon-secret x-api-key: header-secret",
+        "{ token: 'inspected-secret', name: 'kept' }",
+        '{"refreshToken":"json-secret"}',
+        "see https://api.example.test/a?x=1)trailing-secret, and (https://api.example.test/b?c=d).",
+      ].join("\n"),
+    );
+    for (const secret of [
+      "hunter2",
+      "quoted-secret",
+      "colon-secret",
+      "header-secret",
+      "inspected-secret",
+      "json-secret",
+      "trailing-secret",
+      "c=d",
+    ]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(text).toContain("password=\"[REDACTED]\"");
+    expect(text).toContain("{ token: '[REDACTED]', name: 'kept' }");
+    expect(text).toContain("(https://api.example.test/b).");
+  });
+
+  it("stays fast on long runs of name characters", () => {
+    for (const input of ["password.".repeat(1_111), "my-token-".repeat(900), `/${"a".repeat(4_000)}/token`]) {
+      const started = performance.now();
+      redactReportText(input, { privateValues: ["something-else"] });
+      expect(performance.now() - started).toBeLessThan(250);
+    }
+  });
+
   it("removes argument, option and environment values, but not inside other words", () => {
     expect(
       redactReportText(
-        "Refusing to overwrite /work/person@example.com.json for app Family tasks in web, a webhook, after 900 ms (ab)",
-        { privateValues: ["person@example.com", "Family tasks", "web", "900", "ab"] },
+        "Refusing to overwrite /work/person@example.com.json for app Family tasks in web, a webhook, after 900 ms (ab), chat -1001234567890",
+        { privateValues: ["PERSON@example.com", "Family tasks", "web", "900", "ab", "-1001234567890"] },
       ),
-    ).toBe("Refusing to overwrite /work/[VALUE].json for app [VALUE] in [VALUE], a webhook, after 900 ms (ab)");
+    ).toBe(
+      "Refusing to overwrite /work/[VALUE].json for app [VALUE] in [VALUE], a webhook, after 900 ms (ab), chat [VALUE]",
+    );
   });
 
   it("never treats the filesystem root as the home directory", () => {
     expect(redactReportText("/usr/lib/node", { homeDirectory: "/" })).toBe("/usr/lib/node");
+  });
+
+  it("replaces the temporary directory where it can name the user", () => {
+    expect(
+      redactReportText("C:/Users/ALICE~1/AppData/Local/Temp/opencloud/x and C:/Users/alice/app", {
+        homeDirectory: "C:/Users/alice",
+        temporaryDirectory: "C:/Users/ALICE~1/AppData/Local/Temp",
+      }),
+    ).toBe("<tmp>/opencloud/x and ~/app");
+  });
+
+  it("matches paths in any case where the file system ignores it", () => {
+    const options = { homeDirectory: "C:/Users/alice" };
+    expect(redactReportText("c:/users/ALICE/app", { ...options, ignorePathCase: true })).toBe("~/app");
+    expect(redactReportText("c:/users/ALICE/app", { ...options, ignorePathCase: false })).toBe("c:/users/ALICE/app");
+  });
+
+  it("removes values of any length and leaves redacted text alone", () => {
+    const long = `{"title":"${"x".repeat(50_000)}"}`;
+    expect(redactReportText(`bad input ${long} here`, { privateValues: [long] })).toBe("bad input [VALUE] here");
+    expect(redactReportText("Authorization: Bearer abcdefghij")).toBe("Authorization: [REDACTED]");
+    expect(redactReportText("private_key=abc signature=def github_pat_11ABCDEFG0123456789_abcdefghij")).toBe(
+      "private_key=[REDACTED] signature=[REDACTED] [REDACTED]",
+    );
+    const started = performance.now();
+    redactReportText(`see ${"a-".repeat(40_000)}https://x.test/?q=1`);
+    expect(performance.now() - started).toBeLessThan(250);
   });
 });
 
@@ -382,15 +510,20 @@ describe("report payload", () => {
     );
     expect(yaml.message).toBe("Flow sequence must end with a ] at line 4, column 3:");
     expect(yaml.stack).not.toContain("s3cretvalue");
-    let json: unknown;
-    try {
-      JSON.parse('{"token": oops-s3cretvalue}');
-    } catch (error) {
-      json = error;
+    for (const source of ["[s3cret]", '{"token": oops-s3cretvalue}']) {
+      let json: unknown;
+      try {
+        JSON.parse(source);
+      } catch (error) {
+        json = error;
+      }
+      // V8 quotes the input, or part of it, in its message.
+      expect((json as Error).message).toContain("s3cre");
+      const report = buildErrorReport(json, reportInput());
+      expect(report.message).toMatch(/"\[CONTENT\]" is not valid JSON$/);
+      expect(report.message).not.toContain("s3cre");
+      expect(report.stack).not.toContain("s3cre");
     }
-    const report = buildErrorReport(json, reportInput());
-    expect(report.message).not.toContain("s3cretvalue");
-    expect(report.stack).not.toContain("s3cretvalue");
   });
 
   it("caps every field and the request body", () => {
@@ -431,7 +564,7 @@ describe("command invocation", () => {
       .option("--api-url <url>")
       .option("--token <token>");
     program.hook("preAction", (_root, action) => {
-      described = describeInvocation(action);
+      described = describeInvocation(action, "/home/alice/work");
     });
     program
       .command("app")
@@ -444,14 +577,155 @@ describe("command invocation", () => {
       .option("--method <method>")
       .action(() => undefined);
     await program.parseAsync(
-      ["--api-url", "https://api.example.test", "app", "dev", "start", "/home/alice/app", "--idempotency-key", "key-123456", "--no-follow"],
+      ["--api-url", "https://api.example.test", "app", "dev", "start", "my-app", "--idempotency-key", "key-123456", "--no-follow"],
       { from: "user" },
     );
     expect(described).toEqual({
       route: "app dev start",
       optionNames: ["--api-url", "--idempotency-key", "--no-follow"],
-      privateValues: expect.arrayContaining(["https://api.example.test", "key-123456", "/home/alice/app"]),
+      privateValues: expect.arrayContaining([
+        "https://api.example.test",
+        "key-123456",
+        "my-app",
+        // As messages show a relative directory.
+        "/home/alice/work/my-app",
+      ]),
     });
+    expect(described!.privateValues).not.toContain("/home/alice/work/https:/api.example.test");
+  });
+
+  it("still names the values when the working directory is gone", async () => {
+    const initCwd = process.env.INIT_CWD;
+    delete process.env.INIT_CWD;
+    const cwd = vi.spyOn(process, "cwd").mockImplementation(() => {
+      throw Object.assign(new Error("ENOENT: uv_cwd"), { code: "ENOENT" });
+    });
+    try {
+      let described: ReturnType<typeof describeInvocation> | null = null;
+      const program = new Command().exitOverride();
+      program.hook("preAction", (_root, action) => {
+        described = describeInvocation(action);
+      });
+      program.command("deploy").argument("<directory>").action(() => undefined);
+      await program.parseAsync(["deploy", "my-app"], { from: "user" });
+      expect(described).toEqual({ route: "deploy", optionNames: [], privateValues: ["my-app"] });
+    } finally {
+      cwd.mockRestore();
+      if (initCwd !== undefined) process.env.INIT_CWD = initCwd;
+    }
+  });
+});
+
+describe("report authority", () => {
+  const api = "https://api.example.test";
+  const other = "https://other.example.test";
+  const later = "2099-01-01T00:00:00.000Z";
+  function authority(overrides: Partial<ReportAuthorityInput> = {}) {
+    return resolveReportAuthority({
+      lastUsedApiUrl: null,
+      workspace: null,
+      session: null,
+      defaultApiUrl: "https://api.opencloud.example",
+      normalize: normalizeApiUrl,
+      usedCredential: () => null,
+      knownCredentials: () => [],
+      storedAccount: () => null,
+      ...overrides,
+    });
+  }
+
+  it("uses the API and token the command used", () => {
+    const used = authority({
+      lastUsedApiUrl: `${api}/`,
+      apiUrlOption: other,
+      tokenOption: "token-for-other",
+      usedCredential: (apiUrl) => (apiUrl === api ? "used-token" : null),
+    });
+    expect(used.apiUrl).toBe(api);
+    expect(used.credential()).toBe("used-token");
+  });
+
+  it("sends --token only to the API the command would send it to", () => {
+    expect(authority({ apiUrlOption: api, tokenOption: "flag-token" }).credential()).toBe("flag-token");
+    expect(
+      authority({ workspace: { apiUrl: api, appId: APP_ID }, tokenOption: "flag-token" }).credential(),
+    ).toBe("flag-token");
+    // The command used another API than --token's.
+    expect(authority({ lastUsedApiUrl: other, apiUrlOption: api, tokenOption: "flag-token" }).credential()).toBeNull();
+  });
+
+  it("uses a ready session's token for its own API, unless a directory is connected", () => {
+    const session = { state: "ready", schemaVersion: 2, apiUrl: api, appId: APP_ID, token: "session-token" };
+    const hosted = authority({ session });
+    expect(hosted).toMatchObject({ apiUrl: api, appId: APP_ID, hostedAgent: true });
+    expect(hosted.credential()).toBe("session-token");
+    expect(authority({ session, workspace: { apiUrl: api, appId: APP_ID } }).credential()).toBeNull();
+    expect(authority({ session: { ...session, state: "starting" } }).credential()).toBeNull();
+  });
+
+  it("never attributes a report to another app's workspace credential", () => {
+    const workspace = (appId: string, token: string) =>
+      ({ kind: "workspace", apiUrl: api, appId, token, expiresAt: later }) as const;
+    const bound = { apiUrl: api, appId: APP_ID };
+    expect(
+      authority({ workspace: bound, knownCredentials: () => [workspace(APP_ID, "this-app"), workspace("10000000-0000-4000-8000-0000000000ff", "other-app")] }).credential(),
+    ).toBe("this-app");
+    expect(
+      authority({ workspace: bound, knownCredentials: () => [workspace("10000000-0000-4000-8000-0000000000ff", "other-app")] }).credential(),
+    ).toBeNull();
+  });
+
+  it("falls back to credentials already loaded, then the protected-file login, for the same API only", () => {
+    const account = (apiUrl: string, accessToken: string, accessExpiresAt = later) =>
+      ({ kind: "account", apiUrl, accessToken, accessExpiresAt }) as const;
+    const loaded = authority({
+      apiUrlOption: api,
+      knownCredentials: () => [
+        { kind: "workspace", apiUrl: api, token: "older-workspace-token", expiresAt: later },
+        account(api, "expired-token", "2000-01-01T00:00:00.000Z"),
+        account(other, "other-api-token"),
+      ],
+    });
+    expect(loaded.credential()).toBe("older-workspace-token");
+    expect(authority({ apiUrlOption: api, storedAccount: () => account(api, "file-token") }).credential()).toBe("file-token");
+    expect(authority({ apiUrlOption: api, storedAccount: () => account(other, "file-token") }).credential()).toBeNull();
+  });
+
+  it("goes to the default API when nothing names one, and nowhere for an invalid one", () => {
+    expect(authority().apiUrl).toBe("https://api.opencloud.example");
+    expect(authority({ apiUrlOption: "not a url" }).apiUrl).toBeNull();
+    expect(authority({ apiUrlOption: "not a url" }).credential()).toBeNull();
+  });
+
+  it("reads a stored login for a report without the OS credential service", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "opencloud-report-login-"));
+    temporaryDirectories.push(directory);
+    let keyringLoads = 0;
+    const credential: AccountCredential = {
+      schemaVersion: 1,
+      kind: "account",
+      apiUrl: api,
+      issuer: "https://auth.example.test",
+      tokenEndpoint: "https://auth.example.test/token",
+      revocationEndpoint: "https://auth.example.test/revoke",
+      accessToken: "stored-access-token",
+      accessExpiresAt: later,
+      refreshToken: "stored-refresh-token",
+      refreshExpiresAt: later,
+    };
+    const store = new CredentialStore(directory, async () => {
+      keyringLoads += 1;
+      return null;
+    });
+    expect(store.accountFromFile(api)).toBeNull();
+    await store.saveAccount(credential);
+    keyringLoads = 0;
+    expect(store.accountFromFile(api)).toEqual(credential);
+    expect(store.accountFromFile(other)).toBeNull();
+    expect(keyringLoads).toBe(0);
+    expect(store.knownCredentials()).toEqual([credential]);
+    await store.deleteAccount(api);
+    expect(store.knownCredentials()).toEqual([]);
   });
 });
 
@@ -496,20 +770,18 @@ describe("reporting", () => {
     expect(stderr.writes).toEqual([]);
   });
 
-  it("falls back to the stored login, then reports anonymously", async () => {
+  it("reports anonymously without a credential for the API", async () => {
     const file = await settingsFile();
     const headers: Array<string | null> = [];
-    const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => {
-      headers.push(new Headers(init?.headers).get("authorization"));
-      return new Response(null, { status: 202 });
-    }) as typeof fetch;
-    await reporter({ file, fetch: fetcher, source: () => source({ commandCredential: () => null }) }).reportFailure(new Error("one"));
     await reporter({
       file,
-      fetch: fetcher,
-      source: () => source({ commandCredential: () => null, accountCredential: async () => null }),
-    }).reportFailure(new Error("two"));
-    expect(headers).toEqual(["Bearer account-token", null]);
+      source: () => source({ credential: () => null }),
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+        headers.push(new Headers(init?.headers).get("authorization"));
+        return new Response(null, { status: 202 });
+      }) as typeof fetch,
+    }).reportFailure(new Error("one"));
+    expect(headers).toEqual([null]);
   });
 
   it("never changes the outcome when the endpoint fails, refuses or hangs", async () => {
@@ -544,16 +816,6 @@ describe("reporting", () => {
     }).reportFailure(new Error("boom"));
     expect(hanging).toBe("failed");
     expect(Date.now() - started).toBeLessThan(2_000);
-    const slowLogin = await reporter({
-      file,
-      timeoutMs: 200,
-      source: () => source({ commandCredential: () => null, accountCredential: () => new Promise(() => undefined) }),
-      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
-        init?.signal?.throwIfAborted();
-        return new Response(null, { status: 202 });
-      }) as typeof fetch,
-    }).reportFailure(new Error("boom"));
-    expect(slowLogin).toBe("failed");
     expect(process.exitCode).toBe(exitCode);
   });
 

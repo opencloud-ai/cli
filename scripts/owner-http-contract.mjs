@@ -155,6 +155,8 @@ async function runCli(arguments_, options = {}) {
     "OPENCLOUD_SESSION_FILE",
     "OPENCLOUD_WORKSPACE_FILE",
     "OPENCLOUD_MUTATION_JOURNAL_DIR",
+    "OPENCLOUD_TELEMETRY",
+    "DO_NOT_TRACK",
   ]) {
     delete environment[name];
   }

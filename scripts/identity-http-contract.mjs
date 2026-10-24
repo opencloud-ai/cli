@@ -59,7 +59,7 @@ await writeFile(path.join(credentials, `${accountName}.json`), `${JSON.stringify
 
 async function run(args, { status = 0, token } = {}) {
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome };
-  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) delete env[key];
   if (token) env.OPENCLOUD_TOKEN = token;
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binary, "--api-url", apiUrl, ...args], { cwd: temporary, env, stdio: ["ignore", "pipe", "pipe"] });
