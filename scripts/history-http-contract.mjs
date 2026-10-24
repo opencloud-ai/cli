@@ -14,6 +14,8 @@ const missingId = "00000000-0000-4000-8000-000000000004";
 const userId = "00000000-0000-4000-8000-000000000005";
 const requests = [];
 const server = createServer((request, response) => {
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://localhost");
   requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams) });
   assert.equal(request.headers.authorization, "Bearer synthetic-history-authority");
@@ -46,7 +48,7 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 
 async function run(args, expectedStatus = 0) {
   const env = { ...process.env, OPENCLOUD_TOKEN: "synthetic-history-authority" };
-  for (const key of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL", "OPENCLOUD_MUTATION_JOURNAL_DIR"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL", "OPENCLOUD_MUTATION_JOURNAL_DIR", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) delete env[key];
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binary, "--api-url", `http://127.0.0.1:${server.address().port}`, ...args], { cwd: temporary, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";

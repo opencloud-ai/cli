@@ -14,6 +14,8 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
+import { callerFailure } from "./caller-failure.js";
+import { requestIdForError } from "./cli-http.js";
 
 export interface OperationOptions {
   idempotencyKey?: string;
@@ -128,9 +130,14 @@ export async function jsonOption(input: {
   }
   let value = input.defaultValue;
   if (input.inline !== undefined || input.file !== undefined) {
+    // A file the caller named that cannot be read is theirs to fix.
     const source =
       input.inline ??
-      (await readFile(input.resolvePath(String(input.file)), "utf8"));
+      (await readFile(input.resolvePath(String(input.file)), "utf8").catch(
+        (error: unknown) => {
+          throw callerFailure(error);
+        },
+      ));
     try {
       value = JSON.parse(source);
     } catch (error) {
@@ -459,10 +466,16 @@ export async function downloadToFile(input: {
 const credentialPattern =
   /(?:\bBearer\s+\S+|\b(?:oc_(?:owner|agent|app)|sk|gh[pousr])[-_][A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/gi;
 
+/** Replaces bearer tokens, OpenCloud, provider and GitHub keys, and JWTs. */
+export function redactCredentials(value: string): string {
+  return value.replace(credentialPattern, "[REDACTED]");
+}
+
 function redactMessage(value: unknown): string {
-  return String(value ?? "OpenCloud command failed")
-    .replace(credentialPattern, "[REDACTED]")
-    .slice(0, 2_000);
+  return redactCredentials(String(value ?? "OpenCloud command failed")).slice(
+    0,
+    2_000,
+  );
 }
 
 function safeCode(value: unknown, fallback: string): string {
@@ -513,8 +526,48 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
       ? { requestId: body.requestId }
       : typeof nested.requestId === "string"
         ? { requestId: nested.requestId }
-        : {}),
+        : error.requestId
+          ? { requestId: error.requestId }
+          : {}),
   };
+}
+
+const causeCodePattern = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/**
+ * The first coded cause below an error, such as ECONNREFUSED, ENOTFOUND,
+ * CERT_HAS_EXPIRED or UND_ERR_CONNECT_TIMEOUT below fetch's "fetch failed".
+ */
+export function errorCause(
+  error: unknown,
+): { code: string; message: string | null } | null {
+  let current: unknown =
+    error && typeof error === "object"
+      ? (error as { cause?: unknown }).cause
+      : undefined;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const value = current as {
+      code?: unknown;
+      message?: unknown;
+      errors?: unknown;
+      cause?: unknown;
+    };
+    // Node reports a failed connection to several addresses as an AggregateError.
+    const first = Array.isArray(value.errors)
+      ? (value.errors[0] as { message?: unknown } | undefined)
+      : undefined;
+    if (typeof value.code === "string" && causeCodePattern.test(value.code)) {
+      const message =
+        typeof value.message === "string" && value.message
+          ? value.message
+          : typeof first?.message === "string" && first.message
+            ? first.message
+            : null;
+      return { code: value.code, message };
+    }
+    current = value.cause ?? first;
+  }
+  return null;
 }
 
 export function structuredCliError(error: unknown): {
@@ -560,6 +613,8 @@ export function structuredCliError(error: unknown): {
     error && typeof error === "object"
       ? (error as { code?: unknown; retryable?: unknown; message?: unknown })
       : {};
+  const cause = errorCause(error);
+  const requestId = requestIdForError(error);
   return {
     ok: false,
     error: {
@@ -568,6 +623,17 @@ export function structuredCliError(error: unknown): {
         error instanceof Error ? error.message : (candidate.message ?? error),
       ),
       retryable: candidate.retryable === true,
+      ...(cause
+        ? {
+            cause: {
+              code: cause.code,
+              ...(cause.message
+                ? { message: redactMessage(cause.message).slice(0, 500) }
+                : {}),
+            },
+          }
+        : {}),
+      ...(requestId ? { requestId } : {}),
     },
   };
 }

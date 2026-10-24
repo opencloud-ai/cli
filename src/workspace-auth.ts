@@ -3,6 +3,7 @@ import {
   freshAccountCredential,
   normalizeApiUrl,
 } from "./account-auth.js";
+import { callerFailure } from "./caller-failure.js";
 import {
   CredentialStore,
   type StoredCredential,
@@ -87,8 +88,10 @@ export async function freshWorkspaceCredential(
 ): Promise<StoredCredential<WorkspaceCredential>> {
   const binding = loadWorkspaceBinding(input.bindingFile);
   if (!binding) {
-    throw new Error(
-      "This directory is not connected to an OpenCloud app. Run opencloud app connect <app-id>.",
+    throw callerFailure(
+      new Error(
+        "This directory is not connected to an OpenCloud app. Run opencloud app connect <app-id>.",
+      ),
     );
   }
   const stored = await input.store.loadWorkspace(binding.apiUrl, binding.appId);

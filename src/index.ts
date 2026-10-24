@@ -45,6 +45,19 @@ import {
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
+import {
+  lastUsedApiUrl,
+  setCliVersion,
+  usedApiCredential,
+} from "./cli-http.js";
+import {
+  ErrorReporter,
+  TELEMETRY_SETTINGS_FILE,
+  describeInvocation,
+  isSourceValidationError,
+  resolveReportAuthority,
+  type FailureSource,
+} from "./error-reports.js";
 import { runtimeSessionTokenProvider } from "./runtime-session-token.js";
 import { doctorDiagnostics } from "./doctor.js";
 import {
@@ -131,8 +144,10 @@ import {
   structuredCliError,
   type OperationOptions,
 } from "./owner-parity.js";
+import { callerFailure, isCallerFailure } from "./caller-failure.js";
 
-const CLI_VERSION = "3.15.2";
+const CLI_VERSION = "3.16.0";
+setCliVersion(CLI_VERSION);
 
 const program = new Command()
   .name("opencloud")
@@ -165,6 +180,26 @@ const program = new Command()
 
 const credentialStore = new CredentialStore();
 
+/** What an error report may say about the running command; never values. */
+const invocation: {
+  route: string | null;
+  optionNames: readonly string[];
+  privateValues: readonly string[];
+  /** The last connected directory the command read. */
+  workspace: { apiUrl: string; appId: string } | null;
+  /** Its values are unknown, so nothing is sent. */
+  undescribed: boolean;
+} = { route: null, optionNames: [], privateValues: [], workspace: null, undescribed: false };
+
+program.hook("preAction", (_program, actionCommand) => {
+  try {
+    Object.assign(invocation, describeInvocation(actionCommand));
+  } catch {
+    // Report bookkeeping never stops a command.
+    invocation.undescribed = true;
+  }
+});
+
 function sessionFile(): string {
   return resolveSessionFile(
     program.opts<{ sessionFile?: string }>().sessionFile,
@@ -184,8 +219,54 @@ function availableSession(): OpenCloudSession | null {
 }
 
 function availableWorkspace(cwd?: string) {
-  return loadWorkspaceBinding(workspaceFile(cwd));
+  const binding = loadWorkspaceBinding(workspaceFile(cwd));
+  if (binding) {
+    invocation.workspace = { apiUrl: binding.apiUrl, appId: binding.appId };
+  }
+  return binding;
 }
+
+function quietly<T>(read: () => T): T | null {
+  try {
+    return read();
+  } catch {
+    return null;
+  }
+}
+
+/** Where an error report goes, what it concerns, and its credential. */
+function failureSource(): FailureSource {
+  const options = program.opts<{ apiUrl?: string; token?: string }>();
+  const authority = resolveReportAuthority({
+    lastUsedApiUrl: lastUsedApiUrl(),
+    apiUrlOption: options.apiUrl,
+    tokenOption: options.token,
+    workspace: invocation.workspace ?? quietly(() => availableWorkspace()),
+    session: quietly(() => availableSession()),
+    defaultApiUrl: DEFAULT_API_URL,
+    normalize: normalizeApiUrl,
+    usedCredential: usedApiCredential,
+    knownCredentials: () => credentialStore.knownCredentials(),
+    storedAccount: (apiUrl) => credentialStore.accountFromFile(apiUrl),
+  });
+  return {
+    context: {
+      route: invocation.route,
+      optionNames: invocation.optionNames,
+      privateValues: invocation.privateValues,
+      appId: authority.appId,
+      hostedAgent: authority.hostedAgent,
+    },
+    apiUrl: invocation.undescribed ? null : authority.apiUrl,
+    credential: authority.credential,
+  };
+}
+
+const errorReporter = new ErrorReporter({
+  settingsFile: path.join(credentialStore.configDirectory, TELEMETRY_SETTINGS_FILE),
+  source: failureSource,
+});
+errorReporter.installCrashMonitor();
 
 function targetApiUrl(cwd?: string): string {
   return (
@@ -203,9 +284,9 @@ function client(cwd?: string): OpenCloudClient {
   const apiUrl = options.apiUrl ?? binding?.apiUrl ?? legacy?.apiUrl;
   if (options.token) {
     if (!apiUrl) {
-      throw new Error(
+      throw callerFailure(new Error(
         "Pass --api-url with --token outside a connected workspace.",
-      );
+      ));
     }
     return new OpenCloudClient({ apiUrl, token: options.token });
   }
@@ -214,9 +295,9 @@ function client(cwd?: string): OpenCloudClient {
       options.apiUrl &&
       normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(binding.apiUrl)
     ) {
-      throw new Error(
+      throw callerFailure(new Error(
         `This workspace is connected to ${binding.apiUrl}; remove --api-url or reconnect it.`,
-      );
+      ));
     }
     let tokenPromise: Promise<string> | null = null;
     return new OpenCloudClient({
@@ -235,7 +316,7 @@ function client(cwd?: string): OpenCloudClient {
       options.apiUrl &&
       normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(legacy.apiUrl)
     ) {
-      throw new Error("The legacy session belongs to a different API URL.");
+      throw callerFailure(new Error("The legacy session belongs to a different API URL."));
     }
     return new OpenCloudClient({
       apiUrl: legacy.apiUrl,
@@ -244,13 +325,13 @@ function client(cwd?: string): OpenCloudClient {
         : { token: legacy.token }),
     });
   }
-  throw new Error(
+  throw callerFailure(new Error(
     legacy?.state === "awaiting_email_verification"
       ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
       : legacy?.state === "starting"
         ? "Onboarding has not completed. Re-run the same opencloud onboard command."
         : "Run opencloud login, then opencloud app connect <app-id> in this directory.",
-  );
+  ));
 }
 
 /**
@@ -317,7 +398,7 @@ async function managementAuthority(): Promise<{
       source: "session-file",
     };
   }
-  throw new Error("No OpenCloud account login was found. Run opencloud login.");
+  throw callerFailure(new Error("No OpenCloud account login was found. Run opencloud login."));
 }
 
 function requiredAccountCredential() {
@@ -473,9 +554,9 @@ async function ownerAccountLogin(
     options.apiUrl &&
     normalizeApiUrl(options.apiUrl) !== normalizeApiUrl(binding.apiUrl)
   ) {
-    throw new Error(
+    throw callerFailure(new Error(
       `This workspace is connected to ${binding.apiUrl}; remove --api-url or reconnect it.`,
-    );
+    ));
   }
   const apiUrl = normalizeApiUrl(targetApiUrl(cwd));
   if (!(await credentialStore.loadAccount(apiUrl))) return null;
@@ -687,9 +768,9 @@ async function readDevState(sourceRoot: string): Promise<LocalDevState | null> {
 async function requireDevState(sourceRoot: string): Promise<LocalDevState> {
   const state = await readDevState(sourceRoot);
   if (!state) {
-    throw new Error(
+    throw callerFailure(new Error(
       "No local development session was found. Run opencloud app dev start <directory> first.",
-    );
+    ));
   }
   return state;
 }
@@ -746,7 +827,13 @@ async function removeDevStateIfMatching(
  * artifact, not the local digest, identifies the release.
  */
 function localBundle(sourceRoot: string) {
-  return buildBundle(sourceRoot, { platformFrontend: true });
+  return buildBundle(sourceRoot, { platformFrontend: true }).catch(
+    (error: unknown) => {
+      // An invalid manifest or source tree is the caller's to fix, and its
+      // details describe their files; a bundler or system fault is reported.
+      throw isSourceValidationError(error) ? callerFailure(error) : error;
+    },
+  );
 }
 
 function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {
@@ -982,9 +1069,9 @@ async function synchronizeValidatedDraft(
       draftId: existingDraftId,
     });
     if (["deploying", "deployed", "discarded"].includes(existing.status)) {
-      throw new Error(
+      throw callerFailure(new Error(
         `The local dev draft is ${existing.status}; start a new dev session for the next change.`,
-      );
+      ));
     }
     draft = { id: existing.id, revision: existing.revision };
   } else {
@@ -1026,9 +1113,9 @@ async function synchronizeValidatedDraft(
       draftId: draft.id,
     });
     if (["deploying", "deployed", "discarded"].includes(current.status)) {
-      throw new Error(
+      throw callerFailure(new Error(
         `The source draft is ${current.status}; start a new workflow for the next change.`,
-      );
+      ));
     }
     revision = current.revision;
     const remoteFiles = await control.call("listDraftFiles", {
@@ -1562,10 +1649,12 @@ program
           next: "Already signed in. To sign in as someone else, run opencloud login --force. Otherwise run opencloud app list, then opencloud app connect <app-id> in the app directory.",
         });
         return;
-      } catch {
-        throw new Error(
+      } catch (error) {
+        const refused = new Error(
           "The stored login could not be refreshed. Run opencloud login --force to replace it.",
         );
+        // An expired or revoked login is the caller's to replace; an outage is not.
+        throw isCallerFailure(error) ? callerFailure(refused) : refused;
       }
     }
     if (existing) {
@@ -1718,9 +1807,9 @@ program
     const authority = await managementAuthority();
     const identity = await readIdentity(authority.control);
     if (!identity) {
-      throw new Error(
+      throw callerFailure(new Error(
         `${IDENTITY_UNSUPPORTED} Run opencloud auth status for the local login state.`,
-      );
+      ));
     }
     output({
       apiUrl: authority.apiUrl,
@@ -1747,14 +1836,14 @@ program
     const file = sessionFile();
     const stored = loadSession(file);
     if (stored?.state === "ready") {
-      throw new Error(
+      throw callerFailure(new Error(
         `This workspace is already connected to ${stored.appId}. Use another --session-file for a new project.`,
-      );
+      ));
     }
     if (stored?.state === "awaiting_email_verification") {
-      throw new Error(
+      throw callerFailure(new Error(
         "Email verification is already pending. Confirm it and run opencloud onboard-complete.",
-      );
+      ));
     }
     const request = {
       email: String(options.email).trim().toLowerCase(),
@@ -1768,18 +1857,18 @@ program
         stored.projectName !== request.projectName ||
         stored.visibility !== request.visibility)
     ) {
-      throw new Error(
+      throw callerFailure(new Error(
         "A different onboarding request is already pending in this session file. Re-run the original request or use another --session-file.",
-      );
+      ));
     }
     if (
       stored?.state === "starting" &&
       options.idempotencyKey &&
       options.idempotencyKey !== stored.idempotencyKey
     ) {
-      throw new Error(
+      throw callerFailure(new Error(
         "The pending onboarding request already has a retry key. Omit --idempotency-key or use another --session-file.",
-      );
+      ));
     }
     const idempotencyKey =
       options.idempotencyKey ??
@@ -1808,7 +1897,7 @@ program
     const file = sessionFile();
     const stored = loadSession(file);
     if (!stored) {
-      throw new Error("No OpenCloud onboarding session was found");
+      throw callerFailure(new Error("No OpenCloud onboarding session was found"));
     }
     if (stored.state === "ready") {
       output({
@@ -1823,9 +1912,9 @@ program
       return;
     }
     if (stored.state === "starting") {
-      throw new Error(
+      throw callerFailure(new Error(
         "The initial onboarding request has not completed. Re-run the same opencloud onboard command.",
-      );
+      ));
     }
     const response = parseOnboardingResponse(
       await new OpenCloudClient({ apiUrl: stored.apiUrl }).post(
@@ -1898,6 +1987,31 @@ program
           : null,
       }),
     );
+  });
+
+const telemetry = program
+  .command("telemetry")
+  .description("Inspect or change automatic error reports to OpenCloud");
+
+telemetry
+  .command("status")
+  .description("Show whether error reports are sent, and which setting decides")
+  .action(() => output(errorReporter.status()));
+
+telemetry
+  .command("enable")
+  .description("Send error reports to OpenCloud (the default)")
+  .action(() => {
+    errorReporter.configure(true);
+    output(errorReporter.status());
+  });
+
+telemetry
+  .command("disable")
+  .description("Stop sending error reports")
+  .action(() => {
+    errorReporter.configure(false);
+    output(errorReporter.status());
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
@@ -2030,7 +2144,7 @@ app
       activeDeploymentId?: string | null;
     };
     if (!appValue.activeDeploymentId) {
-      throw new Error("App has no active deployment");
+      throw callerFailure(new Error("App has no active deployment"));
     }
     const deployment = (await control.get(
       `/v1/apps/${appId}/deployments/${appValue.activeDeploymentId}`,
@@ -2161,7 +2275,7 @@ dev
     const previous = await readDevState(sourceRoot);
     const bundle = await localBundle(sourceRoot);
     if (previous && previous.appId !== bundle.manifest.appId) {
-      throw new Error("The app manifest no longer matches .opencloud/dev.json");
+      throw callerFailure(new Error("The app manifest no longer matches .opencloud/dev.json"));
     }
     const appId = bundle.manifest.appId;
     const context = await exactAppMutationContext(appId, sourceRoot);
@@ -2300,7 +2414,7 @@ dev
     const state = await requireDevState(sourceRoot);
     const bundle = await localBundle(sourceRoot);
     if (state.appId !== bundle.manifest.appId) {
-      throw new Error("The app manifest no longer matches .opencloud/dev.json");
+      throw callerFailure(new Error("The app manifest no longer matches .opencloud/dev.json"));
     }
     const context = await exactAppMutationContext(state.appId, sourceRoot);
     const upload = await planDraftUpload(context.control, sourceRoot, bundle);
@@ -2779,7 +2893,7 @@ dev
     try {
       body = JSON.parse(String(options.body));
     } catch {
-      throw new Error("--body must be valid JSON");
+      throw callerFailure(new Error("--body must be valid JSON"));
     }
     await outputReplayMutation(
       {
@@ -2817,7 +2931,7 @@ dev
     const state = await requireDevState(callerPath(directory));
     const limit = Number(options.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-      throw new Error("--limit must be an integer between 1 and 200");
+      throw callerFailure(new Error("--limit must be an integer between 1 and 200"));
     }
     output(
       await client(callerPath(directory)).call("listDevInvocations", {
@@ -2839,7 +2953,7 @@ dev
     const bundle = await localBundle(callerPath(directory));
     const limit = Number(options.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-      throw new Error("--limit must be an integer between 1 and 200");
+      throw callerFailure(new Error("--limit must be an integer between 1 and 200"));
     }
     output(
       await client(callerPath(directory)).call("listDevReceipts", {
@@ -2906,7 +3020,7 @@ dev
       parallelism !== undefined &&
       (!Number.isInteger(parallelism) || parallelism < 1 || parallelism > 10)
     ) {
-      throw new Error("--parallelism must be an integer between 1 and 10");
+      throw callerFailure(new Error("--parallelism must be an integer between 1 and 10"));
     }
     const intervalMs =
       parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
@@ -3079,12 +3193,12 @@ dev
     const localState = await readDevState(sourceRoot);
     const bundle = await localBundle(sourceRoot);
     if (!bundle.e2eTest) {
-      throw new Error(
+      throw callerFailure(new Error(
         `${OPEN_CLOUD_E2E_TEST_PATH} is required before promotion. Add the external E2E specification, sync, exercise every Function through its intended path (including enqueueing queue consumers), and verify the exact revision.`,
-      );
+      ));
     }
     if (localState && bundle.manifest.appId !== localState.appId) {
-      throw new Error("The app manifest no longer matches .opencloud/dev.json");
+      throw callerFailure(new Error("The app manifest no longer matches .opencloud/dev.json"));
     }
     const intervalMs =
       parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) *
@@ -3173,9 +3287,9 @@ dev
           );
         }
         if (localState && localState.artifactSha256 !== bundle.sha256) {
-          throw new Error(
+          throw callerFailure(new Error(
             "Local source differs from the active development revision. Run app dev sync, exercise every Function through its intended path, and verify again before promotion.",
-          );
+          ));
         }
         const sessionId = retained?.sessionId ?? localState?.sessionId;
         const draftId = retained?.draftId ?? localState?.draftId;
@@ -3342,10 +3456,15 @@ dev
           finalVerification.state !== "passed" ||
           finalVerification.deploymentId !== result.deployment.id
         ) {
-          throw new CliContractError(
+          const failure = new CliContractError(
             "VERIFICATION_FAILED",
             "Production verification failed; dev remains available for repair",
           );
+          // An app that failed its checks is the caller's to repair; anything else is a fault.
+          throw finalVerification.state === "failed" &&
+            finalVerification.deploymentId === result.deployment.id
+            ? callerFailure(failure)
+            : failure;
         }
         await run.checkpointStage({
           stage: "production_verified",
@@ -3669,10 +3788,12 @@ addOperationOptions(
         verificationId,
       });
       if (result.state !== "passed") {
-        throw new CliContractError(
+        const failure = new CliContractError(
           "VERIFICATION_FAILED",
           `OpenCloud verification ${result.id} finished in state ${result.state}`,
         );
+        // An app that failed its checks is the caller's to repair; anything else is a fault.
+        throw result.state === "failed" ? callerFailure(failure) : failure;
       }
       await outputAsync({
         ...(completed as Record<string, unknown>),
@@ -4328,9 +4449,9 @@ program
       binding?.appId ??
       (stored?.state === "ready" ? stored.appId : undefined);
     if (!appId) {
-      throw new Error(
+      throw callerFailure(new Error(
         "Pass --app-id or run opencloud app connect <app-id> in the target directory.",
-      );
+      ));
     }
     await mkdir(path.join(root, "frontend"), { recursive: true });
     await mkdir(path.join(root, "migrations"), { recursive: true });
@@ -4597,9 +4718,9 @@ program
   .action(async (directory, options) => {
     const bundle = await localBundle(callerPath(directory));
     if (options.expectAppId && bundle.manifest.appId !== options.expectAppId) {
-      throw new Error(
+      throw callerFailure(new Error(
         `Manifest appId ${bundle.manifest.appId} does not match ${options.expectAppId}`,
-      );
+      ));
     }
     const maxFiles =
       options.maxFiles === undefined ? undefined : Number(options.maxFiles);
@@ -4607,12 +4728,12 @@ program
       maxFiles !== undefined &&
       (!Number.isSafeInteger(maxFiles) || maxFiles < 2)
     ) {
-      throw new Error("--max-files must be an integer of at least 2");
+      throw callerFailure(new Error("--max-files must be an integer of at least 2"));
     }
     if (maxFiles !== undefined && bundle.files.length > maxFiles) {
-      throw new Error(
+      throw callerFailure(new Error(
         `Early checkpoint has ${bundle.files.length} files, above --max-files ${maxFiles}`,
-      );
+      ));
     }
     output({
       valid: true,
@@ -5939,7 +6060,7 @@ alertRule
     );
   });
 
-program.parseAsync().catch((error: unknown) => {
+program.parseAsync().catch(async (error: unknown) => {
   if (
     error &&
     typeof error === "object" &&
@@ -5952,4 +6073,6 @@ program.parseAsync().catch((error: unknown) => {
   }
   process.stderr.write(`${JSON.stringify(structuredCliError(error))}\n`);
   process.exitCode = 1;
+  // After the output, without changing it or the exit code; at most 2.5 s.
+  await errorReporter.reportFailure(error).catch(() => undefined);
 });

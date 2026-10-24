@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { EdgeTransport } from "./edge-transport.js";
+import { callerFailure } from "./caller-failure.js";
 
 const appEdgeRecordSchema = z.object({
   id: z.uuid(),
@@ -46,9 +47,9 @@ function appTarget(app: AppEdgeRecord, requestPath: string): URL {
   const origin = new URL(app.appUrl);
   const target = new URL(requestPath, origin);
   if (target.origin !== origin.origin) {
-    throw new Error(
+    throw callerFailure(new Error(
       "App request path must stay within the canonical app origin",
-    );
+    ));
   }
   target.hash = "";
   return target;

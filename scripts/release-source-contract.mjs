@@ -137,6 +137,8 @@ async function bodyOf(request) {
 
 const server = createServer(async (request, response) => {
   const body = await bodyOf(request);
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://contract.test");
   state.requests.push({ method: request.method, path: url.pathname, query: url.search, body });
   const parts = url.pathname.split("/").filter(Boolean);
@@ -249,7 +251,7 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
 async function runCli(argumentsList, { cwd = temporary, status = 0 } = {}) {
   const environment = { ...process.env };
-  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE"]) {
+  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) {
     delete environment[key];
   }
   environment.OPENCLOUD_MUTATION_JOURNAL_DIR = path.join(temporary, "journal");

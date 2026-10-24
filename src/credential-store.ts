@@ -120,14 +120,35 @@ function parseWorkspace(raw: string): WorkspaceCredential {
   return value as WorkspaceCredential;
 }
 
+type Credential = AccountCredential | WorkspaceCredential;
+
 export class CredentialStore {
   readonly configDirectory: string;
+  /** Credentials this process loaded or saved, oldest first; never persisted. */
+  private readonly known = new Map<string, Credential>();
 
   constructor(
     configDirectory = defaultConfigDirectory(),
     private readonly keyringLoader: KeyringLoader = loadKeyring,
   ) {
     this.configDirectory = path.resolve(configDirectory);
+  }
+
+  /** The credentials this process already loaded or saved, newest last. */
+  knownCredentials(): Credential[] {
+    return [...this.known.values()];
+  }
+
+  /**
+   * The account login kept in the protected file, read without the OS
+   * credential service, which can block or prompt; null when there is none.
+   */
+  accountFromFile(apiUrl: string): AccountCredential | null {
+    try {
+      return this.readFallback(accountName(apiUrl), parseAccount)?.credential ?? null;
+    } catch {
+      return null;
+    }
   }
 
   accountLocation(apiUrl: string): string {
@@ -169,7 +190,7 @@ export class CredentialStore {
     return this.delete(workspaceName(apiUrl, appId));
   }
 
-  private async load<T>(
+  private async load<T extends Credential>(
     name: string,
     parse: (raw: string) => T,
   ): Promise<StoredCredential<T> | null> {
@@ -178,8 +199,10 @@ export class CredentialStore {
       try {
         const raw = new Entry(KEYRING_SERVICE, name).getPassword();
         if (raw) {
+          const credential = parse(raw);
+          this.remember(name, credential);
           return {
-            credential: parse(raw),
+            credential,
             backend: "keyring",
             location: `OS credential store (${KEYRING_SERVICE})`,
           };
@@ -188,6 +211,15 @@ export class CredentialStore {
         // Headless Linux environments commonly have no usable secret service.
       }
     }
+    const stored = this.readFallback(name, parse);
+    if (stored) this.remember(name, stored.credential);
+    return stored;
+  }
+
+  private readFallback<T>(
+    name: string,
+    parse: (raw: string) => T,
+  ): StoredCredential<T> | null {
     const file = this.fallbackFile(name);
     if (!existsSync(file)) return null;
     const metadata = lstatSync(file);
@@ -206,11 +238,17 @@ export class CredentialStore {
     };
   }
 
+  private remember(name: string, credential: Credential): void {
+    this.known.delete(name);
+    this.known.set(name, credential);
+  }
+
   private async save<T extends AccountCredential | WorkspaceCredential>(
     name: string,
     value: T,
   ): Promise<StoredCredential<T>> {
     const serialized = JSON.stringify(value);
+    this.remember(name, value);
     const Entry = await this.keyringLoader();
     if (Entry) {
       try {
@@ -245,6 +283,7 @@ export class CredentialStore {
   }
 
   private async delete(name: string): Promise<void> {
+    this.known.delete(name);
     const Entry = await this.keyringLoader();
     if (Entry) {
       try {

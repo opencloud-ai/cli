@@ -1,3 +1,5 @@
+import { withCliHeaders } from "./cli-http.js";
+
 export interface DoctorDiagnosticsInput {
   apiUrl: string | null;
   token: string | null;
@@ -30,7 +32,7 @@ export async function doctorDiagnostics(
   let reachable = false;
   if (input.apiUrl) {
     try {
-      const response = await request(
+      const response = await withCliHeaders(request)(
         `${input.apiUrl.replace(/\/+$/, "")}/version`,
         {
           ...(input.token

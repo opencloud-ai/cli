@@ -20,6 +20,8 @@ const requests = [];
 const server = createServer(async (request, response) => {
   let body = "";
   for await (const chunk of request) body += chunk;
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const record = {
     method: request.method, url: request.url, key: request.headers["idempotency-key"], body,
     authorization: request.headers.authorization,
@@ -65,7 +67,7 @@ async function signIn() {
 
 async function run(args, { cwd = temporary, token, journal, status = 0, target = apiUrl } = {}) {
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome };
-  for (const key of ["INIT_CWD", "OPENCLOUD_TOKEN", "OPENCLOUD_MUTATION_JOURNAL_DIR", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_TOKEN", "OPENCLOUD_MUTATION_JOURNAL_DIR", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_API_URL", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) delete env[key];
   if (token) env.OPENCLOUD_TOKEN = token;
   if (journal) env.OPENCLOUD_MUTATION_JOURNAL_DIR = journal;
   const result = await new Promise((resolve, reject) => {
