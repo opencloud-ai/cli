@@ -3,6 +3,7 @@ import https from "node:https";
 import { lookup } from "node:dns";
 import type { LookupFunction } from "node:net";
 import WebSocket from "ws";
+import { callerFailure } from "./caller-failure.js";
 
 export interface EdgeResponse {
   ok: boolean;
@@ -42,7 +43,7 @@ function publicTarget(publicOrigin: string, pathname: string): {
   assertHttpUrl(origin, "Public origin");
   const target = new URL(pathname, origin);
   if (target.origin !== origin.origin) {
-    throw new Error("Edge request path must stay within the public origin");
+    throw callerFailure(new Error("Edge request path must stay within the public origin"));
   }
   return { origin, target };
 }

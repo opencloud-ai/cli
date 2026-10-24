@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.15.2` in
+OpenCloud application skills pin an exact CLI release. To install `v3.16.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.15.2"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.15.2.tgz"
+OPENCLOUD_CLI_VERSION="v3.16.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.16.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -582,6 +582,46 @@ Function routes require SDK 2.3. Path parameters use `:name`, optional groups us
 braces (`/users{/:id}`), and named wildcards use `*path`. Query strings remain
 request data: `/pixel.jpg?param1=test123` matches `/pixel.jpg`; do not put the query
 string in the route pattern. Existing schema 2 artifacts remain readable.
+
+## Error reports
+
+When a command fails unexpectedly, the CLI sends OpenCloud a short error report
+so the problem can be found and fixed, and support can follow up. It reports
+CLI errors and crashes, API answers with status 500 or above, requests that got
+no answer, and durable operations that failed or whose outcome is unknown.
+Outcomes that are yours to resolve are not reported: other API answers
+(validation, permission, not found, conflict, limits), usage errors, a missing
+or expired login, an invalid manifest, an app that fails OpenCloud's
+validation or verification, `--help`, `--version` and `telemetry` commands.
+
+A report contains the command without its values (for example
+`app dev start`), the names of the options used, the error's name, code,
+message and stack trace, request and operation IDs, the HTTP status, the
+connected app's ID, the CLI version, operating system, architecture and runtime,
+and whether the CLI ran in CI, a terminal or the hosted Agent. It goes to the
+API the command used or is configured for (by default `api.opencloud.ai`) and
+is linked to your account when the command has a credential for that API;
+otherwise it is anonymous. The CLI never opens the OS credential store just to
+send a report. Before sending, it replaces your home directory with `~` and
+removes credentials, URL query strings, file excerpts, and argument, option
+and environment values from error messages. Reports never include argument or
+option values, file contents, source code, environment variables or
+credentials.
+
+Sending waits at most 2.5 seconds, is never retried, and never changes a
+command's output or exit code. In a terminal, the first report prints a
+one-time notice. To turn reports off, or check the setting:
+
+```bash
+"$OPENCLOUD_CLI" telemetry disable
+"$OPENCLOUD_CLI" telemetry status
+```
+
+`OPENCLOUD_TELEMETRY=0` (or `false`, `off`, `no`) turns reports off and `=1`
+(or `true`, `on`, `yes`) turns them on, over the saved setting. Any
+`DO_NOT_TRACK` value other than `0` turns them off and takes precedence.
+`OPENCLOUD_TELEMETRY=log` prints each report to standard error instead of
+sending it, so you can see exactly what would be sent.
 
 ## Develop
 

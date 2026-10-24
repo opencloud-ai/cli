@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { callerFailure } from "./caller-failure.js";
 
 const values = z.record(z.string(), z.unknown());
 const table = z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/, {
@@ -53,7 +54,7 @@ function parseValues(value: string | undefined): unknown {
   try {
     return JSON.parse(value) as unknown;
   } catch {
-    throw new Error("--values must be valid JSON");
+    throw callerFailure(new Error("--values must be valid JSON"));
   }
 }
 
@@ -77,9 +78,9 @@ export function devDataRequest(
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const location = issue?.path.length ? ` at ${issue.path.join(".")}` : "";
-    throw new Error(
+    throw callerFailure(new Error(
       `Invalid ${action} fixture${location}: ${issue?.message ?? "invalid input"}`,
-    );
+    ));
   }
   const input = parsed.data;
   const suffix =

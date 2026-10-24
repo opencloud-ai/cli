@@ -53,6 +53,8 @@ let dropNextInjection = false;
 const server = createServer(async (request, response) => {
   let body = "";
   for await (const chunk of request) body += chunk;
+  // Error reports from failing commands have their own contract.
+  if (request.url === "/v1/platform-errors/reports") return response.writeHead(202).end();
   const url = new URL(request.url, "http://localhost");
   requests.push({ method: request.method, path: url.pathname, query: Object.fromEntries(url.searchParams), key: request.headers["idempotency-key"], body });
   const send = (status, value) => {
@@ -100,7 +102,7 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 /** `connected` runs without --api-url or --token, as the directory's connection. */
 async function run(args, { status = 0, cwd = temporary, connected = null } = {}) {
   const env = { ...process.env, OPENCLOUD_MUTATION_JOURNAL_DIR: path.join(temporary, "journal") };
-  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) delete env[key];
   if (connected) Object.assign(env, { HOME: connected.home, XDG_CONFIG_HOME: connected.configHome });
   const authority = connected ? [] : ["--api-url", `http://127.0.0.1:${server.address().port}`, "--token", token];
   const result = await new Promise((resolve, reject) => {

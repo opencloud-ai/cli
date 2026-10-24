@@ -5,6 +5,7 @@ import {
   appEmailHistoryQuerySchema,
   injectDevEmailRequestSchema,
 } from "@opencloud/contracts";
+import { callerFailure } from "./caller-failure.js";
 
 export interface EmailHistoryOptions {
   cursor?: string | undefined;
@@ -47,7 +48,7 @@ export function emailHistoryQuery(options: EmailHistoryOptions) {
 export function devEmailCaptureLimit(value: string | number | undefined) {
   const limit = Number(value ?? 100);
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-    throw new Error("--limit must be an integer between 1 and 200");
+    throw callerFailure(new Error("--limit must be an integer between 1 and 200"));
   }
   return limit;
 }
@@ -132,9 +133,14 @@ async function contentValue(
   resolvePath: (value: string) => string,
 ): Promise<string | undefined> {
   if (inline !== undefined && file !== undefined) {
-    throw new Error(`${inlineFlag} and ${fileFlag} cannot be used together`);
+    throw callerFailure(new Error(`${inlineFlag} and ${fileFlag} cannot be used together`));
   }
-  return file === undefined ? inline : readFile(resolvePath(file), "utf8");
+  // A file the caller named that cannot be read is theirs to fix.
+  return file === undefined
+    ? inline
+    : readFile(resolvePath(file), "utf8").catch((error: unknown) => {
+        throw callerFailure(error);
+      });
 }
 
 function parseOrThrow<T>(
@@ -146,7 +152,7 @@ function parseOrThrow<T>(
   if (parsed.success) return parsed.data;
   const issue = parsed.error.issues[0];
   const location = issue?.path.length ? ` at ${issue.path.join(".")}` : "";
-  throw new Error(
+  throw callerFailure(new Error(
     `Invalid ${label}${location}: ${issue?.message ?? "invalid input"}`,
-  );
+  ));
 }

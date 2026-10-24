@@ -81,6 +81,8 @@ try {
   );
   const childEnvironment = { ...process.env };
   delete childEnvironment.INIT_CWD;
+  // These failures have no fake API; never report them to a real installation.
+  childEnvironment.OPENCLOUD_TELEMETRY = "0";
   const version = run(binary, ["--cli-version"], {
     cwd: consumer,
     env: childEnvironment,
