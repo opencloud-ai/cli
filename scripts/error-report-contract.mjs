@@ -326,9 +326,12 @@ try {
     [["app", "restart", missingAppId, "--idempotency-key", "contract-mismatch-1"], { cwd: project }],
     [["app", "--help"]],
     [["--cli-version"]],
+    [["--version"]],
+    [["-v"]],
   ]) {
     const result = await reported(args, options);
-    const shown = args.includes("--help") || args.includes("--cli-version");
+    const shown = args.includes("--help") || args.includes("--cli-version") ||
+      args.includes("--version") || args.includes("-v");
     assert.equal(result.status, shown ? 0 : 1, `${args.join(" ")}\n${result.stderr}`);
     assert.equal(result.sent.length, 0, `${args.join(" ")} was reported`);
   }

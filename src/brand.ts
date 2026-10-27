@@ -96,7 +96,7 @@ export function commandName(): string {
 const INVOCATION = new RegExp(
   // Not part of a name or path, such as x-opencloud or bin/opencloud.
   "(?<![\\w./\\\\@:$-])opencloud" +
-    `(?= (?:${[...CLI_COMMANDS, "help", "--help", "--cli-version", "-V"].join("|")})(?![\\w-]))` +
+    `(?= (?:${[...CLI_COMMANDS, "help", "--help", "--cli-version", "--version", "-V", "-v"].join("|")})(?![\\w-]))` +
     // `opencloud` as inline code names the command itself.
     "|(?<=`)opencloud(?=`)",
   "g",

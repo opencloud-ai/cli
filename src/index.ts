@@ -149,14 +149,15 @@ import {
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
+import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.17.0";
+const CLI_VERSION = "3.18.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
   .name(commandName())
   .description("Agent- and human-facing client for the OpenCloud control plane")
-  .version(CLI_VERSION, "-V, --cli-version", "print the CLI version")
+  .version(CLI_VERSION, "-V, --cli-version", "print the CLI version (also --version or -v)")
   .exitOverride()
   .configureOutput({ writeErr: () => undefined })
   // Descriptions follow the brand before Commander wraps them to the width.
@@ -6089,20 +6090,25 @@ alertRule
     );
   });
 
-program.parseAsync().catch(async (error: unknown) => {
-  if (
-    error &&
-    typeof error === "object" &&
-    "code" in error &&
-    ["commander.helpDisplayed", "commander.version"].includes(
-      String(error.code),
-    )
-  ) {
-    return;
-  }
-  // Only the message and hint follow the brand; the report keeps the original.
-  process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
-  process.exitCode = 1;
-  // After the output, without changing it or the exit code; at most 2.5 s.
-  await errorReporter.reportFailure(error).catch(() => undefined);
-});
+if (asksForVersion(process.argv.slice(2))) {
+  // The same output as --cli-version.
+  process.stdout.write(`${CLI_VERSION}\n`);
+} else {
+  program.parseAsync().catch(async (error: unknown) => {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      ["commander.helpDisplayed", "commander.version"].includes(
+        String(error.code),
+      )
+    ) {
+      return;
+    }
+    // Only the message and hint follow the brand; the report keeps the original.
+    process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
+    process.exitCode = 1;
+    // After the output, without changing it or the exit code; at most 2.5 s.
+    await errorReporter.reportFailure(error).catch(() => undefined);
+  });
+}

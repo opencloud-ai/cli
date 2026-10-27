@@ -88,6 +88,10 @@ try {
     env: childEnvironment,
   });
   assert.equal(version.stdout.trim(), packageVersion);
+  for (const flag of ["--version", "-v"]) {
+    const alias = run(binary, [flag], { cwd: consumer, env: childEnvironment });
+    assert.equal(alias.stdout.trim(), packageVersion, flag);
+  }
   const help = run(binary, ["draft", "--help"], {
     cwd: consumer,
     env: childEnvironment,
