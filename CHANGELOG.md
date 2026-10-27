@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.18.0
+
+- Print the CLI version for `--version` and `-v` too, as `--cli-version` and
+  `-V` do, when they come before any command. People and agents try
+  `opencloud --version` first. After a command, `--version` still belongs to
+  that command, as in `init --version`.
+
 ## 3.17.0
 
 - Name an installation's own command and product in text people read. An
