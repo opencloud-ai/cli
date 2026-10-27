@@ -11,6 +11,13 @@
   files, the credential service and error reports keep OpenCloud's names, and
   error reports do not remove the brand's names as private values. Invalid
   values are ignored.
+- Name the uploaded files that are not part of the app when `deploy`, `app
+  dev start` or `app dev sync` keeps the app's source, since the app's admins
+  can download it: `Also kept with the app's source, which its admins can
+  download (not part of the app): sales-2026.csv. Add files you want to keep
+  private to .gitignore.` The note names up to ten files, those at the top of
+  the folder first, and the JSON results add `sourceOnlyFiles` (up to 100
+  paths) and `sourceOnlyFileCount`. Which files are uploaded is unchanged.
 
 ## 3.16.0
 

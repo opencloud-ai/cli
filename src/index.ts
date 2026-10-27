@@ -112,6 +112,9 @@ import {
   collectSourceTree,
   sha256Hex,
   SOURCE_TREE_MAX_BYTES,
+  sourceOnlyFiles,
+  sourceOnlyNote,
+  sourceOnlyResult,
   sourceTreeDigest,
   type SkippedSourceFile,
 } from "./source-tree.js";
@@ -858,6 +861,8 @@ interface DraftUpload {
   files: DraftFiles;
   /** Digest of the uploaded source set; null in bundle mode. */
   sourceSha256: string | null;
+  /** Uploaded files the bundle does not contain; empty in bundle mode. */
+  sourceOnlyFiles: string[];
 }
 
 async function bundleDraftFiles(
@@ -884,6 +889,11 @@ function printSkippedSource(skipped: SkippedSourceFile[]): void {
   );
 }
 
+/** The source-only files for a JSON result; absent when only the bundle travels. */
+function sourceOnlyFields(upload: DraftUpload): Partial<ReturnType<typeof sourceOnlyResult>> {
+  return upload.mode === "source" ? sourceOnlyResult(upload.sourceOnlyFiles) : {};
+}
+
 /** Chooses how a draft is uploaded, from what this API supports. */
 async function planDraftUpload(
   control: OpenCloudClient,
@@ -894,6 +904,7 @@ async function planDraftUpload(
     mode: "bundle",
     files: await bundleDraftFiles(sourceRoot, bundle),
     sourceSha256: null,
+    sourceOnlyFiles: [],
   });
   const contracts = await releaseContracts(control);
   const built = platformBuilt(bundle);
@@ -940,6 +951,8 @@ async function planDraftUpload(
     sourceSha256: sourceTreeDigest(
       [...files].map(([file, value]) => ({ path: file, sha256: value.sha256 })),
     ),
+    // The bundle's inputs include the author manifest it turns into opencloud.json.
+    sourceOnlyFiles: sourceOnlyFiles(files.keys(), [...bundle.files, ...bundle.sourceFiles]),
   };
 }
 
@@ -1047,6 +1060,8 @@ async function synchronizeValidatedDraft(
 }> {
   printBundleFiles(bundle.files);
   printBundleWarnings(bundle.warnings);
+  const note = sourceOnlyNote(upload.sourceOnlyFiles, platformBuilt(bundle));
+  if (note) process.stderr.write(`${note}\n`);
   if (
     run.checkpoint?.artifactSha256 &&
     run.checkpoint.artifactSha256 !== bundle.sha256
@@ -2399,6 +2414,7 @@ dev
             "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
             "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
           ].map((step) => brandText(step)),
+          ...sourceOnlyFields(upload),
         });
         await run.complete();
       },
@@ -2473,7 +2489,11 @@ dev
           revision: session.activeRevision.draftRevision,
         });
         await storeDevSession(sourceRoot, bundle.sha256, session);
-        await outputAsync({ session, validation: synchronized.validation });
+        await outputAsync({
+          session,
+          validation: synchronized.validation,
+          ...sourceOnlyFields(upload),
+        });
         await run.complete();
       },
     );
@@ -4667,7 +4687,11 @@ addOperationOptions(
             (started as { deployment?: unknown }).deployment,
           );
         }
-        await outputAsync(completed);
+        await outputAsync(
+          completed && typeof completed === "object" && !Array.isArray(completed)
+            ? { ...completed, ...sourceOnlyFields(upload) }
+            : completed,
+        );
         await run.complete();
       },
     );

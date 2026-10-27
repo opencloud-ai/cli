@@ -311,6 +311,18 @@ working tree, so each release can be recovered as source. The CLI honours
 `.gitignore` files and never uploads `.git`, `node_modules`, `.opencloud`, or
 `.env*`.
 
+The app's admins can download that source, so `deploy`, `app dev start`, and
+`app dev sync` name the uploaded files that are not part of the app, such as a
+spreadsheet left in the folder, on standard error:
+
+```text
+Also kept with the app's source, which its admins can download (not part of the app): sales-2026.csv. Add files you want to keep private to .gitignore.
+```
+
+The note names up to ten files, those at the top of the folder first. Their
+JSON results add `sourceOnlyFiles` (up to 100 paths, in the same order) and
+`sourceOnlyFileCount`; both are absent when only the bundle is uploaded.
+
 After a successful `deploy`, `app dev promote`, or `pull`, the CLI records the
 release a working copy is based on in `.opencloud/base.json`. The next
 `deploy` or `app dev start` sends it. If someone has released since, OpenCloud

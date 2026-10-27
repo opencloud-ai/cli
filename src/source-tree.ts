@@ -82,6 +82,57 @@ export async function collectSourceTree(root: string): Promise<SourceTree> {
   return { files, skipped };
 }
 
+/** How many source-only files the note names, and JSON results list. */
+export const SOURCE_ONLY_NOTE_LIMIT = 10;
+export const SOURCE_ONLY_RESULT_LIMIT = 100;
+
+/**
+ * Uploaded source files the app's bundle does not contain, such as notes or
+ * data files that travel only with the release source. Files at the top of
+ * the folder come first, as stray files usually sit there, then byte order.
+ */
+export function sourceOnlyFiles(
+  uploaded: Iterable<string>,
+  bundled: Iterable<string>,
+): string[] {
+  const app = new Set(bundled);
+  const depth = (file: string) => file.split("/").length;
+  return [...uploaded]
+    .filter((file) => !app.has(file))
+    .sort((left, right) => depth(left) - depth(right) || compareBytes(left, right));
+}
+
+/**
+ * Names the files the release source keeps beyond the app, since the app's
+ * admins can download that source; null when there are none.
+ */
+export function sourceOnlyNote(
+  files: readonly string[],
+  platformBuilt: boolean,
+): string | null {
+  if (!files.length) return null;
+  const more = files.length - SOURCE_ONLY_NOTE_LIMIT;
+  return (
+    "Also kept with the app's source, which its admins can download " +
+    (platformBuilt
+      ? "(not part of the app unless its frontend build uses them)"
+      : "(not part of the app)") +
+    `: ${files.slice(0, SOURCE_ONLY_NOTE_LIMIT).join(", ")}` +
+    `${more > 0 ? ` and ${more} more` : ""}. Add files you want to keep private to .gitignore.`
+  );
+}
+
+/** The same files for a JSON result: the first SOURCE_ONLY_RESULT_LIMIT and the count. */
+export function sourceOnlyResult(files: readonly string[]): {
+  sourceOnlyFiles: string[];
+  sourceOnlyFileCount: number;
+} {
+  return {
+    sourceOnlyFiles: files.slice(0, SOURCE_ONLY_RESULT_LIMIT),
+    sourceOnlyFileCount: files.length,
+  };
+}
+
 /** One digest for a whole file set, independent of collection order. */
 export function sourceTreeDigest(
   files: ReadonlyArray<{ path: string; sha256: string }>,
