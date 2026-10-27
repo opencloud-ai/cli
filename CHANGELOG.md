@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.17.0
 
 - Name an installation's own command and product in text people read. An
   installer wrapper such as `sprout` can set `OPENCLOUD_CLI_COMMAND=sprout`
