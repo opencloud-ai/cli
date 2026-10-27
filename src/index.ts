@@ -145,16 +145,19 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
+import { brandCliError, brandText, commandName } from "./brand.js";
 
 const CLI_VERSION = "3.16.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
-  .name("opencloud")
+  .name(commandName())
   .description("Agent- and human-facing client for the OpenCloud control plane")
   .version(CLI_VERSION, "-V, --cli-version", "print the CLI version")
   .exitOverride()
   .configureOutput({ writeErr: () => undefined })
+  // Descriptions follow the brand before Commander wraps them to the width.
+  .configureHelp({ styleDescriptionText: (text) => brandText(text) })
   .addOption(
     new Option("--api-url <url>", "Control-plane API URL").env(
       "OPENCLOUD_API_URL",
@@ -702,7 +705,7 @@ function printBundleWarnings(
   if (!warnings.length) return;
   process.stderr.write(
     `Bundle warnings (${warnings.length}):\n${warnings
-      .map((warning) => `  [${warning.code}] ${warning.message}`)
+      .map((warning) => `  [${warning.code}] ${brandText(warning.message)}`)
       .join("\n")}\n`,
   );
 }
@@ -1233,9 +1236,9 @@ async function synchronizeValidatedDraft(
     // The server resolved the author manifest differently (usually an unpinned
     // runtime.sdk.version). Keep the source but send the canonical manifest,
     // exactly as bundle mode does.
-    process.stderr.write(
+    process.stderr.write(brandText(
       `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI (${identity.comparison.manifestKeys.join(", ")}); storing the canonical opencloud.json with the release source.\n`,
-    );
+    ));
     const canonical: DraftFiles = new Map(upload.files);
     canonical.delete(bundle.sourceManifest);
     const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
@@ -1315,9 +1318,9 @@ async function validatedArtifactIdentity(
     validation.artifactSha256 &&
     current.revision === validation.revision
   ) {
-    process.stderr.write(
+    process.stderr.write(brandText(
       `OpenCloud's zlib compressed the same files differently from this runtime's (zlib ${process.versions.zlib}), so OpenCloud's digest ${validation.artifactSha256} identifies the release.\n`,
-    );
+    ));
     return { artifactSha256: validation.artifactSha256 };
   }
   return {
@@ -1363,7 +1366,7 @@ function printValidationErrors(
   if (!errors.length) return;
   process.stderr.write(
     `Validation errors (${errors.length}):\n${errors
-      .map((diagnostic) => `  [${diagnostic.code ?? "ERROR"}] ${diagnostic.path ? `${diagnostic.path}: ` : ""}${diagnostic.message}`)
+      .map((diagnostic) => `  [${diagnostic.code ?? "ERROR"}] ${diagnostic.path ? `${diagnostic.path}: ` : ""}${brandText(diagnostic.message)}`)
       .join("\n")}\n`,
   );
 }
@@ -1612,14 +1615,14 @@ async function persistOnboardingResponse(
       ...safe,
       credential: null,
       sessionFile: file,
-      next: "Give the user launchUrl, ask them to confirm the project email, then run opencloud onboard-complete. Do not print the session file.",
+      next: brandText("Give the user launchUrl, ask them to confirm the project email, then run opencloud onboard-complete. Do not print the session file."),
     };
   }
   return {
     ...safe,
     credential: null,
     sessionFile: file,
-    next: "Give the owner launchUrl. Email verification is still pending; run opencloud onboard-complete after they confirm.",
+    next: brandText("Give the owner launchUrl. Email verification is still pending; run opencloud onboard-complete after they confirm."),
   };
 }
 
@@ -1646,7 +1649,7 @@ program
             accessExpiresAt: fresh.credential.accessExpiresAt,
             refreshExpiresAt: fresh.credential.refreshExpiresAt,
           },
-          next: "Already signed in. To sign in as someone else, run opencloud login --force. Otherwise run opencloud app list, then opencloud app connect <app-id> in the app directory.",
+          next: brandText("Already signed in. To sign in as someone else, run opencloud login --force. Otherwise run opencloud app list, then opencloud app connect <app-id> in the app directory."),
         });
         return;
       } catch (error) {
@@ -1688,7 +1691,7 @@ program
         accessExpiresAt: account.accessExpiresAt,
         refreshExpiresAt: account.refreshExpiresAt,
       },
-      next: "Run opencloud app list, then opencloud app connect <app-id> in the app directory.",
+      next: brandText("Run opencloud app list, then opencloud app connect <app-id> in the app directory."),
     });
   });
 
@@ -1729,7 +1732,7 @@ auth
       } catch (error) {
         account = {
           state: "needs_login",
-          reason: error instanceof Error ? error.message : String(error),
+          reason: brandText(error instanceof Error ? error.message : String(error)),
         };
       }
     }
@@ -1785,9 +1788,11 @@ async function logout(): Promise<void> {
     legacyOnboardingSessionRemoved: legacyOnboardingSessionRemoved
       ? (legacyOnboardingSession?.state ?? true)
       : false,
-    next: binding
-      ? "The non-secret app binding remains. Run opencloud login to reconnect it later."
-      : "Run opencloud login to sign in again.",
+    next: brandText(
+      binding
+        ? "The non-secret app binding remains. Run opencloud login to reconnect it later."
+        : "Run opencloud login to sign in again.",
+    ),
   });
 }
 
@@ -2130,7 +2135,7 @@ app
         storedIn: connected.stored.location,
         expiresAt: connected.stored.credential.expiresAt,
       },
-      next: "Codex can now build, validate, preview, and deploy this app with the OpenCloud CLI.",
+      next: brandText("Codex can now build, validate, preview, and deploy this app with the OpenCloud CLI."),
     });
   });
 
@@ -2393,7 +2398,7 @@ dev
             "After edits run `opencloud app dev sync <directory>`.",
             "Ordinary Functions remain dormant until `app dev invoke` or a deliberate preview action calls them; enqueuing a declared job wakes its system consumer.",
             "Add isolated fixtures with `app dev data`, then verify and run `app dev promote`; promotion follows production verification and reports the live URL.",
-          ],
+          ].map((step) => brandText(step)),
         });
         await run.complete();
       },
@@ -6071,7 +6076,8 @@ program.parseAsync().catch(async (error: unknown) => {
   ) {
     return;
   }
-  process.stderr.write(`${JSON.stringify(structuredCliError(error))}\n`);
+  // Only the message and hint follow the brand; the report keeps the original.
+  process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
   process.exitCode = 1;
   // After the output, without changing it or the exit code; at most 2.5 s.
   await errorReporter.reportFailure(error).catch(() => undefined);

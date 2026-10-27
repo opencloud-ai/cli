@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Name an installation's own command and product in text people read. An
+  installer wrapper such as `sprout` can set `OPENCLOUD_CLI_COMMAND=sprout`
+  and `OPENCLOUD_CLI_PRODUCT_NAME=Sprout`; help, status lines, the `message`
+  and `hint` of structured errors, and `next` steps then say `Run sprout
+  login.` instead of naming an `opencloud` command that does not exist there.
+  Field names, error codes, API data, `OPENCLOUD_*` variables, `.opencloud`
+  files, the credential service and error reports keep OpenCloud's names, and
+  error reports do not remove the brand's names as private values. Invalid
+  values are ignored.
+
 ## 3.16.0
 
 - Send OpenCloud an error report when a command fails unexpectedly, so a

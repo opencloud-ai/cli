@@ -36,6 +36,26 @@ OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 "$OPENCLOUD_CLI" --cli-version
 ```
 
+## Installation wrappers
+
+An installation's own installer can run the CLI through a wrapper with its own
+command, such as `sprout`. Besides `OPENCLOUD_API_URL`, the wrapper sets the
+names people see:
+
+```bash
+export OPENCLOUD_CLI_PRODUCT_NAME="Sprout"
+export OPENCLOUD_CLI_COMMAND="sprout"
+```
+
+Help, status lines, and the CLI's sentences in JSON output, such as the
+`message` and `hint` of structured errors and `next` steps, then name that
+product and command, as in `Run sprout login.` Nothing a program reads
+changes: field names, error codes, API data, `OPENCLOUD_*` variables,
+`.opencloud` files, the credential service, and error reports keep OpenCloud's
+names. The product name takes 1–40 letters, digits, spaces, dots, or hyphens,
+starting with a letter or digit; the command takes a lowercase letter and up
+to 31 more lowercase letters, digits, or hyphens. An invalid value is ignored.
+
 ## Account login and workspace connection
 
 Sign in to an existing account through an explicit browser approval, then
