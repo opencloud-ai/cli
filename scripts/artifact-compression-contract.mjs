@@ -321,6 +321,12 @@ try {
   assert.ok(lastDraft().files.has("opencloud.yaml"));
   assert.ok(!lastDraft().files.has("opencloud.json"));
   assert.equal(JSON.parse(started.stdout).session.activeRevision.artifactSha256, serverDigest);
+  // Every uploaded file is part of this app, so the source carries nothing more.
+  assert.deepEqual(
+    { files: JSON.parse(started.stdout).sourceOnlyFiles, count: JSON.parse(started.stdout).sourceOnlyFileCount },
+    { files: [], count: 0 },
+  );
+  assert.doesNotMatch(started.stderr, /Also kept with the app's source/);
   assert.deepEqual(
     { artifactSha256: (await devState()).artifactSha256, serverArtifactSha256: (await devState()).serverArtifactSha256 },
     { artifactSha256: local, serverArtifactSha256: serverDigest },
@@ -328,7 +334,8 @@ try {
 
   // 2. dev sync follows a local change with OpenCloud's new digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v2</title>\n");
-  await runCli(["app", "dev", "sync", app]);
+  const sync = JSON.parse((await runCli(["app", "dev", "sync", app])).stdout);
+  assert.deepEqual({ files: sync.sourceOnlyFiles, count: sync.sourceOnlyFileCount }, { files: [], count: 0 });
   const synced = lastDraft().validatedDigest;
   assert.notEqual(synced, serverDigest);
   assert.equal((await devState()).serverArtifactSha256, synced);

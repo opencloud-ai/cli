@@ -895,6 +895,34 @@ describe("reporting", () => {
     expect(explicit.writes).toEqual([]);
   });
 
+  it("names an installer wrapper's brand in the notice, but not in reports", async () => {
+    const fetcher = (async () => new Response(null, { status: 202 })) as typeof fetch;
+    const terminal = memoryStderr(true);
+    await reporter({
+      file: await settingsFile(),
+      stderr: terminal.stream,
+      fetch: fetcher,
+      env: { OPENCLOUD_CLI_PRODUCT_NAME: "Sprout", OPENCLOUD_CLI_COMMAND: "sprout" },
+    }).reportFailure(new Error("x"));
+    expect(terminal.writes).toEqual([
+      `${ERROR_REPORT_NOTICE
+        .replace("OpenCloud CLI sends error reports to OpenCloud", "Sprout CLI sends error reports to Sprout")
+        .replace("`opencloud telemetry disable`", "`sprout telemetry disable`")}\n`,
+    ]);
+
+    // A brand's names are settings, not private values to remove.
+    const logged = async (env: NodeJS.ProcessEnv) => {
+      const stderr = memoryStderr();
+      await reporter({ file: await settingsFile(), stderr: stderr.stream, env: { ...env, OPENCLOUD_TELEMETRY: "log" } })
+        .reportFailure(new Error("The sprout app failed in OpenCloud"));
+      return JSON.parse(stderr.writes[0]!).reports[0] as { message: string; stack: string };
+    };
+    const branded = await logged({ OPENCLOUD_CLI_PRODUCT_NAME: "Sprout", OPENCLOUD_CLI_COMMAND: "app" });
+    expect(branded.message).toBe("The sprout app failed in OpenCloud");
+    expect(branded.stack).toContain("Error: The sprout app failed in OpenCloud\n");
+    expect(branded.message).toBe((await logged({})).message);
+  });
+
   it("reports a crash synchronously and only once", async () => {
     const file = await settingsFile();
     const sent: CrashReportRequest[] = [];

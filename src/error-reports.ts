@@ -14,6 +14,12 @@ import os from "node:os";
 import path from "node:path";
 import { CommanderError, type Command } from "commander";
 import { ApiError } from "./api-client.js";
+import {
+  COMMAND_VARIABLE,
+  PRODUCT_NAME_VARIABLE,
+  brandText,
+  resolveBrand,
+} from "./brand.js";
 import { isCallerFailure } from "./caller-failure.js";
 import {
   cliUserAgent,
@@ -524,13 +530,24 @@ function isCi(env: NodeJS.ProcessEnv): boolean {
   });
 }
 
+/**
+ * Settings rather than private values: the telemetry switch and an installer
+ * wrapper's brand names. Removing a brand's name would remove that word, such
+ * as "sprout", wherever a report uses it.
+ */
+const SETTING_VARIABLES = new Set([
+  "OPENCLOUD_TELEMETRY",
+  PRODUCT_NAME_VARIABLE,
+  COMMAND_VARIABLE,
+]);
+
 /** Values of OpenCloud's own environment variables, such as paths and URLs. */
 export function environmentValues(env: NodeJS.ProcessEnv): string[] {
   return Object.entries(env)
     .filter(
       ([name, value]) =>
         name.startsWith("OPENCLOUD_") &&
-        name !== "OPENCLOUD_TELEMETRY" &&
+        !SETTING_VARIABLES.has(name) &&
         typeof value === "string",
     )
     .map(([, value]) => value as string);
@@ -1088,7 +1105,7 @@ export class ErrorReporter {
     ) {
       return;
     }
-    write(`${ERROR_REPORT_NOTICE}\n`);
+    write(`${brandText(ERROR_REPORT_NOTICE, resolveBrand(this.env))}\n`);
     try {
       writeTelemetrySettings(settings.settingsFile, {
         ...settings.stored,

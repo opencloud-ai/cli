@@ -1,5 +1,6 @@
 import type { CredentialIdentity } from "@opencloud/contracts";
 import { ApiError, type OpenCloudClient } from "./api-client.js";
+import { brandText } from "./brand.js";
 
 /** Where the CLI found the credential a command used. */
 export type IdentitySource =
@@ -37,11 +38,11 @@ export async function signedInUser(
     const identity = await readIdentity(control);
     return identity
       ? { user: identity.user }
-      : { user: null, userUnavailable: IDENTITY_UNSUPPORTED };
+      : { user: null, userUnavailable: brandText(IDENTITY_UNSUPPORTED) };
   } catch (error) {
     return {
       user: null,
-      userUnavailable: error instanceof Error ? error.message : String(error),
+      userUnavailable: brandText(error instanceof Error ? error.message : String(error)),
     };
   }
 }

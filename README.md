@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.16.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.17.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.16.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.16.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.17.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.17.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -35,6 +35,26 @@ curl -fsSLo "$OPENCLOUD_CLI_DIR/checksums.txt" \
 OPENCLOUD_CLI="$OPENCLOUD_CLI_DIR/node_modules/.bin/opencloud"
 "$OPENCLOUD_CLI" --cli-version
 ```
+
+## Installation wrappers
+
+An installation's own installer can run the CLI through a wrapper with its own
+command, such as `sprout`. Besides `OPENCLOUD_API_URL`, the wrapper sets the
+names people see:
+
+```bash
+export OPENCLOUD_CLI_PRODUCT_NAME="Sprout"
+export OPENCLOUD_CLI_COMMAND="sprout"
+```
+
+Help, status lines, and the CLI's sentences in JSON output, such as the
+`message` and `hint` of structured errors and `next` steps, then name that
+product and command, as in `Run sprout login.` Nothing a program reads
+changes: field names, error codes, API data, `OPENCLOUD_*` variables,
+`.opencloud` files, the credential service, and error reports keep OpenCloud's
+names. The product name takes 1–40 letters, digits, spaces, dots, or hyphens,
+starting with a letter or digit; the command takes a lowercase letter and up
+to 31 more lowercase letters, digits, or hyphens. An invalid value is ignored.
 
 ## Account login and workspace connection
 
@@ -290,6 +310,18 @@ On a platform that keeps release source, every draft upload carries the whole
 working tree, so each release can be recovered as source. The CLI honours
 `.gitignore` files and never uploads `.git`, `node_modules`, `.opencloud`, or
 `.env*`.
+
+The app's admins can download that source, so `deploy`, `app dev start`, and
+`app dev sync` name the uploaded files that are not part of the app, such as a
+spreadsheet left in the folder, on standard error:
+
+```text
+Also kept with the app's source, which its admins can download (not part of the app): sales-2026.csv. Add files you want to keep private to .gitignore.
+```
+
+The note names up to ten files, those at the top of the folder first. Their
+JSON results add `sourceOnlyFiles` (up to 100 paths, in the same order) and
+`sourceOnlyFileCount`; both are absent when only the bundle is uploaded.
 
 After a successful `deploy`, `app dev promote`, or `pull`, the CLI records the
 release a working copy is based on in `.opencloud/base.json`. The next

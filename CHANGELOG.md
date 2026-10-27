@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.17.0
+
+- Name an installation's own command and product in text people read. An
+  installer wrapper such as `sprout` can set `OPENCLOUD_CLI_COMMAND=sprout`
+  and `OPENCLOUD_CLI_PRODUCT_NAME=Sprout`; help, status lines, the `message`
+  and `hint` of structured errors, and `next` steps then say `Run sprout
+  login.` instead of naming an `opencloud` command that does not exist there.
+  Field names, error codes, API data, `OPENCLOUD_*` variables, `.opencloud`
+  files, the credential service and error reports keep OpenCloud's names, and
+  error reports do not remove the brand's names as private values. Invalid
+  values are ignored.
+- Name the uploaded files that are not part of the app when `deploy`, `app
+  dev start` or `app dev sync` keeps the app's source, since the app's admins
+  can download it: `Also kept with the app's source, which its admins can
+  download (not part of the app): sales-2026.csv. Add files you want to keep
+  private to .gitignore.` The note names up to ten files, those at the top of
+  the folder first, and the JSON results add `sourceOnlyFiles` (up to 100
+  paths) and `sourceOnlyFileCount`. Which files are uploaded is unchanged.
+
 ## 3.16.0
 
 - Send OpenCloud an error report when a command fails unexpectedly, so a

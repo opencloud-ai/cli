@@ -7,9 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import * as tar from "tar";
 
-// Drives the built CLI against a fake control plane: full-source uploads, the
-// stale-release precondition and --force, the canonical-manifest fallback,
-// older APIs, base recording, pull, and frontends OpenCloud builds.
+// Drives the built CLI against a fake control plane: full-source uploads and
+// the files they carry beyond the app, the stale-release precondition and
+// --force, the canonical-manifest fallback, older APIs, base recording, pull,
+// and frontends OpenCloud builds.
 const root = path.resolve(import.meta.dirname, "..");
 const binary = path.join(root, "dist", "index.cjs");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "opencloud-release-source-contract-"));
@@ -282,6 +283,7 @@ await writeTree(app, {
   "package.json": "{\"name\":\"planner\"}\n",
   "frontend/src/main.ts": "console.log('planner');\n",
   "frontend/dist/index.html": "<!doctype html><title>Planner</title>\n",
+  "sales-2026.csv": "client,amount\nsynthetic,1\n",
   ".env": "SECRET=never-uploaded\n",
   "node_modules/left-pad/index.js": "module.exports = 1;\n",
 });
@@ -294,11 +296,19 @@ try {
   assert.match(state.localDigest, /^[a-f0-9]{64}$/);
 
   // 1. A first deploy uploads the whole working tree, sends no base, and records one.
+  //    It names the files that travel only with the source, which admins can download.
   await externalRelease({ "opencloud.json": "{}" });
-  await runCli(["deploy", app]);
+  const first = await runCli(["deploy", app]);
   assert.deepEqual([...lastDraft().files.keys()].sort(), [
-    ".gitignore", "frontend/dist/index.html", "frontend/src/main.ts", "opencloud.yaml", "package.json",
+    ".gitignore", "frontend/dist/index.html", "frontend/src/main.ts", "opencloud.yaml", "package.json", "sales-2026.csv",
   ]);
+  assert.match(first.stderr, /^Also kept with the app's source, which its admins can download \(not part of the app\): \.gitignore, package\.json, sales-2026\.csv, frontend\/src\/main\.ts\. Add files you want to keep private to \.gitignore\.$/m);
+  const deployed = JSON.parse(first.stdout);
+  assert.equal(deployed.operation.state, "succeeded");
+  assert.deepEqual(
+    { files: deployed.sourceOnlyFiles, count: deployed.sourceOnlyFileCount },
+    { files: [".gitignore", "package.json", "sales-2026.csv", "frontend/src/main.ts"], count: 4 },
+  );
   assert.equal(deployRequest().query, "");
   const base = JSON.parse(await readFile(path.join(app, ".opencloud", "base.json"), "utf8"));
   assert.equal(base.deploymentId, state.activeDeploymentId);
@@ -338,9 +348,11 @@ try {
   // 6. An API without release source receives only the bundle, with no base.
   state.contracts = { cliMutationJournal: 1 };
   await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v5');\n");
-  await runCli(["deploy", app]);
+  const bundleOnly = await runCli(["deploy", app]);
   assert.deepEqual([...lastDraft().files.keys()].sort(), ["frontend/dist/index.html", "opencloud.json"]);
   assert.equal(deployRequest().query, "");
+  assert.doesNotMatch(bundleOnly.stderr, /Also kept with the app's source/);
+  assert.equal("sourceOnlyFiles" in JSON.parse(bundleOnly.stdout), false);
   state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
 
   // 7. pull writes a release into an empty directory and records its base.
@@ -405,6 +417,8 @@ try {
     "frontend/src/main.ts", "opencloud.yaml", "package-lock.json", "package.json",
   ]);
   assert.doesNotMatch(builtDeploy.stderr, /canonical opencloud\.json/);
+  // The build can read any uploaded file, so the note does not call them unused.
+  assert.match(builtDeploy.stderr, /\(not part of the app unless its frontend build uses them\): package-lock\.json, package\.json, frontend\/src\/main\.ts\./);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, serverBuilt);
   const builtBase = JSON.parse(await readFile(path.join(built, ".opencloud", "base.json"), "utf8"));
   assert.equal(builtBase.deploymentId, state.activeDeploymentId);
@@ -440,7 +454,7 @@ try {
   assert.equal(JSON.parse(unsupported.stderr.trim().split("\n").at(-1)).error.code, "PLATFORM_BUILD_UNSUPPORTED");
   assert.equal(state.drafts.size, drafts);
 
-  process.stdout.write("Release source HTTP contract passed: full-source upload, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, and platform-built frontends.\n");
+  process.stdout.write("Release source HTTP contract passed: full-source upload and its source-only files, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, and platform-built frontends.\n");
 } finally {
   server.close();
   await rm(temporary, { recursive: true, force: true });
