@@ -13,6 +13,15 @@ const submission = agentTaskSubmissionSchema.parse({
 });
 
 describe("agent task admission contracts", () => {
+  it("accepts one instruction source and rejects unsafe or ambiguous executable paths", () => {
+    const executable = { ...definition, instructions: undefined, entrypoint: "functions/prepare/index.ts" };
+    expect(agentTaskDefinitionSchema.parse(executable).entrypoint).toBe(executable.entrypoint);
+    expect(agentTaskDefinitionSchema.safeParse({ ...executable, instructions: "also static" }).success).toBe(false);
+    expect(agentTaskDefinitionSchema.safeParse({ ...definition, instructions: undefined }).success).toBe(false);
+    for (const entrypoint of ["/tmp/task.ts", "../task.ts", "functions/../task.ts", "functions//task.ts", "functions/./task.ts", "C:\\task.ts"]) {
+      expect(agentTaskDefinitionSchema.safeParse({ ...executable, entrypoint }).success).toBe(false);
+    }
+  });
   it("accepts generic committed results while rejecting incomplete or invented receipts", () => {
     const receipt = { schemaVersion: 2, submissionKey: "capture-1", resultId: "evidence-1", committed: true };
     expect(agentTaskReceiptSchema.parse(receipt)).toEqual(receipt);
