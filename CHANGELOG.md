@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.19.0
+
+- Accept Agent tasks whose instructions come from code. A task in
+  `opencloud.yaml` can name a declared `access: system` Function as its
+  `entrypoint` instead of giving fixed `instructions`. The platform runs that
+  Function before each run and gives the Agent the instructions it returns.
+  Validation refuses a task that declares both or neither, or whose
+  `entrypoint` doesn't match exactly one system Function. Tasks with fixed
+  instructions work as before. Deploying a task with an `entrypoint` needs a
+  platform release that supports it.
+
 ## 3.18.0
 
 - Print the CLI version for `--version` and `-v` too, as `--cli-version` and

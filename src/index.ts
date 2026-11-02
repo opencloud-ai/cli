@@ -151,7 +151,7 @@ import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.18.0";
+const CLI_VERSION = "3.19.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()

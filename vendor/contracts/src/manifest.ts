@@ -194,6 +194,12 @@ export const migrationSchema = z
 
 export const functionAccessSchema = z.enum(["user", "public", "system"]);
 
+/** Latest scheduled UTC instant at or before the clock, including the exact
+ * minute boundary. Managed daily schedules retain their separate DST policy. */
+export function latestCronOccurrence(expression: string, now: Date, timezone = "Etc/UTC"): Date {
+  return CronExpressionParser.parse(expression, { currentDate: new Date(now.getTime() + 1), tz: timezone }).prev().toDate();
+}
+
 export const functionSchema = z
   .object({
     name: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
@@ -637,6 +643,13 @@ export const openCloudManifestSchema = z
       if (!manifest.functions.some(fn => fn.name === task.resultFunction)) {
         context.addIssue({ code: "custom", path: ["agentTasks", index, "resultFunction"],
           message: "Agent task result Function must be declared" });
+      }
+      if (task.entrypoint) {
+        const functions = manifest.functions.filter(fn => fn.entrypoint === task.entrypoint);
+        if (functions.length !== 1 || functions[0]?.access !== "system") {
+          context.addIssue({ code: "custom", path: ["agentTasks", index, "entrypoint"],
+            message: "Task entrypoint must match exactly one declared Function with access: system" });
+        }
       }
     }
     assertUnique(

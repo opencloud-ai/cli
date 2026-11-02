@@ -64,3 +64,15 @@ contracts merged since #378 (organisation billing, brand packs, organisation
 directory, and installation capabilities). Every vendored contract,
 typed-client, and bundler source file is byte-identical to that commit.
 Browser SDK 2.3.0 remains the local default.
+
+## CLI 3.19.0 executable Agent tasks
+
+`contracts/src/agent-tasks.ts`, `contracts/src/manifest.ts` and their tests are
+copied from platform commit `@@PLATFORM_COMMIT@@` (pull request #@@PLATFORM_PR@@),
+which lets an Agent task name a declared `access: system` Function as its
+`entrypoint` instead of static `instructions`. Those four files are
+byte-identical to that commit. The manifest file also carries that commit's
+`latestCronOccurrence` helper, which the CLI does not use. Every other vendored
+file stays as in the 3.14.0 snapshot (platform commit
+`f08e2e699c4b5b35df507525454cb93cf356368b`). Browser SDK 2.3.0 remains the
+local default.

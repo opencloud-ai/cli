@@ -25,7 +25,9 @@ export const agentTaskInputSchema = z.object({
 export const agentTaskDefinitionSchema = z.object({
   name,
   title: z.string().trim().min(1).max(120),
-  instructions: z.string().trim().min(1).max(16_000),
+  instructions: z.string().trim().min(1).max(16_000).refine(value => !value.includes("\0"), "Instructions cannot contain null characters").optional(),
+  entrypoint: z.string().min(1).max(240).refine(value => !value.startsWith("/") && !value.includes("\\")
+    && value.split("/").every(part => part !== ".." && part !== "." && part !== ""), "Expected a relative Function file path").optional(),
   inputSchema: agentTaskInputSchema,
   resultFunction: name,
   capture: z.literal("website_screenshot").optional(),
@@ -36,7 +38,9 @@ export const agentTaskDefinitionSchema = z.object({
   // retained so immutable stored admissions remain readable; no runtime path
   // uses it as a work or token ceiling.
   tokenLimit: z.number().int().nonnegative().optional(),
-}).strict();
+}).strict().refine(value => (value.instructions !== undefined) !== (value.entrypoint !== undefined), {
+  message: "Declare either instructions or an executable entrypoint, never both",
+});
 export type AgentTaskDefinition = z.infer<typeof agentTaskDefinitionSchema>;
 
 export const agentTaskSubmissionSchema = z.object({
@@ -115,6 +119,9 @@ export const agentTaskAdmissionSchema = z.object({
   environment: z.literal("production"),
   initiatingRunId: z.uuid().nullable().default(null),
   definition: agentTaskDefinitionSchema,
+  preparationFunction: name.optional(),
   submission: agentTaskSubmissionSchema,
-}).strict();
+}).strict().refine(value => Boolean(value.definition.entrypoint) === Boolean(value.preparationFunction), {
+  message: "Executable tasks require their captured preparation Function binding",
+});
 export type AgentTaskAdmission = z.infer<typeof agentTaskAdmissionSchema>;

@@ -23,6 +23,19 @@ const valid = {
 };
 
 describe("OpenCloud manifest", () => {
+  it("binds executable task files to one system Function in the same release", () => {
+    const task = { name: "summary", title: "Summary", entrypoint: "functions/prepare/index.ts", resultFunction: "save",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false } };
+    const preparation = { name: "prepare", entrypoint: task.entrypoint, access: "system" };
+    const save = { name: "save", entrypoint: "functions/save/index.ts", access: "system" };
+    const manifest = { ...valid, runtime: { sdk: { version: "2.5.0" } }, agentTasks: [task], functions: [preparation, save] };
+    expect(parseManifest(manifest).agentTasks?.[0]?.entrypoint).toBe(task.entrypoint);
+    expect(parseManifest(parseManifest(manifest))).toEqual(parseManifest(manifest));
+    for (const functions of [[save], [{ ...preparation, access: "public" }, save], [{ ...preparation, access: "user" }, save],
+      [preparation, { ...preparation, name: "duplicate" }, save]]) {
+      expect(() => parseManifest({ ...manifest, functions })).toThrow(/exactly one declared Function/);
+    }
+  });
   it("requires SDK 2.4 for search without changing older manifests", () => {
     const data = { search: [{ name: "notes", table: "notes", select: ["id", "title"], fullText: { column: "search_text", language: "simple" } }] };
     for (const version of ["2.0.0", "2.1.0", "2.2.0", "2.3.0"]) {
