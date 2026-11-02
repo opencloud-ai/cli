@@ -68,7 +68,7 @@ Browser SDK 2.3.0 remains the local default.
 ## CLI 3.19.0 executable Agent tasks
 
 `contracts/src/agent-tasks.ts`, `contracts/src/manifest.ts` and their tests are
-copied from platform commit `@@PLATFORM_COMMIT@@` (pull request #@@PLATFORM_PR@@),
+copied from platform commit `6854d1edef741987727cd33223f1394597171a0b` (pull request #480),
 which lets an Agent task name a declared `access: system` Function as its
 `entrypoint` instead of static `instructions`. Those four files are
 byte-identical to that commit. The manifest file also carries that commit's
