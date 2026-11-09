@@ -420,6 +420,7 @@ export async function downloadToFile(input: {
   response: Response;
   destination: string;
   force: boolean;
+  expected?: { bytes: number; sha256: string };
 }): Promise<{ output: string; size: number; sha256: string }> {
   if (!input.response.body) {
     throw new CliContractError(
@@ -428,17 +429,18 @@ export async function downloadToFile(input: {
     );
   }
   const destination = path.resolve(input.destination);
-  if (!input.force) {
-    await assertPathAbsent(destination, "OUTPUT_FILE_EXISTS");
-  }
-  await mkdir(path.dirname(destination), { recursive: true });
   const temporary = path.join(
     path.dirname(destination),
     `.${path.basename(destination)}.${process.pid}.${randomUUID()}.tmp`,
   );
   const digest = createHash("sha256");
   let size = 0;
+  let sha256 = "";
   try {
+    if (!input.force) {
+      await assertPathAbsent(destination, "OUTPUT_FILE_EXISTS");
+    }
+    await mkdir(path.dirname(destination), { recursive: true });
     const handle = await open(temporary, "wx", 0o600);
     const output = handle.createWriteStream({ autoClose: true });
     const source = Readable.fromWeb(
@@ -448,8 +450,15 @@ export async function downloadToFile(input: {
     source.on("data", (chunk: Buffer) => {
       size += chunk.length;
       digest.update(chunk);
+      if (input.expected && size > input.expected.bytes) {
+        source.destroy(new CliContractError("DOWNLOAD_INTEGRITY_FAILED", "Download exceeds its declared size"));
+      }
     });
     await pipeline(source, output);
+    sha256 = digest.digest("hex");
+    if (input.expected && (size !== input.expected.bytes || sha256 !== input.expected.sha256)) {
+      throw new CliContractError("DOWNLOAD_INTEGRITY_FAILED", "Download size or SHA-256 does not match the export; no output file was replaced");
+    }
     if (input.force) {
       await rename(temporary, destination);
     } else {
@@ -457,10 +466,11 @@ export async function downloadToFile(input: {
       await rm(temporary, { force: true });
     }
   } catch (error) {
+    if (!input.response.body.locked) await input.response.body.cancel().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
-  return { output: destination, size, sha256: digest.digest("hex") };
+  return { output: destination, size, sha256 };
 }
 
 const credentialPattern =

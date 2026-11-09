@@ -1,13 +1,16 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 /**
  * A fetch for the control-plane client that lets a JSON request wait as long
  * as its own signal allows. Global fetch abandons any response whose headers
  * take longer than 300 seconds, whatever the request's timeout, but a
  * validation that builds the frontend or a development verification can wait
- * longer. JSON POSTs therefore go through node:http(s); everything else, such
- * as downloads and multipart uploads, keeps using global fetch.
+ * longer. JSON and bodyless POSTs and streamed file uploads therefore go through
+ * node:http(s); downloads and multipart forms keep using global fetch.
+ * File uploads use backpressure and never collect their body in memory.
  *
  * Failures keep fetch's shape: an aborted request rejects with the signal's
  * reason, and a network failure with TypeError("fetch failed").
@@ -18,7 +21,8 @@ export async function slowResponseFetch(
 ): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
   const body = init.body;
-  if (method !== "POST" || typeof body !== "string" || input instanceof Request) {
+  const streaming = body instanceof ReadableStream;
+  if ((!streaming && (method !== "POST" || (body != null && typeof body !== "string"))) || input instanceof Request) {
     return fetch(input, init);
   }
   const url = new URL(String(input));
@@ -31,11 +35,17 @@ export async function slowResponseFetch(
   new Headers(init.headers).forEach((value, name) => {
     headers[name] = value;
   });
-  headers["content-length"] = String(Buffer.byteLength(body));
+  if (typeof body === "string") headers["content-length"] = String(Buffer.byteLength(body));
   return new Promise<Response>((resolve, reject) => {
     const fail = (error: unknown) =>
       reject(signal?.aborted ? signal.reason : new TypeError("fetch failed", { cause: error }));
     const request = send(url, { method, headers, ...(signal ? { signal } : {}) }, (response) => {
+      if (init.redirect === "error" && [301, 302, 303, 307, 308].includes(response.statusCode ?? 0)) {
+        response.destroy();
+        request.destroy();
+        fail(new Error("Redirects are not allowed for authenticated transfers"));
+        return;
+      }
       const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer) => chunks.push(chunk));
       response.once("error", fail);
@@ -64,6 +74,10 @@ export async function slowResponseFetch(
       });
     });
     request.once("error", fail);
-    request.end(body);
+    if (streaming) {
+      void pipeline(Readable.fromWeb(body as import("node:stream/web").ReadableStream), request).catch(fail);
+    } else {
+      request.end(body);
+    }
   });
 }

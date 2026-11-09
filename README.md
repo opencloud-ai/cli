@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.19.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.20.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.19.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.19.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.20.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.20.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -654,6 +654,49 @@ one-time notice. To turn reports off, or check the setting:
 `DO_NOT_TRACK` value other than `0` turns them off and takes precedence.
 `OPENCLOUD_TELEMETRY=log` prints each report to standard error instead of
 sending it, so you can see exactly what would be sent.
+
+## Export and import complete apps
+
+These commands require an installation with app portability. Exports contain
+the active release's source, artifact, full business database and managed files.
+The app needs retained release source and a reviewed `opencloud.portability.json`
+declaring user and file references. Limits are 2 GiB compressed and expanded,
+and five million total database rows. There are no partial exports.
+
+```bash
+opencloud app export create APP_ID --idempotency-key export-move-001
+opencloud app export download APP_ID EXPORT_ID --output app.zip
+# Sign in to the destination installation before importing.
+opencloud app import upload app.zip --idempotency-key upload-move-001
+opencloud app import get IMPORT_ID
+opencloud app import install IMPORT_ID --name "My app" --mappings users.json --idempotency-key install-move-001
+# Review the draft and configure secrets/connections before these explicit actions.
+opencloud app import publish IMPORT_ID --idempotency-key publish-move-001
+opencloud app portability enable NEW_APP_ID --idempotency-key enable-move-001
+```
+
+Set `--api-url` for each installation. Export creation returns a durable operation
+whose result includes `exportId`. Upload returns `id` for the import receipt.
+`users.json` maps source user UUIDs to confirmed destination user UUIDs; omit it
+only when no manual mapping is needed. Each import creates one new private app
+and draft, with full production data staged until publication. Development
+previews remain isolated. Publication keeps Functions and automatic work held
+until the separate enable action. Platform accounts, sharing and provider
+permissions are never transferred.
+
+Uploads and downloads stream. Downloads verify size and SHA-256 before saving a
+private file, and protect existing output unless `--force` is used. A corrupt
+download never replaces existing output. Reuse each action's retry key if its
+response is lost; export/publish/enable support `--no-follow` and operation polling.
+
+Use `app import inspect MANIFEST_URL` followed by `app import stage INTENT_ID
+--idempotency-key KEY` for a shared example. Use `app import from-url ZIP_URL
+--sha256 DIGEST --bytes SIZE --idempotency-key KEY` for a directly hosted HTTPS
+package. Keep private packages and signed URLs private. `app export get`,
+`app export discard`, `app import discard`, and `app portability get` inspect
+or clean up temporary packages and execution holds. Export links and uninstalled
+reviews expire after 24 hours; installed drafts retain data until publication
+or deletion of the new app.
 
 ## Develop
 

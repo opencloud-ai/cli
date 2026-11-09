@@ -50,6 +50,29 @@ describe("slow response fetch", () => {
     expect(global).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["/v1/app-install-intents/intent/package", "/v1/app-imports/import/publish"])(
+    "keeps bodyless %s POSTs on the long-response transport",
+    async (route) => {
+      vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("global fetch caps headers at 300 seconds"); }));
+      const origin = await listen((request, response) => {
+        expect(request.method).toBe("POST");
+        expect(request.url).toBe(route);
+        expect(request.headers["idempotency-key"]).toBe("package-retry-001");
+        let bytes = 0;
+        request.on("data", chunk => { bytes += chunk.length; });
+        request.on("end", () => {
+          expect(bytes).toBe(0);
+          response.end(JSON.stringify({ accepted: true }));
+        });
+      });
+      const response = await slowResponseFetch(origin + route, {
+        method: "POST", headers: { "idempotency-key": "package-retry-001" },
+        signal: AbortSignal.timeout(45 * 60 * 1_000),
+      });
+      expect(await response.json()).toEqual({ accepted: true });
+    },
+  );
+
   it("rejects like fetch when aborted or when the connection drops", async () => {
     const origin = await listen((request) => {
       if (request.url === "/drop") request.socket.destroy();

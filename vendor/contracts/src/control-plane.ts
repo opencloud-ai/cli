@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { appExportDownloadSchema, appImportReviewSchema, appInstallManifestSchema, appPackageDownloadSchema, installAppPackageRequestSchema, publicHttpsUrlSchema } from "./app-portability.js";
+export * from "./app-portability.js";
 import { organisationEmailDomainSchema, organisationHostSchema } from "./organisation-domains.js";
 import { appAudiencesSchema, appSharingViewSchema } from "./app-audiences.js";
 import { organisationWeeklyCapacitySchema, employeeAllowanceOverrideSchema, organisationWeekSchema } from "./organisation-capacity.js";
@@ -2704,6 +2706,90 @@ export const controlPlaneOperations = {
     output: onboardingOutput,
     bodyKey: "body",
     idempotency: "none",
+  }),
+  exportApp: operation({
+    method: "POST", path: "/v1/apps/{appId}/exports", summary: "Export the complete app",
+    description: "Creates a full ZIP of the live release source, artifact, business data and managed files. No partial export is available.",
+    auth: "bearer", scopes: ["owner"], input: appPath.extend({ body: z.object({ example: z.boolean().default(false) }).strict() }),
+    output: controlPlaneOperationSchema, bodyKey: "body", idempotency: "required",
+    mcp: { toolName: "export_app", title: "Export full app", description: "Prepare a complete private app package. Wait for the operation and download its exportId. Example mode is only for separately prepared fictional examples.", readOnlyHint:false, destructiveHint:false, idempotentHint:true, openWorldHint:false },
+  }),
+  downloadAppExport: operation({
+    method: "GET", path: "/v1/apps/{appId}/exports/{exportId}/content", summary: "Download a full app package",
+    description: "Downloads an authorized full export for 24 hours after creation.", auth:"bearer", scopes:["owner"],
+    input:appPath.extend({exportId:uuid}), output:z.unknown(), rawOutput:{contentType:"application/zip",description:"Full portable app ZIP."},idempotency:"none",
+  }),
+  getAppExport: operation({
+    method:"GET",path:"/v1/apps/{appId}/exports/{exportId}",summary:"Get an export download",
+    description:"Returns the size, SHA-256, expiry and authenticated browser download URL of a ready export. Never returns ZIP bytes or storage credentials.",
+    auth:"bearer",scopes:["owner"],input:appPath.extend({exportId:uuid}),output:appExportDownloadSchema,idempotency:"none",
+    mcp:{toolName:"get_app_export",title:"Get app export download",description:"After export_app succeeds, get its authenticated download link and checksum. ZIP bytes stay outside the conversation. The owner must sign in to download; no public storage URL is created.",readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  }),
+  deleteAppExport: operation({
+    method:"DELETE",path:"/v1/apps/{appId}/exports/{exportId}",summary:"Discard an app export download",
+    description:"Removes the temporary ZIP and frees its package slot; the original app is unchanged.",auth:"bearer",scopes:["owner"],
+    input:appPath.extend({exportId:uuid}),output:z.object({deleted:z.literal(true)}),idempotency:"optional",
+    mcp:{toolName:"delete_app_export",title:"Discard app export",description:"Discard a temporary export ZIP. The source app and its data stay intact.",readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false},
+  }),
+  inspectAppInstall: operation({
+    method:"POST",path:"/v1/app-install-intents",summary:"Review a public app install manifest",
+    description:"Pins the public listing and archive digest without creating an app.",auth:"user",scopes:[],
+    input:z.object({body:z.object({url:publicHttpsUrlSchema}).strict()}),bodyKey:"body",
+    output:z.object({id:uuid,manifest:appInstallManifestSchema,expiresAt:z.iso.datetime()}),idempotency:"none",
+    mcp:{toolName:"inspect_app_install",title:"Review shared app",description:"Inspect and pin a public install manifest before installing its full package.",readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true},
+  }),
+  stageAppInstall: operation({
+    method:"POST",path:"/v1/app-install-intents/{intentId}/package",summary:"Check a shared app package",
+    description:"Downloads the pinned ZIP and checks all data and file references before installation.",auth:"user",scopes:[],
+    input:z.object({intentId:uuid}),output:appImportReviewSchema,idempotency:"required",
+    mcp:{toolName:"stage_app_install",title:"Check shared app package",description:"Download the exact reviewed package and inspect its identity mappings. Does not publish or create an app.",readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:true},
+  }),
+  uploadAppImport: operation({
+    method:"POST",path:"/v1/app-imports",summary:"Inspect a full app ZIP",description:"Privately stages a complete app package for review. Expires after 24 hours unless installed.",
+    auth:"user",scopes:[],input:emptyBody,output:appImportReviewSchema,
+    rawBody:{contentTypes:["application/zip","application/octet-stream"],description:"Complete app ZIP, at most 2 GiB (also limited to 2 GiB expanded)."},idempotency:"required",
+  }),
+  getAppImportUpload: operation({
+    method:"GET",path:"/v1/app-imports/upload",summary:"Get the private package upload page",
+    description:"Returns the signed-in browser entry for local ZIP uploads and the current package limits. No upload credential is exposed.",
+    auth:"user",scopes:[],input:emptyBody,output:z.object({uploadPageUrl:z.url(),maxArchiveBytes:z.number(),maxExpandedBytes:z.number(),maxRows:z.number()}),idempotency:"none",
+    mcp:{toolName:"get_app_import_upload",title:"Upload a local app package",description:"Get the browser upload page for a ZIP on the user's device. Hosted MCP cannot read local paths or accept multi-gigabyte tool arguments. After upload, use the import ID in the page URL with get_app_import, then explicitly install and publish.",readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  }),
+  importAppFromUrl: operation({
+    method:"POST",path:"/v1/app-imports/from-url",summary:"Inspect a full app ZIP from HTTPS",
+    description:"Streams a reachable HTTPS ZIP into private staging, verifying its expected size and SHA-256 before full validation. Does not create or publish an app.",
+    auth:"user",scopes:[],input:z.object({body:appPackageDownloadSchema}),bodyKey:"body",output:appImportReviewSchema,idempotency:"required",
+    mcp:{toolName:"import_app",title:"Import full app package",description:"Stage a complete app ZIP from a reachable HTTPS URL, pinned to its SHA-256 and size. Treat the URL as private and never share it. Review all identity mappings before install_app_import; publication and automation are separate explicit actions. For a local file use get_app_import_upload or the CLI.",readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:true},
+  }),
+  getAppImport: operation({
+    method:"GET",path:"/v1/app-imports/{importId}",summary:"Get an app import",description:"Returns the importing account's review and installation progress.",
+    auth:"user",scopes:[],input:z.object({importId:uuid}),output:appImportReviewSchema,idempotency:"none",
+    mcp:{toolName:"get_app_import",title:"Get app import",description:"Read your full app import's current state and required mappings.",readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  }),
+  installAppImport: operation({
+    method:"POST",path:"/v1/app-imports/{importId}/install",summary:"Install a full app copy",description:"Creates one new private app and editable draft. Original data remains staged until publication; all identities must be mapped explicitly.",
+    auth:"user",scopes:[],input:z.object({importId:uuid,body:installAppPackageRequestSchema}),bodyKey:"body",output:appImportReviewSchema,idempotency:"required",
+    mcp:{toolName:"install_app_import",title:"Install full app copy",description:"Install a reviewed package in your account as a new private draft with complete staged data. Never overwrites an existing app.",readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  }),
+  deleteAppImport: operation({
+    method:"DELETE",path:"/v1/app-imports/{importId}",summary:"Discard an uploaded package",description:"Deletes an uninstalled upload. Delete an installed draft's app to discard its staged data.",
+    auth:"user",scopes:[],input:z.object({importId:uuid}),output:z.object({deleted:z.literal(true)}),idempotency:"optional",
+    mcp:{toolName:"delete_app_import",title:"Discard app import",description:"Discard an uninstalled package and its staged data. An installed app must be deleted through the normal app deletion flow.",readOnlyHint:false,destructiveHint:true,idempotentHint:true,openWorldHint:false},
+  }),
+  publishAppImport: operation({
+    method:"POST",path:"/v1/app-imports/{importId}/publish",summary:"Publish an imported app privately",description:"Validates the draft and publishes with every staged record and file. Functions and automation remain held until enabled explicitly.",
+    auth:"user",scopes:[],input:z.object({importId:uuid}),output:controlPlaneOperationSchema,idempotency:"required",
+    mcp:{toolName:"publish_app_import",title:"Publish imported app privately",description:"Explicitly publish your imported app and all its staged data after review. Functions and automatic work stay paused.",readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:true},
+  }),
+  getAppPortability: operation({
+    method:"GET",path:"/v1/apps/{appId}/portability",summary:"Read app import status",description:"Shows staged import and Function/automation holds.",
+    auth:"bearer",scopes:["app:read"],input:appPath,output:z.object({importId:uuid.nullable(),effectsHeld:z.boolean(),state:z.string().nullable()}),idempotency:"none",
+    mcp:{toolName:"get_app_portability",title:"Get imported app status",description:"Check whether an app has staged imported data and whether Functions and automation remain held.",readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:false},
+  }),
+  enableImportedApp: operation({
+    method:"POST",path:"/v1/apps/{appId}/portability/enable",summary:"Enable imported app Functions and automation",description:"Explicitly releases the imported app's hold on production Functions and automatic effects.",
+    auth:"bearer",scopes:["owner"],input:appPath,output:controlPlaneOperationSchema,idempotency:"required",
+    mcp:{toolName:"enable_imported_app",title:"Enable imported app",description:"Enable production Functions and automatic work after reviewing the installed code, data, provider connections and secret configuration.",readOnlyHint:false,destructiveHint:false,idempotentHint:true,openWorldHint:true},
   }),
   createApp: operation({
     method: "POST",

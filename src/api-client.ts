@@ -23,7 +23,7 @@ export class OpenCloudClient extends PlatformClient {
       ...transferOptions,
       fetch: withCliHeaders(transferOptions.fetch ?? slowResponseFetch, attribution),
     });
-    this.transferFetch = withCliHeaders(transferOptions.fetch, attribution);
+    this.transferFetch = withCliHeaders(transferOptions.fetch ?? slowResponseFetch, attribution);
   }
 
   private async transferHeaders(): Promise<Record<string, string>> {
@@ -44,6 +44,7 @@ export class OpenCloudClient extends PlatformClient {
           ...(options.contentType ? { "content-type": options.contentType } : {}),
           "content-length": String(metadata.size), "idempotency-key": options.idempotencyKey ?? randomUUID() },
         body: Readable.toWeb(source) as BodyInit, duplex: "half",
+        redirect: "error",
         signal: AbortSignal.timeout(options.timeoutMs ?? 120_000),
       } as RequestInit & { duplex: "half" });
       const body = await transferResponseBody(response);
@@ -55,6 +56,7 @@ export class OpenCloudClient extends PlatformClient {
   async download(requestPath: string, timeoutMs = 120_000): Promise<Response> {
     const response = await this.transferFetch(`${this.transferOptions.apiUrl.replace(/\/$/, "")}${requestPath}`, {
       method: "GET", headers: { ...await this.transferHeaders(), accept: "*/*" },
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
