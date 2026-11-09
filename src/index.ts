@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  stat,
   rename,
   rm,
   writeFile,
@@ -22,6 +23,9 @@ import {
   OPEN_CLOUD_LOGO_DATA_URI,
   appOperationsPageQuerySchema,
   appDomainAddSchema,
+  appImportReviewSchema,
+  installAppPackageRequestSchema,
+  portabilityLimits,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
 import { ApiError, OpenCloudClient } from "./api-client.js";
@@ -151,7 +155,7 @@ import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.19.0";
+const CLI_VERSION = "3.20.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -656,7 +660,9 @@ async function outputDurableMutation(
     idempotencyKey: string,
   ) => Promise<unknown>,
 ): Promise<void> {
-  const context = await exactAppMutationContext(input.appId, input.cwd);
+  const context = input.ownerAccountLogin === true
+    ? await ownerMutationContext(input.appId, input.cwd)
+    : await exactAppMutationContext(input.appId, input.cwd);
   await context.journal.run(mutationIntent(input), async (run) => {
     run.failIfUnknown();
     let started: unknown;
@@ -1459,7 +1465,7 @@ async function followDurableOperation(
 }
 
 function idempotencyKey(options: { idempotencyKey?: string }): string {
-  const key = options.idempotencyKey?.trim() || randomUUID();
+  const key = options.idempotencyKey?.trim() ?? "";
   if (key.length < 8 || key.length > 200) {
     throw new CliContractError(
       "INVALID_IDEMPOTENCY_KEY",
@@ -2036,6 +2042,133 @@ telemetry
   });
 
 const app = program.command("app").description("Manage OpenCloud apps");
+
+// Upload + validation or install may each take several transfer windows.
+const packageTimeoutMs = 45 * 60 * 1_000;
+const appExport = app.command("export").description("Export complete app source, database and managed files");
+addOperationOptions(appExport.command("create").argument("<app-id>")
+  .option("--example", "export a separately prepared fictional example", false))
+  .action(async (appId, options: OperationOptions & { example: boolean }) => {
+    const body = { example: options.example };
+    await outputDurableMutation({
+      commandId: "opencloud app export create", appId, safeScope: { appId }, safeRequest: body,
+      explicitIdempotencyKey: options.idempotencyKey, ownerAccountLogin: true,
+    }, options, (control, key) => control.call("exportApp", { appId, body }, { idempotencyKey: key }));
+  });
+appExport.command("get").argument("<app-id>").argument("<export-id>")
+  .description("Get a ready export's checksum, expiry and authenticated download link")
+  .action(async (appId, exportId) => {
+    const control = (await ownerAccountLogin())?.control ?? client();
+    output(await control.call("getAppExport", { appId, exportId }));
+  });
+appExport.command("download").argument("<app-id>").argument("<export-id>")
+  .requiredOption("--output <path>", "save the ZIP to this private local file")
+  .option("--force", "replace an existing output only after verifying the full download", false)
+  .description("Stream a ZIP to disk and verify its size and SHA-256 before saving")
+  .action(async (appId, exportId, options) => {
+    const destination = callerPath(String(options.output));
+    if (options.force !== true) await assertPathAbsent(destination, "OUTPUT_FILE_EXISTS");
+    const control = (await ownerAccountLogin())?.control ?? client();
+    const info = await control.call("getAppExport", { appId, exportId });
+    // Use the authenticated API coordinate, never credentials on a returned URL.
+    const response = await control.download(`/v1/apps/${appId}/exports/${exportId}/content`, packageTimeoutMs);
+    output(await downloadToFile({ response, destination, force: options.force,
+      expected: { bytes: info.bytes, sha256: info.sha256 } }));
+  });
+appExport.command("discard").argument("<app-id>").argument("<export-id>")
+  .description("Discard the temporary export ZIP")
+  .option("--idempotency-key <key>", "override the journal's stable retry key")
+  .action(async (appId, exportId, options) => {
+    await outputReplayMutation({ commandId: "opencloud app export discard", appId,
+      safeScope: { appId, exportId }, safeRequest: { action: "discard-export" },
+      explicitIdempotencyKey: options.idempotencyKey, ownerAccountLogin: true,
+    }, (control, key) => control.call("deleteAppExport", { appId, exportId }, { idempotencyKey: key }));
+  });
+
+const appImport = app.command("import").description("Import a complete app into the signed-in account; install, publish and enable are separate actions");
+appImport.command("upload").argument("<zip-path>")
+  .requiredOption("--idempotency-key <key>", "stable retry key for this package")
+  .description("Stream a local ZIP (up to 2 GiB) into private review; creates no app")
+  .action(async (file, options) => {
+    const key = idempotencyKey(options);
+    const filename = callerPath(file);
+    const metadata = await stat(filename);
+    if (!metadata.isFile() || metadata.size <= 0 || metadata.size > portabilityLimits.archiveBytes) {
+      throw new CliContractError("INVALID_APP_PACKAGE", "Choose a non-empty ZIP file of at most 2 GiB");
+    }
+    const result = await (await managementClient()).uploadFile("POST", "/v1/app-imports", filename, {
+      contentType: "application/zip", idempotencyKey: key, timeoutMs: packageTimeoutMs,
+    });
+    output(appImportReviewSchema.parse(result));
+  });
+appImport.command("from-url").argument("<url>")
+  .requiredOption("--sha256 <digest>", "expected SHA-256 of the ZIP")
+  .requiredOption("--bytes <bytes>", "expected ZIP size in bytes")
+  .requiredOption("--idempotency-key <key>", "stable retry key for this package")
+  .description("Stage a reachable HTTPS ZIP with a pinned size and checksum")
+  .action(async (url, options) => {
+    const key = idempotencyKey(options);
+    output(await (await managementClient()).call("importAppFromUrl", {
+      body: { url, sha256: options.sha256, bytes: Number(options.bytes) },
+    }, { idempotencyKey: key, timeoutMs: packageTimeoutMs }));
+  });
+appImport.command("inspect").argument("<manifest-url>")
+  .description("Review and pin a shared example's manifest without creating an app")
+  .action(async (url) => output(await (await managementClient()).call("inspectAppInstall", { body: { url } })));
+appImport.command("stage").argument("<intent-id>")
+  .requiredOption("--idempotency-key <key>", "stable retry key for this package")
+  .description("Download and validate the exact reviewed example package")
+  .action(async (intentId, options) => {
+    const key = idempotencyKey(options);
+    output(await (await managementClient()).call("stageAppInstall", { intentId }, {
+      idempotencyKey: key, timeoutMs: packageTimeoutMs,
+    }));
+  });
+appImport.command("get").argument("<import-id>")
+  .description("Read package review, identity mappings and install progress")
+  .action(async (importId) => output(await (await managementClient()).call("getAppImport", { importId })));
+appImport.command("install").argument("<import-id>")
+  .requiredOption("--name <name>", "name of the new private app")
+  .option("--mappings <json-file>", "JSON object mapping every source user UUID to a destination user UUID")
+  .requiredOption("--idempotency-key <key>", "stable retry key for this installation")
+  .description("Install a reviewed full copy as a new private draft with staged data")
+  .action(async (importId, options) => {
+    const key = idempotencyKey(options);
+    const body = installAppPackageRequestSchema.parse({ name: options.name,
+      identityMappings: options.mappings ? JSON.parse(await readFile(callerPath(options.mappings), "utf8")) : {} });
+    output(await (await managementClient()).call("installAppImport", { importId, body }, {
+      idempotencyKey: key, timeoutMs: packageTimeoutMs,
+    }));
+  });
+appImport.command("publish").argument("<import-id>")
+  .description("Publish the private app with all staged data; Functions and automation remain held")
+  .requiredOption("--idempotency-key <key>", "stable retry key for this publication")
+  .option("--no-follow", "return after the durable operation is accepted")
+  .option("--interval <seconds>", "poll interval", "2")
+  .option("--timeout <seconds>", "maximum follow time", "900")
+  .action(async (importId, options: OperationOptions) => {
+    const key = idempotencyKey(options);
+    const control = await managementClient();
+    const started = await control.call("publishAppImport", { importId }, {
+      idempotencyKey: key, timeoutMs: packageTimeoutMs,
+    });
+    await outputOperation(control, started, options);
+  });
+appImport.command("discard").argument("<import-id>")
+  .description("Discard an uninstalled package; installed apps use normal app deletion")
+  .action(async (importId) => output(await (await managementClient()).call("deleteAppImport", { importId })));
+
+const appPortability = app.command("portability").description("Inspect and release an imported app's execution hold");
+appPortability.command("get").argument("<app-id>")
+  .action(async (appId) => output(await (await managementClient()).call("getAppPortability", { appId })));
+addOperationOptions(appPortability.command("enable").argument("<app-id>")
+  .description("Explicitly enable Functions and automation after reviewing the imported app"))
+  .action(async (appId, options: OperationOptions) => {
+    await outputDurableMutation({ commandId: "opencloud app portability enable", appId,
+      safeScope: { appId }, safeRequest: { action: "enable-imported-app" },
+      explicitIdempotencyKey: options.idempotencyKey, ownerAccountLogin: true,
+    }, options, (control, key) => control.call("enableImportedApp", { appId }, { idempotencyKey: key }));
+  });
 
 const domain = app.command("domain").description("Manage the app's single custom apex domain or subdomain");
 

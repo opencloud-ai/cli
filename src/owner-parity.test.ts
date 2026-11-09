@@ -1,8 +1,10 @@
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   stat,
@@ -257,6 +259,37 @@ describe("owner-parity CLI helpers", () => {
         force: false,
       }),
     ).rejects.toMatchObject({ code: "OUTPUT_FILE_EXISTS" });
+  });
+
+  it("checks package integrity before replacing output and removes failed temporary files", async () => {
+    const directory = await temporaryDirectory();
+    const destination = path.join(directory, "app.zip");
+    const bytes = "verified-content";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await writeFile(destination, "keep this");
+    for (const expected of [{ bytes: bytes.length, sha256: "0".repeat(64) }, { bytes: bytes.length - 1, sha256 }, { bytes: bytes.length + 1, sha256 }]) {
+      await expect(downloadToFile({ response: new Response(bytes), destination, force: true, expected }))
+        .rejects.toMatchObject({ code: "DOWNLOAD_INTEGRITY_FAILED" });
+      expect(await readFile(destination, "utf8")).toBe("keep this");
+      expect(await readdir(directory)).toEqual(["app.zip"]);
+    }
+    expect(await downloadToFile({ response: new Response(bytes), destination, force: true, expected: { bytes: bytes.length, sha256 } }))
+      .toMatchObject({ size: bytes.length, sha256 });
+    expect(await readFile(destination, "utf8")).toBe(bytes);
+    expect((await stat(destination)).mode & 0o777).toBe(0o600);
+  });
+
+  it("cancels an unread response when destination setup fails", async () => {
+    const directory = await temporaryDirectory();
+    const existing = path.join(directory, "existing");
+    await writeFile(existing, "keep this");
+    for (const destination of [existing, path.join(existing, "app.zip")]) {
+      let cancelled = false;
+      const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }));
+      await expect(downloadToFile({ response, destination, force: false })).rejects.toThrow();
+      expect(cancelled).toBe(true);
+    }
+    expect(await readFile(existing, "utf8")).toBe("keep this");
   });
 
   it("emits typed, redacted API and operation diagnostics", () => {

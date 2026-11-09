@@ -27,6 +27,42 @@ export interface MutationDispositionRecord {
  * call sites in the CLI entrypoint.
  */
 export const mutationDispositionRegistry = {
+  "opencloud app export create": {
+    boundary: "exact_app", recovery: "durable_operation",
+    reason: "The retained key replays the export operation; the operation returns the same export coordinate.",
+  },
+  "opencloud app export discard": {
+    boundary: "exact_app", recovery: "intrinsic_reconcile",
+    reason: "Deleting the same temporary export converges without changing the source app.",
+  },
+  "opencloud app portability enable": {
+    boundary: "exact_app", recovery: "durable_operation",
+    reason: "The retained key replays the operation that releases the imported app's execution hold.",
+  },
+  "opencloud app import upload": {
+    boundary: "account_bootstrap", recovery: "bootstrap_explicit_server_replay",
+    reason: "A required key and package digest replay one private account import before an app exists.",
+  },
+  "opencloud app import from-url": {
+    boundary: "account_bootstrap", recovery: "bootstrap_explicit_server_replay",
+    reason: "The required key and pinned checksum replay the same account import.",
+  },
+  "opencloud app import stage": {
+    boundary: "account_bootstrap", recovery: "bootstrap_explicit_server_replay",
+    reason: "The required key replays the package pinned by the inspected install intent.",
+  },
+  "opencloud app import install": {
+    boundary: "account_bootstrap", recovery: "bootstrap_explicit_server_replay",
+    reason: "The import receipt fixes the app and mappings; retries resume that same private draft.",
+  },
+  "opencloud app import publish": {
+    boundary: "account_bootstrap", recovery: "bootstrap_explicit_server_replay",
+    reason: "The required key replays publication; its durable operation can be polled after interruption.",
+  },
+  "opencloud app import discard": {
+    boundary: "account_bootstrap", recovery: "intrinsic_reconcile",
+    reason: "Discarding the same uninstalled account import converges; installed apps cannot be discarded here.",
+  },
   "opencloud app domain add": {
     boundary: "exact_app",
     recovery: "server_replay",
@@ -332,6 +368,7 @@ export const mutationDispositionRegistry = {
 } as const satisfies Record<string, MutationDispositionRecord>;
 
 export const NON_JOURNAL_RECOVERY_DISPOSITIONS = [
+  "intrinsic_reconcile",
   "device_flow_resume_or_expire",
   "rotating_credential_reauthenticate",
   "intrinsic_revocation_retry",
@@ -361,6 +398,36 @@ export interface NonJournalMutationRecord {
  * release contract rather than being mislabeled as journal-safe.
  */
 export const nonJournalMutationInventory = {
+  "app.import.upload": {
+    sourceFile: "src/index.ts", operation: "POST /v1/app-imports",
+    commanderLeaves: ["opencloud app import upload"], entryPoints: ["app import upload"],
+    recovery: "explicit_server_replay", reason: "A required key and package digest recover the same private account receipt.",
+  },
+  "app.import.from_url": {
+    sourceFile: "src/index.ts", operation: "control:importAppFromUrl",
+    commanderLeaves: ["opencloud app import from-url"], entryPoints: ["app import from-url"],
+    recovery: "explicit_server_replay", reason: "A required key and pinned checksum recover the same private receipt.",
+  },
+  "app.import.stage": {
+    sourceFile: "src/index.ts", operation: "control:stageAppInstall",
+    commanderLeaves: ["opencloud app import stage"], entryPoints: ["app import stage"],
+    recovery: "explicit_server_replay", reason: "The pinned install intent and required key recover the same import.",
+  },
+  "app.import.install": {
+    sourceFile: "src/index.ts", operation: "control:installAppImport",
+    commanderLeaves: ["opencloud app import install"], entryPoints: ["app import install"],
+    recovery: "explicit_server_replay", reason: "The import receipt fixes the app and inputs; retries resume its draft.",
+  },
+  "app.import.publish": {
+    sourceFile: "src/index.ts", operation: "control:publishAppImport",
+    commanderLeaves: ["opencloud app import publish"], entryPoints: ["app import publish"],
+    recovery: "explicit_server_replay", reason: "The required key recovers the same durable publication operation.",
+  },
+  "app.import.discard": {
+    sourceFile: "src/index.ts", operation: "control:deleteAppImport",
+    commanderLeaves: ["opencloud app import discard"], entryPoints: ["app import discard"],
+    recovery: "intrinsic_reconcile", reason: "Deleting the uninstalled private receipt is convergent.",
+  },
   "account.device_authorization": {
     sourceFile: "src/account-auth.ts",
     sourceFunction: "beginDeviceAuthorization",

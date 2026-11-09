@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.20.0
+
+- Add full app export and import: source, database and managed files in one
+  package, up to 2 GiB compressed and expanded and five million rows. Requires
+  a platform release with app portability. Uploads and downloads stream; ZIP
+  downloads are checked against the server's size and SHA-256 before saving.
+- Import local ZIPs, pinned HTTPS ZIPs, or reviewed shared-example manifests.
+  Review user mappings, install a new private draft, publish its complete data,
+  then explicitly enable Functions and automation. Discard temporary packages
+  without changing their source apps. Stable keys support retries.
+
 ## 3.19.0
 
 - Accept Agent tasks whose instructions come from code. A task in

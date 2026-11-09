@@ -483,6 +483,15 @@ function logicalMutationOperation(node, sourceFile) {
   }
   if (!ts.isPropertyAccessExpression(node.expression)) return null;
   const method = node.expression.name.text;
+  if (method === "uploadFile" && node.arguments[0] && node.arguments[1]) {
+    const verb = literalValue(node.arguments[0]);
+    const route = normalizedRoute(node.arguments[1]);
+    if (typeof verb === "string" && route) return {
+      operation: `${verb} ${route}`,
+      sourceFunction: containingFunctionName(node),
+      contractPath: route,
+    };
+  }
   if (method === "call" && node.arguments[0]) {
     const operationName = literalValue(node.arguments[0]);
     const operation = operations.get(operationName);
@@ -602,7 +611,16 @@ function isExactAppMutationCall(node, environment, file) {
       node.expression.expression.getText(file),
     );
   }
-  if (["uploadFile", "uploadDeployment"].includes(method)) return true;
+  if (method === "uploadFile") {
+    const verb = node.arguments[0] && literalValue(node.arguments[0]);
+    const route = node.arguments[1] && normalizedRoute(node.arguments[1]);
+    const matching = [...operations.values()].find(operation =>
+      operation.method === verb && normalizedContractRoute(operation.path) === route);
+    // Known account uploads belong to the separately audited bootstrap inventory.
+    // Unknown/dynamic paths still require an exact-app journal.
+    return matching ? Boolean(matching.path?.includes("{appId}")) : true;
+  }
+  if (method === "uploadDeployment") return true;
   if (!["post", "patch", "put", "delete"].includes(method) || !node.arguments[0]) {
     return false;
   }
