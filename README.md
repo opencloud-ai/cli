@@ -278,6 +278,17 @@ Mobile, and Reload controls. Keep the raw `previewUrl` for CLI and agent
 inspection; opening it directly in a normal browser may return
 `AUTH_REQUIRED`.
 
+`app dev start` saves the session identity before applying the validated draft.
+Development preparation can take up to 15 minutes. Start and sync send one
+apply request with that allowance; an interrupted reply is reconciled only
+by reading the exact session, draft revision, artifact and production base.
+Rerunning the same command resumes those reads within the original deadline
+and never repeats the apply. If no matching active revision can be confirmed,
+the CLI reports `DEV_APPLY_OUTCOME_UNKNOWN`; the server may still be working.
+Inspect the retained session before deliberately starting another mutation.
+The session read exposes the active revision, not a pending or failed
+preparation result.
+
 Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-
 generated secrets receive isolated synthetic development values, while owner-

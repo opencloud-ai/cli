@@ -115,6 +115,9 @@ export interface MutationJournalAuthorityBinding {
 export interface SafeMutationCheckpoint {
   stage: string;
   artifactSha256?: string | undefined;
+  serverArtifactSha256?: string | undefined;
+  baseDeploymentId?: string | null | undefined;
+  devApplyDeadline?: string | undefined;
   draftId?: string | undefined;
   sessionId?: string | undefined;
   activeRevisionId?: string | undefined;
@@ -229,6 +232,9 @@ const ENTRY_KEYS = [
 const CHECKPOINT_KEYS = new Set([
   "stage",
   "artifactSha256",
+  "serverArtifactSha256",
+  "baseDeploymentId",
+  "devApplyDeadline",
   "draftId",
   "sessionId",
   "activeRevisionId",
@@ -509,12 +515,11 @@ function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
       return null;
     }
   }
-  if (
-    candidate.artifactSha256 !== undefined &&
-    !SHA256.test(String(candidate.artifactSha256))
-  ) {
-    return null;
+  for (const key of ["artifactSha256", "serverArtifactSha256"]) {
+    if (candidate[key] !== undefined && !SHA256.test(String(candidate[key]))) return null;
   }
+  if (candidate.baseDeploymentId !== undefined && candidate.baseDeploymentId !== null && !UUID.test(String(candidate.baseDeploymentId))) return null;
+  if (candidate.devApplyDeadline !== undefined && !isIsoDate(candidate.devApplyDeadline)) return null;
   for (const key of ["revision", "offset"]) {
     if (
       candidate[key] !== undefined &&

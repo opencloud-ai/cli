@@ -11,7 +11,7 @@ import { slowResponseFetch } from "./slow-response-fetch.js";
 /**
  * CLI disk transfers remain outside the portable platform client snapshot.
  * JSON requests may wait past global fetch's 300-second header limit, for
- * example while validation builds the frontend; see slowResponseFetch.
+ * example while development prepares containers; see slowResponseFetch.
  * Every request carries the CLI's user-agent and an x-request-id.
  */
 export class OpenCloudClient extends PlatformClient {

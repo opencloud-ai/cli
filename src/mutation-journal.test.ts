@@ -19,6 +19,7 @@ import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
   MutationJournalError,
+  type SafeMutationCheckpoint,
   anchorsDirectoryDescriptors,
   assertAppOwnerMutationJournalDirectory,
   linuxMountInfoContains,
@@ -766,6 +767,37 @@ describe("mutation journal", () => {
         );
       },
     );
+  });
+
+  it("retains exact development apply coordinates and uncertainty across reopening", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "start" } };
+    const checkpoint = { stage: "dev_apply_dispatched", artifactSha256: "a".repeat(64), serverArtifactSha256: "b".repeat(64),
+      draftId: OTHER_APP_ID, sessionId: "33333333-3333-4333-8333-333333333333", revision: 2,
+      baseDeploymentId: null, devApplyDeadline: "2026-11-14T12:15:00.000Z" };
+    const first = await MutationJournal.open(binding);
+    await expect(first.run(intent, async run => {
+      await run.checkpointStage(checkpoint);
+      await run.markAttempted();
+      return run.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEV_APPLY_OUTCOME_UNKNOWN" });
+    const reopened = await MutationJournal.open(binding);
+    await reopened.run(intent, async run => {
+      expect(run.recovered).toBe(true);
+      expect(run.checkpoint).toEqual(checkpoint);
+      expect(run.unknownCode).toBe("DEV_APPLY_OUTCOME_UNKNOWN");
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DEV_APPLY_OUTCOME_UNKNOWN" }));
+      for (const invalid of [
+        { ...checkpoint, serverArtifactSha256: "secret" },
+        { ...checkpoint, baseDeploymentId: "arbitrary-text" },
+        { ...checkpoint, devApplyDeadline: "tomorrow" },
+        { ...checkpoint, devApplyDeadline: 123 },
+      ]) {
+        await expect(run.checkpointStage(invalid as SafeMutationCheckpoint)).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      }
+      expect(run.checkpoint).toEqual(checkpoint);
+    });
   });
 
   it("lets a stopped promotion retire before a changed generated intent proceeds", async () => {

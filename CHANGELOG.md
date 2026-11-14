@@ -2,6 +2,9 @@
 
 ## 3.21.0
 
+- Allow up to 15 minutes for development container readiness. Save the session
+  before applying, and reconcile lost start/sync apply replies through exact
+  reads without automatically repeating the request.
 - Wait for slow draft validation using short requests pinned to the exact
   revision. Retry only explicit validation-progress responses; keep lost
   replies uncertain in the mutation journal. Deployment, development and

@@ -30,6 +30,7 @@ import {
 } from "@opencloud/contracts";
 import { ApiError, OpenCloudClient } from "./api-client.js";
 import { validateDraftWithProgress } from "./draft-validation.js";
+import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
 import { requestApp } from "./app-edge.js";
 import {
   withDevStateLock,
@@ -742,6 +743,7 @@ interface DevSessionWire {
   appId: string;
   draftId: string;
   status: string;
+  baseDeploymentId: string | null;
   previewUrl: string;
   browserPreviewUrl: string;
   activeRevision: {
@@ -1063,6 +1065,7 @@ async function synchronizeValidatedDraft(
   appId: string;
   draftId: string;
   artifactSha256: string;
+  revision: number;
   validation: unknown;
 }> {
   printBundleFiles(bundle.files);
@@ -1241,6 +1244,7 @@ async function synchronizeValidatedDraft(
       appId: bundle.manifest.appId,
       draftId: draft.id,
       artifactSha256: validation.artifactSha256!,
+      revision: validation.revision,
       validation,
     };
   }
@@ -1286,6 +1290,7 @@ async function synchronizeValidatedDraft(
     appId: bundle.manifest.appId,
     draftId: draft.id,
     artifactSha256: identity.artifactSha256,
+    revision: validation.revision,
     validation,
   };
 }
@@ -2426,12 +2431,20 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
+        const recovered = await resumeDevApply(context.control, run, { appId, artifactSha256: bundle.sha256 });
+        if (recovered) {
+          await storeDevSession(sourceRoot, bundle.sha256, recovered);
+          await outputAsync({ session: recovered, validation: null, reconciled: true, localState: devStatePath(sourceRoot), ...sourceOnlyFields(upload) });
+          await run.complete();
+          return;
+        }
         run.failIfUnknown();
         const retained = run.checkpoint;
         let synchronized: {
           appId: string;
           draftId: string;
           artifactSha256: string;
+          revision: number;
           validation: unknown;
         };
         if (
@@ -2464,6 +2477,7 @@ dev
             appId,
             draftId: retained.draftId,
             artifactSha256: identity.artifactSha256,
+            revision: validation.revision,
             validation,
           };
         } else {
@@ -2477,37 +2491,41 @@ dev
           );
         }
         await run.markAttempted();
-        const session = (await settleStaleReleaseRefusal(run, context.control.call(
+        const created = (await settleStaleReleaseRefusal(run, context.control.call(
           "startDevSession",
           {
             appId,
             draftId: synchronized.draftId,
             body: {
-              apply: true,
+              apply: false,
               ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
             },
           },
           { idempotencyKey: childIdempotencyKey(run, "dev-start") },
         ))) as DevSessionWire;
         if (
-          session.appId !== appId ||
-          session.draftId !== synchronized.draftId ||
-          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
-          (retained?.sessionId && retained.sessionId !== session.id)
+          created.appId !== appId ||
+          created.draftId !== synchronized.draftId ||
+          (retained?.sessionId && retained.sessionId !== created.id)
         ) {
           throw new CliContractError(
             "MUTATION_REPLAY_MISMATCH",
-            "OpenCloud did not return the exact journaled development session and artifact",
+            "OpenCloud did not return the exact journaled development session",
           );
         }
         await run.checkpointStage({
-          stage: "session_started",
+          stage: "dev_session_created",
           artifactSha256: bundle.sha256,
+          serverArtifactSha256: synchronized.artifactSha256,
           draftId: synchronized.draftId,
-          sessionId: session.id,
-          activeRevisionId: session.activeRevision.id,
-          revision: session.activeRevision.draftRevision,
+          sessionId: created.id,
+          baseDeploymentId: created.baseDeploymentId,
+          revision: synchronized.revision,
         });
+        const session = await applyDevRevisionOnce(context.control, run, {
+          appId, draftId: synchronized.draftId, sessionId: created.id, revision: synchronized.revision,
+          artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: created.baseDeploymentId,
+        }, childIdempotencyKey(run, "dev-apply"));
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,
@@ -2559,8 +2577,15 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
+        const recovered = await resumeDevApply(context.control, run, { appId: state.appId, artifactSha256: bundle.sha256,
+          sessionId: state.sessionId, draftId: state.draftId });
+        if (recovered) {
+          await storeDevSession(sourceRoot, bundle.sha256, recovered);
+          await outputAsync({ session: recovered, validation: null, reconciled: true, ...sourceOnlyFields(upload) });
+          await run.complete();
+          return;
+        }
         run.failIfUnknown();
-        const retained = run.checkpoint;
         const synchronized = await synchronizeValidatedDraft(
           context.control,
           sourceRoot,
@@ -2569,31 +2594,11 @@ dev
           upload,
           state.draftId,
         );
-        await run.markAttempted();
-        const session = (await context.control.call(
-          "applyDevRevision",
-          { appId: state.appId, sessionId: state.sessionId },
-          { idempotencyKey: childIdempotencyKey(run, "dev-apply") },
-        )) as DevSessionWire;
-        if (
-          session.id !== state.sessionId ||
-          session.draftId !== state.draftId ||
-          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
-          (retained?.sessionId && retained.sessionId !== session.id)
-        ) {
-          throw new CliContractError(
-            "MUTATION_REPLAY_MISMATCH",
-            "OpenCloud did not apply the exact journaled development revision",
-          );
-        }
-        await run.checkpointStage({
-          stage: "session_applied",
-          artifactSha256: bundle.sha256,
-          draftId: state.draftId,
-          sessionId: session.id,
-          activeRevisionId: session.activeRevision.id,
-          revision: session.activeRevision.draftRevision,
-        });
+        const current = await context.control.call("getDevSession", { appId: state.appId, sessionId: state.sessionId });
+        const session = await applyDevRevisionOnce(context.control, run, {
+          appId: state.appId, draftId: state.draftId, sessionId: state.sessionId, revision: synchronized.revision,
+          artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: current.baseDeploymentId,
+        }, childIdempotencyKey(run, "dev-apply"));
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,

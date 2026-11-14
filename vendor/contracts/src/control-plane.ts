@@ -1634,6 +1634,9 @@ export const draftValidationInProgressSchema = z.object({
   }).strict(),
 }).passthrough();
 
+/** Explicit per-call allowance for synchronous development preparation/readiness. */
+export const developmentReadinessTimeoutMs = 15 * 60_000;
+
 export interface McpOperationMetadata {
   toolName: string;
   title: string;
@@ -3722,7 +3725,7 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/drafts/{draftId}/dev-sessions",
     summary: "Start a development session",
     description:
-      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment. A new session starts only while expectedActiveDeploymentId, or the release the draft was cloned from, is still the latest release; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED.",
+      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment. A new session starts only while expectedActiveDeploymentId, or the release the draft was cloned from, is still the latest release; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED. Applying waits synchronously for readiness; allow 900 seconds and a transport without a shorter response-header deadline. Use apply:false to retain the session ID before a separate apply request. A lost reply is uncertain and does not authorize repeating apply.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
@@ -3738,7 +3741,7 @@ getAiConnectionModels: operation({
       toolName: "start_dev_session",
       title: "Start dev session",
       description:
-        "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
+      "Start or resume an isolated frontend and database preview for a validated draft. Applying may wait up to 900 seconds; use apply:false to retain its session ID before a separate apply. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -3750,7 +3753,7 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Get a development session",
     description:
-      "Returns preview state, the owner/builder browserPreviewUrl for the marked responsive review shell, capabilities, and verification status.",
+      "Returns preview state, the owner/builder browserPreviewUrl for the marked responsive review shell, capabilities, and verification status. activeRevision describes only the currently active revision, not pending or failed preparation. After a lost apply reply, only an exact matching session, draft revision and artifact can confirm success; absence of that match leaves the outcome uncertain.",
     auth: "bearer",
     scopes: ["app:read"],
     input: devSessionPath,
@@ -3870,7 +3873,7 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/apply",
     summary: "Apply a draft revision to development",
     description:
-      "Materializes the exact validated draft and replays migrations into its isolated dev schema when needed.",
+      "Materializes the exact validated draft and replays migrations into its isolated dev schema when needed. Waits synchronously for readiness: allow 900 seconds and a transport without a shorter response-header deadline. This endpoint has no request replay key. After a lost reply, read the known session to confirm an exact active draft revision and artifact; do not automatically repeat the POST or treat a missing active result as a terminal failure.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: devSessionPath,
@@ -3880,7 +3883,7 @@ getAiConnectionModels: operation({
       toolName: "apply_dev_revision",
       title: "Apply dev revision",
       description:
-        "Sync the validated draft to its development preview; migration changes reset isolated dev data.",
+        "Sync the validated draft to its development preview; migration changes reset isolated dev data. May wait up to 900 seconds for readiness. After a lost reply, inspect the known session for the exact active revision and artifact; never automatically repeat apply.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,

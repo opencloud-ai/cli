@@ -33,6 +33,7 @@ const state = {
   resolveYamlDifferently: false,
   /** Adds a file to OpenCloud's artifact that the CLI never bundled. */
   extraArtifactFile: false,
+  dropApplyReply: false,
   requests: [],
 };
 
@@ -56,15 +57,11 @@ function draftRecord(draft) {
 }
 
 function sessionRecord(session) {
-  const draft = state.drafts.get(session.draftId);
   return {
     id: session.id, appId, draftId: session.draftId, status: session.status,
     previewUrl: "https://preview.example.test", browserPreviewUrl: "https://review.example.test",
     baseDeploymentId: null,
-    activeRevision: {
-      id: session.revisionId, draftRevision: draft.validatedRevision,
-      artifactSha256: draft.validatedDigest, migrationDigest: "b".repeat(64),
-    },
+    activeRevision: session.applied ?? null,
     verification: null,
     capabilities: {
       frontend: true, database: true, functions: true, jobs: true, files: true,
@@ -211,6 +208,7 @@ const server = createServer(async (request, response) => {
       });
     }
     if (parts[5] === "dev-sessions" && request.method === "POST") {
+      assert.equal(JSON.parse(body).apply, false, "Create and retain the session before applying a revision");
       const session = { id: randomUUID(), draftId: draft.id, status: "active", revisionId: randomUUID() };
       state.sessions.set(session.id, session);
       return send(response, 201, sessionRecord(session));
@@ -231,7 +229,18 @@ const server = createServer(async (request, response) => {
       return send(response, 200, sessionRecord(session));
     }
     if (parts[5] === "apply") {
+      if (!session.applied) {
+        await assert.rejects(readFile(path.join(app, ".opencloud", "dev.json")), { code: "ENOENT" });
+      }
       session.revisionId = randomUUID();
+      const draft = state.drafts.get(session.draftId);
+      session.applied = { id: session.revisionId, draftRevision: draft.validatedRevision,
+        artifactSha256: draft.validatedDigest, migrationDigest: "b".repeat(64) };
+      if (state.dropApplyReply) {
+        state.dropApplyReply = false;
+        request.socket.destroy();
+        return;
+      }
       return send(response, 200, sessionRecord(session));
     }
     if (parts[5] === "verify") {
@@ -334,11 +343,17 @@ try {
 
   // 2. dev sync follows a local change with OpenCloud's new digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v2</title>\n");
+  state.dropApplyReply = true;
+  const beforeSync = state.requests.length;
   const sync = JSON.parse((await runCli(["app", "dev", "sync", app])).stdout);
   assert.deepEqual({ files: sync.sourceOnlyFiles, count: sync.sourceOnlyFileCount }, { files: [], count: 0 });
   const synced = lastDraft().validatedDigest;
   assert.notEqual(synced, serverDigest);
   assert.equal((await devState()).serverArtifactSha256, synced);
+  const syncRequests = state.requests.slice(beforeSync);
+  assert.equal(syncRequests.filter(request => request.path.endsWith("/apply")).length, 1, "A lost apply reply must never repeat the POST");
+  const appliedAt = syncRequests.findIndex(request => request.path.endsWith("/apply"));
+  assert.ok(syncRequests.slice(appliedAt + 1).every(request => request.method === "GET"), "Lost reply reconciliation only reads");
 
   // 3. dev verify and promote accept the receipt and release OpenCloud built.
   await runCli(["app", "dev", "verify", app]);

@@ -50,7 +50,7 @@ describe("slow response fetch", () => {
     expect(global).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["/v1/app-install-intents/intent/package", "/v1/app-imports/import/publish"])(
+  it.each(["/v1/app-install-intents/intent/package", "/v1/app-imports/import/publish", "/v1/apps/app/dev-sessions/session/apply"])(
     "keeps bodyless %s POSTs on the long-response transport",
     async (route) => {
       vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("global fetch caps headers at 300 seconds"); }));
