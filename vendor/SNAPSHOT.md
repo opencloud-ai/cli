@@ -22,6 +22,9 @@ The final resource-sampling refinement takes `compute-protocol/src/index.ts`,
 its tests and `contracts/src/compute-observation.ts` verbatim from `b17c3617`.
 Optional running/terminal metadata preserves each counter's measurement time;
 older samples remain valid without inferred per-counter timestamps.
+`contracts/src/containers.ts` and its tests are subsequently refreshed verbatim
+from `ef62035c`: service-body Base64 validation uses bounded linear work and
+checks the decoded 32 MiB limit without a repeated-group regex stack overflow.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from

@@ -4,7 +4,7 @@ import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest 
 import {
   classifyComputeError, isExpectedComputeError, computeErrorCatalog, computeErrorSchema, computeJobSubmitRequestSchema,
   computePriceDefinitionSchema, containerDefinitionSchema, normalizeComputeResources,
-  unsupportedComputeCapabilities,
+  unsupportedComputeCapabilities, containerRuntimeServiceRequestSchema,
 } from "./containers.js";
 import { installationCapabilitiesSchema } from "./installation.js";
 import { resolvePlatformFeatureFlag } from "./feature-flags.js";
@@ -95,6 +95,30 @@ describe("container manifest contracts", () => {
 });
 
 describe("compute API errors and money", () => {
+  it("validates full-size service bodies without a regex stack and bounds decoded bytes", () => {
+    const maximumBytes = 32 * 1024 * 1024;
+    const bytes = Buffer.alloc(maximumBytes + 1, 255);
+    const bodyBase64 = bytes.subarray(0, maximumBytes).toString("base64");
+    expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64 }).success).toBe(true);
+    const oversized = bytes.toString("base64");
+    expect(oversized.length).toBe(bodyBase64.length);
+    const result = containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64: oversized });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues).toEqual([expect.objectContaining({ code: "too_big", path: ["bodyBase64"], maximum: maximumBytes, message: "Decoded body exceeds 32 MiB" })]);
+    const malformed = containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64: `${bodyBase64.slice(0, -1)}?` });
+    expect(malformed.success).toBe(false);
+    if (!malformed.success) expect(malformed.error.issues).toEqual([expect.objectContaining({ code: "custom", path: ["bodyBase64"] })]);
+  });
+  it("keeps service bodies canonical across alphabet, padding, length and unused bits", () => {
+    for (const bodyBase64 of ["", "AA==", "AAA=", "AAAA", "/w==", "//8=", "+/8=", Buffer.from(Array.from({ length: 256 }, (_, value) => value)).toString("base64")]) {
+      expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64 }).success, bodyBase64).toBe(true);
+    }
+    for (const bodyBase64 of ["A", "AA", "AA=", "AA===", "=AAA", "AA=A", "====", "AB==", "AAB=", "AA_A", "AA-A", "AAAA\n", " AAA", "AAAé"]) {
+      expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64 }).success, bodyBase64).toBe(false);
+    }
+    expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/" }).success).toBe(true);
+  });
+
   it("keeps every error stable and refuses unsafe detail fields", () => {
     for (const code of Object.keys(computeErrorCatalog) as (keyof typeof computeErrorCatalog)[]) {
       expect(computeErrorSchema.safeParse(classifyComputeError(code)).success).toBe(true);

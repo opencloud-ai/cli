@@ -357,12 +357,34 @@ export const containerRuntimeGetRequestSchema = z.object({ executionId: computeI
 export const containerRuntimeCancelRequestSchema = containerRuntimeGetRequestSchema.extend({ idempotencyKey: computeIdempotencyKeySchema });
 const httpHeadersSchema = z.record(z.string().min(1).max(128).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/), z.string().max(8_192).refine(value => !/[\r\n\0]/.test(value)))
   .refine(value => Object.keys(value).length <= 64 && new TextEncoder().encode(JSON.stringify(value)).length <= 32_768, "Headers exceed their bound");
+const maximumServiceBodyBytes = 32 * 1024 * 1024;
+const maximumServiceBodyBase64Length = Math.ceil(maximumServiceBodyBytes / 3) * 4;
+const serviceBodyBase64Schema = z.string().max(maximumServiceBodyBase64Length).superRefine((value, context) => {
+  // The encoded-size check already rejects larger inputs. Avoid decoding or
+  // repeated regex groups: a valid 32 MiB body can exhaust a regex backtracking stack.
+  if (value.length > maximumServiceBodyBase64Length) return;
+  const invalid = () => context.addIssue({ code: "custom", message: "Expected canonical padded Base64" });
+  if (value.length % 4 !== 0) { invalid(); return; }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  const end = value.length - padding;
+  for (let index = 0; index < end; index++) {
+    const code = value.charCodeAt(index);
+    if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 43 || code === 47)) { invalid(); return; }
+  }
+  if (padding > 0) {
+    const last = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".indexOf(value[end - 1]!);
+    if ((last & ((1 << (padding * 2)) - 1)) !== 0) { invalid(); return; }
+  }
+  if (value.length / 4 * 3 - padding > maximumServiceBodyBytes) {
+    context.addIssue({ code: "too_big", origin: "string", maximum: maximumServiceBodyBytes, inclusive: true, message: "Decoded body exceeds 32 MiB" });
+  }
+});
 export const containerRuntimeServiceRequestSchema = z.object({
   name: containerNameSchema, path: z.string().min(1).max(4_096).refine(value => value.startsWith("/") && !value.startsWith("//") && !/[\\#\u0000-\u001f\u007f]/.test(value)),
   method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]).default("GET"),
   headers: httpHeadersSchema.default({}),
   timeoutSeconds: z.number().int().min(1).max(3_600).optional(),
-  bodyBase64: z.string().max(44_739_244).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/).optional(),
+  bodyBase64: serviceBodyBase64Schema.optional(),
 }).strict();
 export const containerRuntimeServiceResponseSchema = z.object({ status: z.number().int().min(100).max(599), headers: httpHeadersSchema, bodyBase64: z.string().max(44_739_244) }).strict();
 export const containerRuntimeOperations = {

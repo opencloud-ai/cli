@@ -19,6 +19,8 @@
   alert detail without changing Feed v1.
 - Preserve optional per-counter sampling times in terminal resource diagnostics,
   so retained measurements remain distinguishable from newly measured values.
+- Validate maximum-size compute HTTP bodies without a Base64 regex stack
+  overflow, retaining the decoded 32 MiB limit and canonical encoding checks.
 
 ## 3.20.0
 
