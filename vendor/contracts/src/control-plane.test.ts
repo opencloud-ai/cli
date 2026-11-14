@@ -4,10 +4,24 @@ import {
   controlPlaneAppDeploymentTruthSchema,
   controlPlaneAppSchema,
   controlPlaneOperations,
+  draftValidationInProgressSchema,
   type ControlPlaneOperationId,
 } from "./control-plane.js";
 
 describe("controlPlaneOperations", () => {
+  it("pins optional draft revisions and distinguishes explicit validation progress from generic rate limits", () => {
+    const appId = "11111111-1111-4111-8111-111111111111", draftId = "22222222-2222-4222-8222-222222222222";
+    const input = { appId, draftId, body: { expectedRevision: 2 } };
+    expect(controlPlaneOperations.validateDraft.input.parse(input)).toEqual(input);
+    expect(controlPlaneOperations.validateDraft.input.parse({ appId, draftId, body: {} }).body).toEqual({});
+    expect(controlPlaneOperations.validateDraft.input.safeParse({ ...input, body: { expectedRevision: 0 } }).success).toBe(false);
+    const busy = { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true, details: { appId, draftId, revision: 2, retryAfterSeconds: 2 } };
+    expect(draftValidationInProgressSchema.parse(busy)).toEqual(busy);
+    for (const invalid of [ { code: busy.code }, { ...busy, retryable: false }, { ...busy, details: { ...busy.details, revision: 0 } },
+      { ...busy, details: { ...busy.details, retryAfterSeconds: 11 } }, { ...busy, details: { ...busy.details, secret: "unexpected" } } ]) {
+      expect(draftValidationInProgressSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
   it("reads container alert detail provenance without widening Agent Feed v1", () => {
     const appId = "22222222-2222-4222-8222-222222222222";
     const at = "2026-11-14T00:00:00Z";

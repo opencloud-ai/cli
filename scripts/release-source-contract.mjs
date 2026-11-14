@@ -27,7 +27,7 @@ const state = {
   /** Digest the fake validator reports; null reports the CLI's own digest. */
   validationDigests: [],
   localDigest: null,
-  /** Validations to answer with 429 FRONTEND_BUILD_BUSY first. */
+  /** Validations to answer with explicit bounded progress first. */
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
@@ -187,9 +187,13 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
+      assert.equal(JSON.parse(body).expectedRevision, draft.revision);
       if (state.validationBusy > 0) {
         state.validationBusy -= 1;
-        return send(response, 429, { statusCode: 429, code: "FRONTEND_BUILD_BUSY", message: "Another frontend build for this app is running; validate again shortly" });
+        response.setHeader("Retry-After", "2");
+        return send(response, 429, { statusCode: 429, code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+          message: "Validation is pending; validate this exact revision again",
+          details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
       }
       if (state.validationFailure) {
         draft.status = "validation_failed";
@@ -429,7 +433,7 @@ try {
   state.validationDigests = ["c".repeat(64)];
   await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built v2');\n");
   const waited = await runCli(["deploy", built]);
-  assert.match(waited.stderr, /Another frontend build for this app is running; retrying/);
+  assert.match(waited.stderr, /Validation is still running for draft .* revision \d+; waiting for its result/);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "c".repeat(64));
 
   // 13. A failed build prints its diagnostics and deploys nothing.

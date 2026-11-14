@@ -549,7 +549,7 @@ try {
       ],
       method: "POST",
       url: `/v1/apps/${appId}/drafts/${draftId}/validate`,
-      body: { version: "legacy-2" },
+      body: { expectedRevision: 3, version: "legacy-2" },
     },
     {
       arguments_: [

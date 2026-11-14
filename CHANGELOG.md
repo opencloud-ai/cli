@@ -2,6 +2,10 @@
 
 ## 3.21.0
 
+- Wait for slow draft validation using short requests pinned to the exact
+  revision. Retry only explicit validation-progress responses; keep lost
+  replies uncertain in the mutation journal. Deployment, development and
+  direct draft validation share this behavior.
 - Add production and isolated development container commands for jobs, HTTP
   services, and workers: list, get, run, executions, execution, cancel, pause,
   resume, restart, scale, and events. Mutations retain their exact scope and

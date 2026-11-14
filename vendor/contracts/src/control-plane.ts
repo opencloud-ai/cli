@@ -1622,6 +1622,18 @@ export const appAgentFilesPageSchema = z.object({
 
 export type ControlPlaneAuth = "none" | "bearer" | "user" | "browser";
 
+/** Only this explicit response permits a client to wait by repeating validation. */
+export const draftValidationInProgressSchema = z.object({
+  code: z.literal("DRAFT_VALIDATION_IN_PROGRESS"),
+  retryable: z.literal(true),
+  details: z.object({
+    appId: uuid,
+    draftId: uuid,
+    revision: z.number().int().positive(),
+    retryAfterSeconds: z.number().int().min(1).max(10),
+  }).strict(),
+}).passthrough();
+
 export interface McpOperationMetadata {
   toolName: string;
   title: string;
@@ -3624,11 +3636,12 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/drafts/{draftId}/validate",
     summary: "Validate a draft",
     description:
-      "Runs the canonical bundler and records an authoritative digest.",
+      "Runs the canonical bundler and records an authoritative digest. A request waits at most 25 seconds for validation, then returns HTTP 429 DRAFT_VALIDATION_IN_PROGRESS with retryable=true, Retry-After, and exact appId/draftId/revision coordinates. Repeat only that revision using expectedRevision to join the existing validation. A lost response is not proof of failure or permission to start concurrent work.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
       body: z.object({
+        expectedRevision: z.number().int().positive().optional().describe("Refuse before validation if this exact draft revision is no longer current"),
         version: z
           .string()
           .min(1)
@@ -3644,7 +3657,7 @@ getAiConnectionModels: operation({
       toolName: "validate_draft",
       title: "Validate source draft",
       description:
-        "Run authoritative validation, record its result, and replace the status for this draft revision.",
+        "Run authoritative validation for one draft revision. If DRAFT_VALIDATION_IN_PROGRESS is returned, wait retryAfterSeconds and call again with the returned revision as expectedRevision. Never switch revisions while waiting or retry an uncertain transport failure automatically.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,

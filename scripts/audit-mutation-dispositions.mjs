@@ -605,6 +605,7 @@ assert.deepEqual(
 );
 
 function isExactAppMutationCall(node, environment, file) {
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "validateDraftWithProgress") return true;
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
     return false;
   }
@@ -818,7 +819,11 @@ assert.ok(
   auditExactAppMutations(unprotectedHelper).length > 0,
   "A MutationRun-typed helper called outside journal.run must fail the audit",
 );
+assert.ok(auditExactAppMutations(ts.createSourceFile("unprotected-validation.ts",
+  'async function unsafe(control, input) { await validateDraftWithProgress(control, input); }',
+  ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)).length > 0,
+  "Validation waiting outside a journal must fail the audit");
 
 process.stdout.write(
-  `Mutation audit passed for ${exactRegistry.length} journal-managed exact-app dispositions, ${nonJournal.size} explicit authority/bootstrap callsites, ${registry.size} registry entries, ${leaves.size} Commander leaves, and 4 negative structural fixtures.\n`,
+  `Mutation audit passed for ${exactRegistry.length} journal-managed exact-app dispositions, ${nonJournal.size} explicit authority/bootstrap callsites, ${registry.size} registry entries, ${leaves.size} Commander leaves, and 5 negative structural fixtures.\n`,
 );

@@ -294,7 +294,7 @@ export const mutationDispositionRegistry = {
   "opencloud draft validate": {
     boundary: "exact_app",
     recovery: "intrinsic_reconcile",
-    reason: "Validation of the same immutable draft revision is convergent.",
+    reason: "Only explicit progress repeats the pinned revision; uncertain transport replies remain journaled and are not replayed automatically.",
   },
   "opencloud draft deploy": {
     boundary: "exact_app",

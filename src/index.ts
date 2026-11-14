@@ -29,6 +29,7 @@ import {
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
 import { ApiError, OpenCloudClient } from "./api-client.js";
+import { validateDraftWithProgress } from "./draft-validation.js";
 import { requestApp } from "./app-edge.js";
 import {
   withDevStateLock,
@@ -854,8 +855,6 @@ function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean
   return "directory" in bundle.manifest.frontend && bundle.manifest.frontend.build !== undefined;
 }
 
-const PLATFORM_BUILD_VALIDATION_TIMEOUT_MS = 9 * 60_000;
-const PLATFORM_BUILD_BUSY_RETRIES = 20;
 
 type DraftFiles = Map<string, { content: Buffer; sha256: string }>;
 
@@ -1213,15 +1212,10 @@ async function synchronizeValidatedDraft(
     });
   }
   await run.markAttempted();
-  const result = await validateWithPlatformBuild(control, bundle, draft.id).catch(
-    async (error: unknown) => {
-      // A build that never started changed nothing; the next attempt starts afresh.
-      if (error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY") {
-        await run.complete();
-      }
-      throw error;
-    },
-  );
+  const result = await validateDraftWithProgress(control, {
+    appId: bundle.manifest.appId, draftId: draft.id, revision, journal: run,
+    manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: platformBuilt(bundle) },
+  });
   if (!result.passed) {
     printValidationErrors(result.diagnostics);
     // A definite validation failure changed nothing live, so the next attempt,
@@ -1351,30 +1345,6 @@ async function validatedArtifactIdentity(
     comparison,
     draftChanged: current.revision !== validation.revision,
   };
-}
-
-/** Validates a draft, allowing for a platform frontend build and waiting while another runs. */
-async function validateWithPlatformBuild(
-  control: OpenCloudClient,
-  bundle: Awaited<ReturnType<typeof buildBundle>>,
-  draftId: string,
-) {
-  const built = platformBuilt(bundle);
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await control.call(
-        "validateDraft",
-        { appId: bundle.manifest.appId, draftId, body: {} },
-        built ? { timeoutMs: PLATFORM_BUILD_VALIDATION_TIMEOUT_MS } : {},
-      );
-    } catch (error) {
-      const busy =
-        built && error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY";
-      if (!busy || attempt >= PLATFORM_BUILD_BUSY_RETRIES) throw error;
-      process.stderr.write("Another frontend build for this app is running; retrying.\n");
-      await new Promise((resolve) => setTimeout(resolve, 6_000));
-    }
-  }
 }
 
 function printValidationErrors(
@@ -2470,10 +2440,11 @@ dev
           retained.draftId &&
           retained.artifactSha256 === bundle.sha256
         ) {
-          const validation = await context.control.call("validateDraft", {
-            appId,
-            draftId: retained.draftId,
-            body: {},
+          const validation = await validateDraftWithProgress(context.control, {
+            appId, draftId: retained.draftId,
+            revision: retained.revision ?? (await context.control.call("getDraft", { appId, draftId: retained.draftId })).revision,
+            journal: run,
+            manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: false },
           });
           const identity = validation.passed
             ? await validatedArtifactIdentity(
@@ -4527,11 +4498,10 @@ draft
           await run.checkpointStage({ stage: "validating", revision });
         }
         await run.markAttempted();
-        const result = await context.control.post(
-          `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/validate`,
-          legacyVersion ? { version: legacyVersion } : {},
-          run.idempotencyKey,
-        );
+        const result = await validateDraftWithProgress(context.control, {
+          appId: String(appId), draftId: String(draftId), revision, journal: run,
+          ...(legacyVersion ? { version: legacyVersion } : {}), idempotencyKey: run.idempotencyKey,
+        });
         if (
           !result ||
           typeof result !== "object" ||
