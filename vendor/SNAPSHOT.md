@@ -25,6 +25,10 @@ older samples remain valid without inferred per-counter timestamps.
 `contracts/src/containers.ts` and its tests are subsequently refreshed verbatim
 from `ef62035c`: service-body Base64 validation uses bounded linear work and
 checks the decoded 32 MiB limit without a repeated-group regex stack overflow.
+`compute-protocol/src/index.ts` and its tests are subsequently refreshed verbatim
+from `ff05f2af`. Retired allowances with lost counters have explicit null byte
+measurements and separate full daily-quota forfeiture; measured receipts remain
+readable. This internal transport refinement adds no public CLI authority.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from

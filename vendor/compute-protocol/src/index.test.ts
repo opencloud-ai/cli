@@ -6,7 +6,7 @@ import {
   computePinnedImageSchema, computeResourceAllocationSchema, computeUsageReportSchema,
   computeWorkerHelloSchema,
   canonicalComputeSignaturePayload,
-  computeNetworkUsageObservationSchema,
+  computeNetworkUsageObservationSchema, computeNetworkUsagePageSchema,
   computePrepareImageResponseSchema, computeLeaseRenewRequestSchema, computeResourceObservationSchema, CONTAINER_RUNTIME_ENV,
   computeImageFetchRequestSchema, computeResolveImageRequestSchema, computeReleaseImageRequestSchema,
   computeHttpObservationSchema,
@@ -135,11 +135,29 @@ describe("compute protocol authority and compatibility", () => {
   });
   it("requires conserved byte allowances and fenced close before refund", () => {
     const receipt = { protocolVersion: 1, binding, sourceSequence: "2", allowanceId: id, grantedBytes: "1000", consumedBytes: "300", remainingBytes: "700", expiresAt: lease.expiresAt, observedAt: lease.expiresAt, closedAt: null, closeReason: null, fenceConfirmed: false };
-    expect(computeNetworkUsageObservationSchema.safeParse(receipt).success).toBe(true);
+    expect(computeNetworkUsageObservationSchema.parse(receipt)).toEqual(receipt);
+    expect(computeNetworkUsageObservationSchema.parse({ ...receipt, accounting: "measured" })).toEqual({ ...receipt, accounting: "measured" });
     expect(computeNetworkUsageObservationSchema.safeParse({ ...receipt, remainingBytes: "1000" }).success).toBe(false);
     expect(computeNetworkUsageObservationSchema.safeParse({ ...receipt, closedAt: lease.expiresAt }).success).toBe(false);
     expect(computeNetworkUsageObservationSchema.safeParse({ ...receipt, closedAt: lease.expiresAt, closeReason: "expired", fenceConfirmed: true }).success).toBe(true);
     expect(computeNetworkUsageObservationSchema.safeParse({ ...receipt, consumedBytes: "not-an-integer" }).success).toBe(false);
+  });
+  it("closes a retired allowance with unknown counters and a separate full quota forfeiture", () => {
+    const previous = { protocolVersion: 1, binding, sourceSequence: "2", allowanceId: id, grantedBytes: "1000", consumedBytes: "300", remainingBytes: "700", expiresAt: lease.expiresAt, observedAt: lease.issuedAt, closedAt: null, closeReason: null, fenceConfirmed: false };
+    const terminal = { ...previous, sourceSequence: "3", observedAt: lease.expiresAt, accounting: "forfeited", consumedBytes: null, remainingBytes: null, quotaForfeitedBytes: "1000", closedAt: lease.expiresAt, closeReason: "counter_lost", fenceConfirmed: true, fenceEvidence: "retired_allowance" };
+    expect(computeNetworkUsageObservationSchema.parse(terminal)).toEqual(terminal);
+    expect(computeNetworkUsagePageSchema.parse({ observations: [previous, terminal], nextAfterSequence: "3" }).observations).toEqual([previous, terminal]);
+    expect(computeNetworkUsageObservationSchema.parse(JSON.parse(JSON.stringify(terminal)))).toEqual(terminal);
+    for (const invalid of [
+      { ...terminal, accounting: undefined }, { ...terminal, accounting: "measured" },
+      { ...terminal, consumedBytes: "0" }, { ...terminal, consumedBytes: "1000" },
+      { ...terminal, remainingBytes: "0" }, { ...terminal, quotaForfeitedBytes: "700" },
+      { ...terminal, quotaForfeitedBytes: "bad" }, { ...terminal, closedAt: null },
+      { ...terminal, closeReason: "stopped" }, { ...terminal, fenceConfirmed: false },
+      { ...terminal, fenceEvidence: undefined }, { ...terminal, fenceEvidence: "lost" },
+      { ...previous, consumedBytes: null, remainingBytes: null },
+      { ...previous, quotaForfeitedBytes: "1000" },
+    ]) expect(computeNetworkUsageObservationSchema.safeParse(invalid).success).toBe(false);
   });
   it("rejects malformed integer byte counts without throwing during validation", () => {
     expect(computePrepareImageResponseSchema.safeParse({ imageDigest: launch.imageDigest, compressedBytes: "bad", unpackedBytes: "1", os: "linux", architecture: "amd64" }).success).toBe(false);

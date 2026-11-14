@@ -320,16 +320,19 @@ export const computeHttpObservationOperation = {
   method: "POST", path: "/v1/observations/http", input: computeHttpObservationSchema,
   output: z.object({ accepted: z.literal(true) }).strict(),
 } as const;
-/** Authoritative quota evidence is separate from best-effort diagnostic network totals. */
-export const computeNetworkUsageObservationSchema = z.object({
+const networkUsageObservationFields = {
   ...requestFields,
   sourceSequence: computeIntegerSchema,
   allowanceId: computeIdSchema,
   grantedBytes: computeIntegerSchema,
-  consumedBytes: computeIntegerSchema,
-  remainingBytes: computeIntegerSchema,
   expiresAt: computeTimestampSchema,
   observedAt: computeTimestampSchema,
+};
+const measuredNetworkUsageObservationSchema = z.object({
+  ...networkUsageObservationFields,
+  accounting: z.literal("measured").optional(),
+  consumedBytes: computeIntegerSchema,
+  remainingBytes: computeIntegerSchema,
   closedAt: computeTimestampSchema.nullable(),
   closeReason: z.enum(["expired", "revoked", "exhausted", "stopped"]).nullable(),
   fenceConfirmed: z.boolean(),
@@ -337,6 +340,25 @@ export const computeNetworkUsageObservationSchema = z.object({
   if ([value.grantedBytes, value.consumedBytes, value.remainingBytes].every(bytes => /^(0|[1-9][0-9]*)$/.test(bytes)) && BigInt(value.grantedBytes) !== BigInt(value.consumedBytes) + BigInt(value.remainingBytes)) context.addIssue({ code: "custom", path: ["remainingBytes"], message: "Consumed and remaining bytes must equal the signed grant" });
   if ((value.closedAt !== null) !== (value.closeReason !== null) || (value.closedAt !== null) !== value.fenceConfirmed) context.addIssue({ code: "custom", path: ["closedAt"], message: "Closing an allowance requires a reason and confirmed traffic fence" });
 });
+const forfeitedNetworkUsageObservationSchema = z.object({
+  ...networkUsageObservationFields,
+  accounting: z.literal("forfeited"),
+  consumedBytes: z.null(),
+  remainingBytes: z.null(),
+  quotaForfeitedBytes: computeIntegerSchema,
+  closedAt: computeTimestampSchema,
+  closeReason: z.literal("counter_lost"),
+  fenceConfirmed: z.literal(true),
+  fenceEvidence: z.literal("retired_allowance"),
+}).strict().superRefine((value, context) => {
+  if (value.quotaForfeitedBytes !== value.grantedBytes) context.addIssue({ code: "custom", path: ["quotaForfeitedBytes"], message: "Lost counters forfeit the entire signed grant against daily quota" });
+});
+/** Authoritative quota evidence is separate from diagnostic bytes and monetary usage.
+ * Only a guard-retired allowance proves the fence needed to forfeit unknown counters. */
+export const computeNetworkUsageObservationSchema = z.union([
+  measuredNetworkUsageObservationSchema,
+  forfeitedNetworkUsageObservationSchema,
+]);
 export const computeNetworkUsagePageSchema = z.object({
   observations: z.array(computeNetworkUsageObservationSchema).max(100),
   nextAfterSequence: computeIntegerSchema.nullable(),
