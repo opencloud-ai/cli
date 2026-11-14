@@ -91,6 +91,7 @@ import {
   integrationSlotName,
 } from "./integrations.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
+import { computeInput, computeJson, computeKey, computeLogBody, computeQuery } from "./compute.js";
 import { devNotificationCaptureLimit, notificationHistoryQuery } from "./notifications.js";
 import {
   deleteSession,
@@ -155,7 +156,7 @@ import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.20.0";
+const CLI_VERSION = "3.21.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -850,7 +851,7 @@ function localBundle(sourceRoot: string) {
 }
 
 function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {
-  return bundle.manifest.frontend.build !== undefined;
+  return "directory" in bundle.manifest.frontend && bundle.manifest.frontend.build !== undefined;
 }
 
 const PLATFORM_BUILD_VALIDATION_TIMEOUT_MS = 9 * 60_000;
@@ -922,10 +923,10 @@ async function planDraftUpload(
     );
   }
   if (!contracts.releaseSource) return bundleOnly();
-  const output = `${bundle.manifest.frontend.directory}/`;
+  const output = "directory" in bundle.manifest.frontend ? `${bundle.manifest.frontend.directory}/` : null;
   const collected = await collectSourceTree(sourceRoot);
   // OpenCloud builds this directory itself, so a local build is never sent.
-  const tree = built
+  const tree = built && output !== null
     ? { ...collected, files: collected.files.filter((file) => !file.path.startsWith(output)) }
     : collected;
   const files: DraftFiles = new Map(
@@ -6037,9 +6038,471 @@ integration
     );
   });
 
+async function computePayerClient(): Promise<OpenCloudClient> {
+  const login = await ownerAccountLogin();
+  if (!login) throw callerFailure(new Error("Compute payer reads require your account login. Run opencloud login and remove --token; an app credential grants no billing authority."));
+  return login.control;
+}
+
+const compute = program.command("compute")
+  .description("Read compute payer settings and usage with your account login");
+
+compute.command("settings")
+  .description("Read rates, limits and funding for your authorized payer")
+  .action(async () => output(await (await computePayerClient()).call("getComputeSettings", {})));
+
+compute.command("prices")
+  .description("Read immutable rates available for explicit compute consent")
+  .action(async () => output(await (await computePayerClient()).call("getComputePrices", {})));
+
+compute.command("usage")
+  .description("Read ledger quantities, costs, credits and reservations for your payer")
+  .requiredOption("--from <iso>")
+  .requiredOption("--to <iso>", "exclusive end, at most 31 days after from")
+  .action(async (options) => {
+    const input = computeInput("getComputePayerUsage", { query: { from: options.from, to: options.to } });
+    output(await (await computePayerClient()).call("getComputePayerUsage", input));
+  });
+
+const containers = program.command("containers")
+  .description("Manage production jobs, services, and workers");
+
+containers
+  .command("list")
+  .description("List workload revisions, instances, and ledger usage")
+  .argument("<app-id>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainers", { ...scope, query: computeQuery(options) });
+    output(await client().call("listContainers", input));
+  });
+
+containers
+  .command("executions")
+  .description("List job executions without input or credentials")
+  .argument("<app-id>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainerExecutions", { ...scope, query: computeQuery(options) });
+    output(await client().call("listContainerExecutions", input));
+  });
+
+containers
+  .command("get")
+  .description("Inspect limits, controls, instances, and usage")
+  .argument("<app-id>")
+  .argument("<name>")
+  .action(async (appId, name) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("getContainer", { ...scope, name: String(name) });
+    output(await client().call("getContainer", input));
+  });
+
+containers
+  .command("execution")
+  .description("Inspect an execution, safe error, outputs, and completion delivery")
+  .argument("<app-id>")
+  .argument("<execution-id>")
+  .action(async (appId, executionId) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("getContainerExecution", { ...scope, executionId: String(executionId) });
+    output(await client().call("getContainerExecution", input));
+  });
+
+containers
+  .command("run")
+  .description("Accept one declared job; reuse the key to recover the same execution")
+  .argument("<app-id>")
+  .argument("<name>")
+  .option("--input <json>", "JSON input, at most 64 KiB", "{}")
+  .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("submitContainerJob", { ...scope, name: String(name),
+      body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers run", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("submitContainerJob", input, { idempotencyKey }));
+  });
+
+containers
+  .command("cancel")
+  .description("Request cancellation; inspect the execution for confirmed stop")
+  .argument("<app-id>")
+  .argument("<execution-id>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, executionId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("cancelContainerExecution", { ...scope, executionId: String(executionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers cancel", appId: scope.appId,
+      safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("cancelContainerExecution", input, { idempotencyKey }));
+  });
+
+containers
+  .command("pause")
+  .description("Pause a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("pauseContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers pause", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("pauseContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("resume")
+  .description("Resume a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("resumeContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers resume", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("resumeContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("restart")
+  .description("Restart a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("restartContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers restart", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("restartContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("scale")
+  .description("Set worker replicas within the declared ceiling")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--replicas <number>", "worker replicas, 0-20")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("scaleContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation), replicas: Number(options.replicas) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers scale", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("scaleContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("events")
+  .description("Read a bounded lifecycle event timeline")
+  .argument("<app-id>")
+  .argument("<name>")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainerEvents", { ...scope, name: String(name), query: computeQuery(options) });
+    output(await client().call("listContainerEvents", input));
+  });
+
+const devContainers = dev.command("containers")
+  .description("Manage containers in the saved development session");
+
+devContainers
+  .command("list")
+  .description("List workload revisions, instances, and ledger usage")
+  .argument("<directory>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainers", { ...scope, query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainers", input));
+  });
+
+devContainers
+  .command("executions")
+  .description("List job executions without input or credentials")
+  .argument("<directory>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainerExecutions", { ...scope, query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainerExecutions", input));
+  });
+
+devContainers
+  .command("get")
+  .description("Inspect limits, controls, instances, and usage")
+  .argument("<directory>")
+  .argument("<name>")
+  .action(async (directory, name) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("getDevContainer", { ...scope, name: String(name) });
+    output(await client(sourceRoot).call("getDevContainer", input));
+  });
+
+devContainers
+  .command("execution")
+  .description("Inspect an execution, safe error, outputs, and completion delivery")
+  .argument("<directory>")
+  .argument("<execution-id>")
+  .action(async (directory, executionId) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("getDevContainerExecution", { ...scope, executionId: String(executionId) });
+    output(await client(sourceRoot).call("getDevContainerExecution", input));
+  });
+
+devContainers
+  .command("run")
+  .description("Accept one declared job; reuse the key to recover the same execution")
+  .argument("<directory>")
+  .argument("<name>")
+  .option("--input <json>", "JSON input, at most 64 KiB", "{}")
+  .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("submitDevContainerJob", { ...scope, name: String(name),
+      body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers run", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("submitDevContainerJob", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("cancel")
+  .description("Request cancellation; inspect the execution for confirmed stop")
+  .argument("<directory>")
+  .argument("<execution-id>")
+  .option("--idempotency-key <key>")
+  .action(async (directory, executionId, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("cancelDevContainerExecution", { ...scope, executionId: String(executionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers cancel", appId: scope.appId,
+      safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("cancelDevContainerExecution", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("pause")
+  .description("Pause a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("pauseDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers pause", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("pauseDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("resume")
+  .description("Resume a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("resumeDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers resume", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("resumeDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("restart")
+  .description("Restart a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("restartDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers restart", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("restartDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("scale")
+  .description("Set worker replicas within the declared ceiling")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--replicas <number>", "worker replicas, 0-20")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("scaleDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: Number(options.generation), replicas: Number(options.replicas) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers scale", appId: scope.appId,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("scaleDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("events")
+  .description("Read a bounded lifecycle event timeline")
+  .argument("<directory>")
+  .argument("<name>")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainerEvents", { ...scope, name: String(name), query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainerEvents", input));
+  });
+
+const containerRegistry = containers.command("registry")
+  .description("Manage app-bound registry credentials used only by trusted image fetching");
+
+containerRegistry.command("list").argument("<app-id>")
+  .action(async (appId) => {
+    const input = computeInput("listContainerRegistries", { appId: String(appId) });
+    output(await client().call("listContainerRegistries", input));
+  });
+
+containerRegistry.command("create").argument("<app-id>")
+  .requiredOption("--name <name>")
+  .requiredOption("--host <host>", "exact lowercase registry host, optionally with port")
+  .requiredOption("--username <username>")
+  .requiredOption("--password-stdin", "read the registry password from standard input")
+  .option("--idempotency-key <key>")
+  .action(async (appId, options) => {
+    const password = await secretFromStdin();
+    const input = computeInput("createContainerRegistry", { appId: String(appId), body: {
+      name: options.name, registryHost: options.host, username: options.username, password,
+    } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers registry create", appId: input.appId,
+      safeScope: { appId: input.appId }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("createContainerRegistry", input, { idempotencyKey }));
+  });
+
+containerRegistry.command("remove").argument("<app-id>").argument("<connection-id>")
+  .description("Revoke future resolutions; already-pinned images remain retained")
+  .option("--idempotency-key <key>")
+  .action(async (appId, connectionId, options) => {
+    const input = computeInput("deleteContainerRegistry", { appId: String(appId), connectionId: String(connectionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers registry remove", appId: input.appId,
+      safeScope: input, safeRequest: { action: "revoke-registry" }, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("deleteContainerRegistry", input, { idempotencyKey }));
+  });
+
+
 program
   .command("logs")
   .argument("<app-id>")
+  .option("--page", "return a normalized page with cursor and source freshness")
+  .option("--surface <surface>")
+  .option("--workload <name>", "container workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--execution <id>", "container execution ID")
+  .option("--instance <id>", "container instance ID")
+  .option("--cursor <cursor>", "continue the exact same filters and time range")
   .option(
     "--from <iso>",
     "ISO time",
@@ -6049,17 +6512,41 @@ program
   .option("--contains <text>")
   .option("--level <level>")
   .option("--limit <number>", "result limit", "200")
-  .action(async (appId, options) =>
-    output(
-      await client().post(`/v1/apps/${appId}/logs/query`, {
+  .action(async (appId, options) => {
+    if (options.page || [options.surface, options.workload, options.kind, options.execution, options.instance, options.cursor].some(value => value !== undefined)) {
+      const input = computeInput("queryLogsPage", { appId: String(appId), body: computeLogBody(options) });
+      output(await client().call("queryLogsPage", input));
+      return;
+    }
+    output(await client().post(`/v1/apps/${encoded(appId)}/logs/query`, {
         from: options.from,
         to: options.to,
         contains: options.contains,
         level: options.level,
         limit: Number(options.limit),
-      }),
-    ),
-  );
+      }));
+  });
+
+dev.command("logs")
+  .description("Read logs only from the development session saved in this directory")
+  .argument("<directory>")
+  .option("--from <iso>", "ISO time", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+  .option("--to <iso>", "ISO time", new Date().toISOString())
+  .option("--contains <text>")
+  .option("--level <level>")
+  .option("--surface <surface>")
+  .option("--workload <name>")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--execution <id>")
+  .option("--instance <id>")
+  .option("--cursor <cursor>", "continue the exact same filters and time range")
+  .option("--limit <number>", "page size, 1-200", "200")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const input = computeInput("queryDevLogsPage", { appId: state.appId, sessionId: state.sessionId, body: computeLogBody(options) });
+    output(await client(sourceRoot).call("queryDevLogsPage", input));
+  });
 
 program
   .command("metrics")
@@ -6117,11 +6604,13 @@ program
   .description("Read the stable app health and alert contract for agents")
   .argument("<app-id>")
   .option("--since <iso>", "return events and resolved alerts after this time")
+  .addOption(new Option("--contract-version <version>", "opt into compute sources with version 2").choices(["1", "2"]))
   .action(async (appId, options) => {
-    const query = options.since
-      ? `?since=${encodeURIComponent(String(options.since))}`
-      : "";
-    output(await client().get(`/v1/apps/${appId}/agent-feed${query}`));
+    const input = computeInput("getAgentFeed", { appId: String(appId), query: {
+      ...(options.since ? { since: String(options.since) } : {}),
+      ...(options.contractVersion ? { contractVersion: options.contractVersion } : {}),
+    } });
+    output(await client().call("getAgentFeed", input));
   });
 
 const alertRule = program

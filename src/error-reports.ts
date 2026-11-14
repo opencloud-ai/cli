@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { CommanderError, type Command } from "commander";
 import { ApiError } from "./api-client.js";
+import { computeErrorSchema } from "@opencloud/contracts/containers";
 import {
   COMMAND_VARIABLE,
   PRODUCT_NAME_VARIABLE,
@@ -244,6 +245,12 @@ function isCommanderError(error: unknown): boolean {
 export function isReportableFailure(error: unknown): boolean {
   if (isCommanderError(error) || isCallerFailure(error)) return false;
   if (error instanceof ApiError) {
+    const compute = computeErrorSchema.safeParse({
+      statusCode: error.status, code: error.code, message: error.message, details: error.details,
+    });
+    if (compute.success) {
+      return ["platform", "unknown"].includes(compute.data.details.origin);
+    }
     return error.status >= 500 || record(error.operation)?.state === "failed";
   }
   if (error instanceof OperationTerminalError) {

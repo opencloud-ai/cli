@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as sdk from "./index.js";
+import { defineFunction, schema, OpenCloudError as FunctionError } from "../../server/src/index.js";
 import {
   OPEN_CLOUD_SDK_VERSION,
   OpenCloudError,
@@ -33,7 +34,7 @@ const runtimeConfig = {
   environment: "production",
   sdk: {
     package: "@opencloud/js",
-    version: "2.3.0",
+    version: "2.8.0",
     module: "/_opencloud/sdk.js",
     types: "/_opencloud/sdk.d.ts",
     docs: "https://docs.opencloud.ai/sdk/javascript/",
@@ -185,8 +186,103 @@ afterEach(() => {
 });
 
 describe("@opencloud/js v2", () => {
+  it("uploads declared large inputs in bounded sessions and exposes a streaming download", async () => {
+    const uploadSessionId = "44444444-4444-4444-8444-444444444444";
+    const session = { uploadSessionId, fileId, path: "source.bin", sizeBytes: "1073741824", sha256: "a".repeat(64),
+      offsetBytes: "0", chunkBytes: 8 * 1024 ** 2, state: "uploading", expiresAt: "2099-01-01T00:00:00Z" };
+    const requests: { url: URL; init: RequestInit }[] = [];
+    standardFetch((url, init) => {
+      requests.push({ url, init });
+      if (url.pathname.startsWith("/_opencloud/files/uploads")) return init.method === "DELETE" ? new Response(null, { status: 204 }) : json(session);
+      if (url.pathname === `/_opencloud/files/${fileId}`) return new Response(new Uint8Array([1, 2, 3]), {
+        headers: { "content-length": "3", "content-type": "application/octet-stream", "x-opencloud-file-name": "source.bin" },
+      });
+    });
+    await opencloud.files.beginUpload({ workloadName: "transcode", name: "source.bin", contentType: "application/octet-stream",
+      sizeBytes: session.sizeBytes, sha256: session.sha256, idempotencyKey: uploadSessionId });
+    const chunk = new Blob([new Uint8Array([1, 2, 3])]);
+    await opencloud.files.uploadChunk(uploadSessionId, { offsetBytes: "0", data: chunk, sha256: "b".repeat(64) });
+    await opencloud.files.uploadStatus(uploadSessionId);
+    await opencloud.files.abortUpload(uploadSessionId);
+    const download = await opencloud.files.downloadStream(fileId);
+    expect(new Uint8Array(await new Response(download.data).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    const sent = requests.find(request => request.url.pathname.endsWith("/chunks"))!;
+    expect(sent.init.body).toBe(chunk);
+    expect(new Headers(sent.init.headers).get("authorization")).toBeNull();
+    expect(new Headers(sent.init.headers).get("x-opencloud-upload-offset")).toBe("0");
+    expect(sent.init.credentials).toBe("same-origin");
+  });
+  it.each(["call", "stream"] as const)("preserves actual defineFunction typed failures through functions.%s", async (method) => {
+    let handler: ((request: Request) => Response | Promise<Response>) | undefined;
+    const bindings: Record<string, string> = {
+      OPENCLOUD_APP_ID: appId,
+      OPENCLOUD_ENVIRONMENT: "production",
+      OPENCLOUD_SCHEMA: "app_test",
+      OPENCLOUD_SDK_VERSION: "2.8.0",
+      OPENCLOUD_DEPLOYMENT_VERSION: "release-7",
+      SUPABASE_URL: "https://platform.test",
+      SUPABASE_ANON_KEY: "synthetic-anon",
+      OPENCLOUD_AI_BASE_URL: "https://ai.test/v1",
+      OPENCLOUD_AI_API_KEY: "synthetic-ai-grant",
+      OPENCLOUD_AI_MODEL: "synthetic-model",
+      OPENCLOUD_FILES_URL: "https://files.test",
+      OPENCLOUD_FILES_GRANT: "synthetic-files-grant",
+      OPENCLOUD_INTEGRATIONS_URL: "https://integrations.test",
+      OPENCLOUD_INTEGRATIONS_GRANT: "synthetic-integrations-grant",
+      OPENCLOUD_FUNCTION_REQUEST_ID: "synthetic-function-request",
+      OPENCLOUD_FUNCTION_CORRELATION_ID: "synthetic-correlation",
+      OPENCLOUD_FUNCTION_NAME: "public-probe",
+      OPENCLOUD_SECRET_NAMES: "[]",
+    };
+    vi.stubGlobal("Deno", {
+      env: { get: (name: string) => bindings[name] },
+      serve: (callback: typeof handler) => { handler = callback; },
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let failure = new FunctionError("Selected file is unavailable", {
+      code: "FILE_INPUT_UNAVAILABLE", status: 403, retryable: false,
+      requestId: "file-request", details: { reason: "delegation-denied" },
+    });
+    defineFunction({ input: schema.object({}), handler: () => { throw failure; } });
+    let requestIdHeader: string | null | undefined;
+    standardFetch(async (url, init) => {
+      const response = await handler!(new Request(url, init));
+      if (requestIdHeader === null) response.headers.delete("x-request-id");
+      else if (requestIdHeader !== undefined) response.headers.set("x-request-id", requestIdHeader);
+      return response;
+    });
+    await expect(opencloud.functions[method]("public-probe", {})).rejects.toMatchObject({
+      code: "FILE_INPUT_UNAVAILABLE", message: "Selected file is unavailable",
+      status: 403, surface: "functions", requestId: "file-request",
+      retryable: false, details: { reason: "delegation-denied" },
+    });
+    failure = new FunctionError("Try again", {
+      code: "FILE_PROVIDER_BUSY", status: 409, retryable: true, requestId: "retry-request",
+    });
+    await expect(opencloud.functions[method]("public-probe", {})).rejects.toMatchObject({
+      code: "FILE_PROVIDER_BUSY", retryable: true, requestId: "retry-request",
+    });
+    failure = new FunctionError("Permanent refusal", {
+      code: "FILE_DELEGATION_INVALID", status: 503, retryable: false,
+    });
+    await expect(opencloud.functions[method]("public-probe", {})).rejects.toMatchObject({
+      code: "FILE_DELEGATION_INVALID", retryable: false,
+    });
+    failure = new FunctionError("Invalid wire code", {
+      code: "unbounded invalid code", status: 400, requestId: "body-request",
+    });
+    requestIdHeader = "edge-request";
+    await expect(opencloud.functions[method]("public-probe", {})).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT", requestId: "edge-request",
+    });
+    requestIdHeader = null;
+    await expect(opencloud.functions[method]("public-probe", {})).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT", requestId: "body-request",
+    });
+  });
+
   it("exports one stable singleton contract without legacy factories or raw namespaces", () => {
-    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.3.0");
+    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.8.0");
     expect("OPEN_CLOUD_JS_VERSION" in sdk).toBe(false);
     expect(opencloud).toMatchObject({
       app: { info: expect.any(Function) },
@@ -817,6 +913,19 @@ describe("@opencloud/js v2", () => {
       code: "NETWORK_ERROR",
       surface: "app",
       retryable: true,
+    });
+  });
+
+  it("retains top-level platform error precedence and legacy details", async () => {
+    const body = {
+      code: "FILE_INPUT_CHANGED", message: "Content was replaced", retryable: false,
+      details: { current: "changed" },
+      error: { code: "IGNORED_NESTED_CODE", message: "Ignored message", retryable: true },
+    };
+    standardFetch(() => json(body, { status: 409, headers: { "x-request-id": "top-request" } }));
+    await expect(opencloud.functions.call("public-probe", {})).rejects.toMatchObject({
+      code: "FILE_INPUT_CHANGED", message: "Content was replaced", requestId: "top-request",
+      retryable: false, details: body,
     });
   });
 

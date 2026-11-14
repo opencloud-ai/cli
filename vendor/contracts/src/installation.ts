@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { computeInstallationCapabilitiesSchema } from "./containers.js";
 
 /**
  * Installation capability switches projected to clients. They describe
@@ -17,6 +18,8 @@ export const installationCapabilitiesSchema = z
     appAiSubscriptionConnections: z.boolean().default(true),
     /** Organisations can start a metered Cloud subscription (per person). */
     organisationBilling: z.boolean().default(false),
+    /** Supported runtime modes; payer eligibility and feature flags are separate. */
+    compute: computeInstallationCapabilitiesSchema.prefault({}),
   })
   .strip();
 

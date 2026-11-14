@@ -28,6 +28,9 @@ import {
   upsertAlertRuleRequestSchema,
 } from "./api-core.js";
 import { openCloudManifestSchema } from "./manifest.js";
+import type { ComputeLogCoordinates, ComputeLogObservation } from "./compute-observation.js";
+import { customMetricMeasurementSchema, ingestCustomMetricsRequestSchema } from "./api-core.js";
+export { customMetricDimensionsSchema, customMetricMeasurementSchema, ingestCustomMetricsRequestSchema } from "./api-core.js";
 
 export {
   alertAggregationSchema,
@@ -57,31 +60,6 @@ export {
   startAgentOnboardingRequestSchema,
   upsertAlertRuleRequestSchema,
 } from "./api-core.js";
-
-export const customMetricDimensionsSchema = z.record(
-  z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
-  z.string().min(1).max(40),
-);
-
-export const customMetricMeasurementSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .max(63)
-    .regex(/^[a-z][a-z0-9_]*$/),
-  value: z.number().finite().min(-1e15).max(1e15),
-  dimensions: customMetricDimensionsSchema.default({}),
-  idempotencyKey: z
-    .string()
-    .min(8)
-    .max(120)
-    .regex(/^[A-Za-z0-9._:-]+$/)
-    .optional(),
-});
-
-export const ingestCustomMetricsRequestSchema = z.object({
-  measurements: z.array(customMetricMeasurementSchema).min(1).max(20),
-});
 
 export const alertStateSchema = z.enum([
   "ok",
@@ -180,6 +158,9 @@ export interface AppRecord {
   appUrl: string | null;
   authUrl: string;
   apiUrl: string;
+  /** The app's page in the dashboard, and its Sharing page, where people are invited. */
+  dashboardUrl?: string;
+  sharingUrl?: string;
   visibility: AppVisibility;
   aiCredentialSource: AppAiCredentialSource;
   state: AppState;
@@ -292,6 +273,9 @@ export interface DeploymentRecord {
   sdkVersion: string;
   manifest: unknown;
   state: DeploymentState;
+  /** Server-selected release path; absent on older installations. */
+  deploymentMode?: "online" | "maintenance";
+  preparationPhase?: "preparing" | "ready" | "published" | "failed" | null;
   rollbackOfDeploymentId: string | null;
   error: Record<string, unknown> | null;
   createdAt: string;
@@ -349,6 +333,7 @@ export interface OperationsPage {
 }
 
 export interface AppLogEntry {
+  compute?: ComputeLogCoordinates;
   id: string;
   timestamp: string;
   level: "debug" | "info" | "warn" | "error";
@@ -358,6 +343,7 @@ export interface AppLogEntry {
 }
 
 export interface AppLogsPage {
+  computeObservation?: ComputeLogObservation;
   entries: AppLogEntry[];
   nextCursor: string | null;
 }

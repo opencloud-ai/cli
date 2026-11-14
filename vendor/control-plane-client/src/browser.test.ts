@@ -36,6 +36,39 @@ describe("browser OpenCloudClient", () => {
     expect(new Headers(init?.headers).get("idempotency-key")).toBe("membership-change-1");
   });
 
+  it("reads a bounded text preview of raw bytes and stops reading there", async () => {
+    let cancelled = false;
+    const chunks = ["Packing list\n", "- Sunscreen\n", "- Towels\n"].map((part) => new TextEncoder().encode(part));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = vi.fn(async () => new Response(body, { headers: { "content-type": "text/plain" } }));
+    const client = browser(fetcher as typeof fetch);
+
+    await expect(client.readText("/v1/apps/a/files/f/content", { maxBytes: 20 }))
+      .resolves.toEqual({ text: "Packing list\n- Sunsc", truncated: true });
+    expect(cancelled).toBe(true);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(url).toBe("https://dashboard.opencloud.test/v1/apps/a/files/f/content");
+    expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
+    expect(new Headers(init?.headers).get("accept")).toBe("*/*");
+
+    const whole = browser(vi.fn(async () => new Response("short")) as typeof fetch);
+    await expect(whole.readText("/v1/file", { maxBytes: 20 })).resolves.toEqual({ text: "short", truncated: false });
+
+    const missing = browser(vi.fn(async () => Response.json(
+      { code: "FILE_NOT_FOUND", message: "File not found" }, { status: 404 },
+    )) as typeof fetch);
+    await expect(missing.readText("/v1/file", { maxBytes: 20 })).rejects.toBeInstanceOf(ApiError);
+  });
+
   it("binds the native fetch default to the browser global", async () => {
     vi.stubGlobal("location", { origin: "https://dashboard.opencloud.test" });
     let receiver: unknown;

@@ -168,8 +168,9 @@ export async function buildBundle(
     migration.sha256 = await sha256File(migrationFile);
   }
   const manifest = parseManifest(raw);
+  const staticFrontend = "directory" in manifest.frontend ? manifest.frontend : null;
   const platformFrontend =
-    options.platformFrontend === true && manifest.frontend.build !== undefined;
+    options.platformFrontend === true && staticFrontend?.build !== undefined;
   const selection = await selectBundleFiles(
     root,
     manifest,
@@ -178,8 +179,8 @@ export async function buildBundle(
   );
   if (!platformFrontend) await validateAppRouteAssets(root, manifest);
   const e2eTest = await selectE2eTest(root, selection, manifestFile);
-  if (e2eTest) {
-    assertE2eTestOutsideFrontend(manifest.frontend.directory);
+  if (e2eTest && staticFrontend) {
+    assertE2eTestOutsideFrontend(staticFrontend.directory);
   }
   const functionWarnings = await inspectFunctionEntrypoints(
     manifest,
@@ -188,12 +189,12 @@ export async function buildBundle(
   await assertSelfContainedFunctions(manifest, selection);
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
-    ...(platformFrontend
+    ...(platformFrontend && staticFrontend
       ? [
           {
             code: "FRONTEND_BUILT_BY_PLATFORM" as const,
-            path: manifest.frontend.directory,
-            message: `OpenCloud builds ${manifest.frontend.directory} with npm run ${manifest.frontend.build!.script} during validation; this local bundle leaves it out.`,
+            path: staticFrontend.directory,
+            message: `OpenCloud builds ${staticFrontend.directory} with npm run ${staticFrontend.build!.script} during validation; this local bundle leaves it out.`,
           },
         ]
       : await findFrontendSdkWarnings(manifest, selection)),
@@ -265,6 +266,7 @@ export async function validateAppRouteAssets(
   root: string,
   manifest: OpenCloudManifest,
 ): Promise<void> {
+  if (!("directory" in manifest.frontend)) return;
   const frontend = resolveBundlePath(
     root,
     manifest.frontend.directory,
@@ -591,6 +593,7 @@ async function findFrontendSdkWarnings(
   manifest: OpenCloudManifest,
   selection: BundleSelection,
 ): Promise<BundleWarning[]> {
+  if (!("directory" in manifest.frontend)) return [];
   const frontendPrefix = manifest.frontend.directory + "/";
   const candidates = [...selection.files.entries()].filter(
     ([relative]) =>
@@ -728,7 +731,7 @@ async function selectBundleFiles(
     await walkDirectory(root, absoluteDirectory, selection, manifestFile);
   };
 
-  if (!platformFrontend) {
+  if (!platformFrontend && "directory" in manifest.frontend) {
     await addDirectoryTree(
       manifest.frontend.directory,
       `Frontend directory ${manifest.frontend.directory}`,

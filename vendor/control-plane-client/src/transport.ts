@@ -239,34 +239,90 @@ export class ControlPlaneTransport {
       options.timeoutMs ?? this.defaultTimeoutMs,
     );
     try {
-      const token = await withAbort(this.resolveToken(), composed.signal);
-      if (options.requireToken && !token) {
-        throw new Error("An OpenCloud credential is required");
-      }
-      const headers = new Headers(options.headers);
-      headers.set("accept", "application/json");
-      if (token) headers.set("authorization", `Bearer ${token}`);
-      if (this.options.internalMcpSecret) {
-        headers.set("x-opencloud-mcp-internal", this.options.internalMcpSecret);
-      }
-      if (options.idempotencyKey) {
-        headers.set("idempotency-key", options.idempotencyKey);
-      }
-      if (options.cacheControl) headers.set("cache-control", options.cacheControl);
-      const init: RequestInit = {
-        method,
-        headers,
-        signal: composed.signal,
-      };
-      if (this.options.credentials) init.credentials = this.options.credentials;
-      if (options.body !== undefined) init.body = options.body;
-      const response = await this.fetcher(`${this.apiUrl}${requestPath}`, init);
+      const response = await this.open(method, requestPath, options, composed.signal);
       const body = await responseBody(response);
       if (!response.ok) throw apiErrorFromResponse(response, body);
       return options.schema ? options.schema.parse(body) : (body as T);
     } finally {
       composed.cleanup();
     }
+  }
+
+  /**
+   * Reads at most `maxBytes` of a raw response, such as a file's bytes, as
+   * UTF-8 text and cancels the rest, for a bounded read-only preview.
+   */
+  async readText(
+    requestPath: string,
+    options: AbortableRequestOptions & { readonly maxBytes: number },
+  ): Promise<{ text: string; truncated: boolean }> {
+    const composed = composeRequestSignal(
+      options.signal,
+      options.timeoutMs ?? this.defaultTimeoutMs,
+    );
+    try {
+      const response = await this.open(
+        "GET",
+        requestPath,
+        { ...options, headers: { accept: "*/*" } },
+        composed.signal,
+      );
+      if (!response.ok) {
+        throw apiErrorFromResponse(response, await responseBody(response));
+      }
+      const reader = response.body?.getReader();
+      const bytes = new Uint8Array(options.maxBytes);
+      let length = 0;
+      let truncated = false;
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const room = options.maxBytes - length;
+        bytes.set(value.subarray(0, room), length);
+        length += Math.min(room, value.byteLength);
+        if (value.byteLength > room) {
+          truncated = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+      }
+      return {
+        text: new TextDecoder().decode(bytes.subarray(0, length)),
+        truncated,
+      };
+    } finally {
+      composed.cleanup();
+    }
+  }
+
+  private async open(
+    method: HttpMethod,
+    requestPath: string,
+    options: SendOptions<unknown>,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const token = await withAbort(this.resolveToken(), signal);
+    if (options.requireToken && !token) {
+      throw new Error("An OpenCloud credential is required");
+    }
+    const headers = new Headers(options.headers);
+    if (!headers.has("accept")) headers.set("accept", "application/json");
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    if (this.options.internalMcpSecret) {
+      headers.set("x-opencloud-mcp-internal", this.options.internalMcpSecret);
+    }
+    if (options.idempotencyKey) {
+      headers.set("idempotency-key", options.idempotencyKey);
+    }
+    if (options.cacheControl) headers.set("cache-control", options.cacheControl);
+    const init: RequestInit = {
+      method,
+      headers,
+      signal,
+    };
+    if (this.options.credentials) init.credentials = this.options.credentials;
+    if (options.body !== undefined) init.body = options.body;
+    return this.fetcher(`${this.apiUrl}${requestPath}`, init);
   }
 
   private resolveToken(): Promise<string | undefined> {

@@ -60,6 +60,28 @@ async function readArchivedManifest(
 }
 
 describe("bundle builder", () => {
+  it("bundles a container frontend without static files or running image code", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(path.join(root, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  container: web
+containers:
+  - name: web
+    kind: service
+    image: registry.example/web:latest
+    service:
+      startupProbe: { path: /ready }
+      readinessProbe: { path: /ready }
+`);
+    const bundle = await buildBundle(root, { platformFrontend: true });
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(archived.frontend).toEqual({ container: "web" });
+    expect(bundle.manifest.containers?.[0]?.name).toBe("web");
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.8.0");
+    expect(bundle.files).toEqual(["opencloud.json"]);
+  });
   it("omits empty directories so file-only draft reconstruction is byte-identical", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend", "evidence"), { recursive: true });
@@ -283,7 +305,7 @@ functions:
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "2.3.0",
+        version: "2.8.0",
       },
     });
     expect(first.files).toEqual([
@@ -611,7 +633,7 @@ ${callingUserEvents}`;
 
     const bundle = await buildBundle(root);
     const archived = await readArchivedManifest(root, bundle.archive);
-    expect(bundle.manifest.runtime.sdk.version).toBe("2.3.0");
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.8.0");
     expect(bundle.manifest.integrations).toEqual({
       crm: {
         provider: "custom",

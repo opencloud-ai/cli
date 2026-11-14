@@ -135,6 +135,13 @@ export const hostedAgentAccessSchema = z.object({
   plan: z
     .object({ key: billingPlanKeySchema, name: z.string(), monthlyPrice: z.string().nullable() })
     .nullable(),
+  /**
+   * Included only in apps the person was invited to administer, on their
+   * owners' plans. Their own new chats still need a plan that includes it.
+   */
+  sharedAppsOnly: z.boolean().optional(),
+  /** With sharedAppsOnly, those apps, so Agent can point to their chats. */
+  sharedAppIds: z.array(z.string()).optional(),
 });
 export type HostedAgentAccess = z.infer<typeof hostedAgentAccessSchema>;
 
@@ -383,6 +390,33 @@ export const organisationBillingSchema = z.object({
   }),
 });
 export type OrganisationBilling = z.infer<typeof organisationBillingSchema>;
+
+/** A company organisation's Cloud billing as platform administrators see it. */
+export const organisationBillingAdminSchema = z.object({
+  /** Whether subscription enforcement (ORGANISATION_BILLING_REQUIRED) has started on this installation. */
+  enforced: z.boolean(),
+  standing: organisationBillingSchema.shape.standing,
+  /** The standing the organisation would have without its exemption; the same as `standing` without one. */
+  standingWithoutExemption: organisationBillingSchema.shape.standing,
+  exemption: z
+    .object({
+      /**
+       * `existing_before_enforcement`: the organisation existed when enforcement
+       * started and stays exempt for good. `platform_admin`: granted by an
+       * administrator, who may remove it.
+       */
+      source: z.enum(["existing_before_enforcement", "platform_admin"]),
+      /** The administrator's audited reason; null for `existing_before_enforcement`. */
+      reason: z.string().nullable(),
+      grantedBy: z.object({ id: z.string(), email: z.string().nullable() }).nullable(),
+      grantedAt: isoTimestamp,
+    })
+    .nullable(),
+  subscription: organisationBillingSchema.shape.subscription,
+  /** Apps paused because the organisation's subscription lapsed. */
+  pausedApps: z.number().int().min(0),
+});
+export type OrganisationBillingAdmin = z.infer<typeof organisationBillingAdminSchema>;
 
 /** Optional: the sign-up paywall returns to the welcome flow instead of the Billing page. */
 export const organisationBillingCheckoutRequestSchema = z

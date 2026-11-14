@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.21.0
+
+- Add production and isolated development container commands for jobs, HTTP
+  services, and workers: list, get, run, executions, execution, cancel, pause,
+  resume, restart, scale, and events. Mutations retain their exact scope and
+  idempotency key; workload controls compare the observed generation.
+- Add app-bound registry management with passwords read from standard input,
+  and account-only compute payer settings, prices, and usage reads. Consent
+  and budget changes remain in the browser.
+- Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
+  source freshness. Expected app and policy errors keep their structured
+  diagnostics without becoming platform error reports.
+- Accept container frontends and routes, and default new unpinned app bundles
+  to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
+
 ## 3.20.0
 
 - Add full app export and import: source, database and managed files in one

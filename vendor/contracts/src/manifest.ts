@@ -2,6 +2,7 @@ import { z } from "zod";
 import { dataSearchDeclarationsSchema } from "./data-search.js";
 import { CronExpressionParser } from "cron-parser";
 import { agentTaskDefinitionSchema } from "./agent-tasks.js";
+import { containerDefinitionsSchema, containerNameSchema } from "./containers.js";
 import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest, AppRouteError } from "./app-routes.js";
 import {
   alertAggregationSchema,
@@ -135,10 +136,10 @@ function isAppOwnedHealthPath(value: string): boolean {
 const digest = z.string().regex(/^[a-f0-9]{64}$/, "expected a SHA-256 digest");
 
 /** Exact immutable SDK artifacts installed by this platform release. */
-const INSTALLED_SDK_VERSIONS = ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"] as const;
+const INSTALLED_SDK_VERSIONS = ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0"] as const;
 
 export const sdkVersionSchema = z.enum(INSTALLED_SDK_VERSIONS, {
-  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, or 2.7.0",
+  error: "expected an installed SDK version: 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, 2.7.0, or 2.8.0",
 });
 
 /** The next occurrence of a manifest cron schedule after `after`. */
@@ -426,6 +427,11 @@ export const openCloudManifestV3Schema = z
     schemaVersion: z.literal(3),
     appId: z.uuid(),
     ...openCloudManifestFields,
+    frontend: z.union([
+      openCloudManifestFields.frontend,
+      z.object({ container: containerNameSchema }).strict(),
+    ]),
+    containers: containerDefinitionsSchema.optional(),
     routes: appRoutesSchema.optional(),
     provides: z
       .object({ integration: providedIntegrationSchema })
@@ -440,25 +446,54 @@ export const openCloudManifestSchema = z
     openCloudManifestV3Schema,
   ])
   .superRefine((manifest, context) => {
+    if (manifest.schemaVersion === 3) {
+      const containers = manifest.containers ?? [];
+      const serviceNames = new Set(containers.filter(definition => definition.kind === "service").map(definition => definition.name));
+      if ("container" in manifest.frontend && !serviceNames.has(manifest.frontend.container)) {
+        context.addIssue({ code: "custom", path: ["frontend", "container"], message: "Container frontend must reference a declared service" });
+      }
+      const systemFunctions = new Set(manifest.functions.filter(definition => definition.access === "system").map(definition => definition.name));
+      const metrics = new Set(manifest.observability?.metrics.map(metric => metric.name) ?? []);
+      containers.forEach((definition, index) => {
+        for (const [position, name] of definition.permissions.functions.entries()) {
+          if (!systemFunctions.has(name)) context.addIssue({ code: "custom", path: ["containers", index, "permissions", "functions", position], message: "Container capabilities must reference declared system Functions" });
+        }
+        for (const [position, name] of definition.permissions.metrics.entries()) {
+          if (!metrics.has(name)) context.addIssue({ code: "custom", path: ["containers", index, "permissions", "metrics", position], message: "Container metrics must reference declarations in this manifest" });
+        }
+        if (definition.kind === "job" && definition.job.onComplete && !systemFunctions.has(definition.job.onComplete)) {
+          context.addIssue({ code: "custom", path: ["containers", index, "job", "onComplete"], message: "Completion must reference a declared system Function" });
+        }
+        for (const [name, reference] of Object.entries(definition.secrets)) {
+          if (!Object.hasOwn(manifest.secrets, reference)) context.addIssue({ code: "custom", path: ["containers", index, "secrets", name], message: "Container secret must reference a declared app secret" });
+        }
+      });
+      manifest.routes?.forEach((route, index) => {
+        if ("container" in route && !serviceNames.has(route.container)) context.addIssue({ code: "custom", path: ["routes", index, "container"], message: "Container route must reference a declared service" });
+        if ("asset" in route && "container" in manifest.frontend) context.addIssue({ code: "custom", path: ["routes", index, "asset"], message: "Asset routes require a static frontend directory" });
+      });
+    }
     if (manifest.data?.search.length && !sdkVersionAtLeast(manifest.runtime.sdk.version, "2.4.0")) {
       context.addIssue({ code: "custom", path: ["data", "search"], message: "Data search requires runtime SDK version 2.4.0" });
     }
     if (manifest.schemaVersion === 3 && manifest.routes) {
       manifest.routes.forEach((route, index) => {
-        if (!("function" in route)) return;
-        const target = manifest.functions.find((definition) => definition.name === route.function);
-        if (!target || target.access === "system") {
-          context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Route must reference a declared user or public Function" });
-        }
-        if (!sdkVersionAtLeast(manifest.runtime.sdk.version, "2.3.0")) {
-          context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Function routes require runtime SDK version 2.3.0 or later" });
+        if ("asset" in route) return;
+        if ("function" in route) {
+          const target = manifest.functions.find((definition) => definition.name === route.function);
+          if (!target || target.access === "system") {
+            context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Route must reference a declared user or public Function" });
+          }
+          if (!sdkVersionAtLeast(manifest.runtime.sdk.version, "2.3.0")) {
+            context.addIssue({ code: "custom", path: ["routes", index, "function"], message: "Function routes require runtime SDK version 2.3.0 or later" });
+          }
         }
         try {
           const healthUrl = new URL(manifest.health.path, "https://opencloud-health.invalid");
           const health = parseAppRouteRequest(`${healthUrl.pathname}${healthUrl.search}`, "GET");
           const matched = matchAppRoute(compileAppRoutes([route]), health);
           if (matched.kind === "matched" || matched.kind === "method-not-allowed") {
-            context.addIssue({ code: "custom", path: ["routes", index, "path"], message: "Function routes must not match the manifest health path" });
+            context.addIssue({ code: "custom", path: ["routes", index, "path"], message: "Function and container routes must not match the manifest health path" });
           }
         } catch (error) {
           if (!(error instanceof AppRouteError)) throw error;

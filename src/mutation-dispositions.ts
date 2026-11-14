@@ -27,6 +27,62 @@ export interface MutationDispositionRecord {
  * call sites in the CLI entrypoint.
  */
 export const mutationDispositionRegistry = {
+  "opencloud containers run": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "A required stable key and input digest replay the original execution without submitting another job.",
+  },
+  "opencloud containers cancel": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud containers pause": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud containers resume": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud containers restart": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud containers scale": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud app dev containers run": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "A required stable key and input digest replay the original execution without submitting another job.",
+  },
+  "opencloud app dev containers cancel": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud app dev containers pause": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud app dev containers resume": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud app dev containers restart": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud app dev containers scale": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and exact environment replay one control intent; generation checks prevent stale controls.",
+  },
+  "opencloud containers registry create": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key and credential request digest replay one app-bound registry connection without storing the credential in the journal.",
+  },
+  "opencloud containers registry remove": {
+    boundary: "exact_app", recovery: "server_replay",
+    reason: "The retained key replays revocation of the exact registry connection while pinned images stay retained.",
+  },
   "opencloud app export create": {
     boundary: "exact_app", recovery: "durable_operation",
     reason: "The retained key replays the export operation; the operation returns the same export coordinate.",

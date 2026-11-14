@@ -80,7 +80,7 @@ try {
     process.platform === "win32" ? "opencloud.cmd" : "opencloud",
   );
   const childEnvironment = { ...process.env };
-  delete childEnvironment.INIT_CWD;
+  for (const name of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_MUTATION_JOURNAL_DIR"]) delete childEnvironment[name];
   // These failures have no fake API; never report them to a real installation.
   childEnvironment.OPENCLOUD_TELEMETRY = "0";
   const version = run(binary, ["--cli-version"], {
@@ -97,6 +97,10 @@ try {
     env: childEnvironment,
   });
   assert.match(help.stdout, /deploy \[options\] <app-id> <draft-id>/);
+  for (const args of [["containers", "run"], ["app", "dev", "containers", "scale"], ["app", "dev", "logs"], ["compute", "settings"]]) {
+    const command = run(binary, [...args, "--help"], { cwd: consumer, env: childEnvironment });
+    assert.match(command.stdout, /Usage:/);
+  }
 
   const invalid = run(
     binary,
@@ -125,9 +129,29 @@ try {
   );
   assert.equal(manifest.schemaVersion, 3);
   assert.equal("version" in manifest, false);
+  assert.equal(manifest.runtime.sdk.version, "2.8.0");
+
+  const containerApp = path.join(consumer, "container-app");
+  await mkdir(containerApp);
+  await writeFile(path.join(containerApp, "opencloud.yaml"), YAML.stringify({
+    schemaVersion: 3, appId: "10000000-0000-4000-8000-000000000001", frontend: { container: "web" },
+    containers: [{ name: "web", kind: "service", image: "registry.example/web:latest", service: {
+      startupProbe: { path: "/ready" }, readinessProbe: { path: "/ready" },
+    } }],
+  }));
+  const archivePath = path.join(consumer, "container-app.tgz");
+  const validation = run(binary, ["validate", containerApp, "--write-archive", archivePath], { cwd: consumer, env: childEnvironment });
+  assert.equal(JSON.parse(validation.stdout).valid, true);
+  const extracted = path.join(consumer, "extracted");
+  await mkdir(extracted);
+  await tar.extract({ file: archivePath, cwd: extracted });
+  const containerManifest = JSON.parse(await readFile(path.join(extracted, "opencloud.json"), "utf8"));
+  assert.deepEqual(containerManifest.frontend, { container: "web" });
+  assert.equal(containerManifest.containers[0].kind, "service");
+  assert.equal(containerManifest.runtime.sdk.version, "2.8.0");
 
   process.stdout.write(
-    `Packed OpenCloud CLI ${packageVersion} installs, starts, emits structured failures, and initializes schema 3.\n`,
+    `Packed OpenCloud CLI ${packageVersion} installs, exposes compute commands, emits structured failures, initializes schema 3 and bundles a container frontend.\n`,
   );
 } finally {
   await rm(temporary, { recursive: true, force: true });

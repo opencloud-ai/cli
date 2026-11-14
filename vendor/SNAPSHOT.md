@@ -1,5 +1,31 @@
 # Public platform snapshots
 
+## CLI 3.21.0 container compute
+
+Public Contracts and control-plane client files needed by this release are
+verbatim snapshots from accepted platform commit `f7249b1c`; the compute price
+catalog, settings projection and installed SDK test are from `0f8cb1b0`.
+The bundler and compute-protocol files are from `78d17bf5`. Browser and Function
+SDK source/tests are from `68650784` (SDK 2.8.0). The local default for new
+unpinned bundles is now 2.8.0; immutable older SDK artifacts are untouched.
+Unrelated brand and installer snapshots retain their previous provenance.
+
+The Contracts public type graph requires the exact `model-choices`, `reasoning`,
+`identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from
+`f7249b1c`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only
+their public credential-free dependencies; no Agent service implementation is
+included. The public package still contains only the standalone bundle and
+release documents.
+
+Portable compute, manifest, transport and SDK tests run locally. Upstream
+`compute-control-plane.test.ts` and `compute-observation.test.ts` are not copied
+because they import private administrator contracts. The copied feature flag
+test also requires private administrator contracts, and installation-section
+tests compare a platform docs build copy, so Vitest excludes those alongside
+the existing platform packaging tests. `src/compute.test.ts` and
+`scripts/compute-http-contract.mjs` cover public compute validation, routes,
+session isolation, immutable replay, errors, logs and Feed behavior here.
+
 Contracts, the bundler, and the typed control-plane client are copied verbatim
 from the OpenCloud platform source paths
 `packages/{contracts,bundler,control-plane-client}/src`. Structural dashboard,

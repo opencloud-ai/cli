@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  aiAutomaticStatusSchema,
+  aiChoiceLabelSchema,
+  aiModelChoiceSchema,
+  aiModelPickerGroupSchema,
+} from "@opencloud/agent-protocol";
 import { aiAuthMethodSchema, aiProviderSchema } from "./dashboard-integrations.js";
 
 /**
@@ -94,6 +100,53 @@ export const aiIncludedStateSchema = z.object({
   }).strict().nullable(),
 }).strict();
 
+/**
+ * What an app's automatic tasks use: automatic repairs, scheduled Agent tasks
+ * and AI calls from the app's code. They follow the latest pick in the app's
+ * Agent chat unless an app Admin or organisation admin pins a model.
+ */
+export const appAiAutomaticSchema = z.object({
+  mode: z.enum(["follow_chat", "fixed"]),
+  fixed: aiModelChoiceSchema.nullable(),
+  /** The latest pick in the app's canonical chat, shown even while a pin wins. */
+  chat: z.object({
+    choice: aiModelChoiceSchema,
+    label: aiChoiceLabelSchema.nullable(),
+    by: z.object({ userId: uuid, name: z.string().trim().min(1).max(200) }).strict().nullable(),
+    at: timestamp.nullable(),
+  }).strict().nullable(),
+  effective: aiAutomaticStatusSchema,
+  /** Models an editor can pin, grouped by provider. */
+  options: z.array(aiModelPickerGroupSchema).max(100),
+}).strict();
+
+export const updateAppAiAutomaticRequestSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  mode: z.enum(["follow_chat", "fixed"]),
+  fixed: aiModelChoiceSchema.nullable(),
+}).strict().refine((value) => (value.mode === "fixed") === (value.fixed !== null), {
+  message: "A fixed model is required exactly when the mode is fixed",
+});
+
+/**
+ * Automatic repairs: when one of the app's alerts fires, the Agent finds the
+ * cause, tests a fix and releases it. On unless an app Admin turns them off.
+ */
+export const appAiRepairsSchema = z.object({
+  enabled: z.boolean(),
+}).strict();
+
+export const updateAppAiRepairsRequestSchema = z.object({
+  enabled: z.boolean(),
+  /** Idempotency of the editor's permission when repairs are turned on. */
+  requestId: uuid,
+}).strict();
+
+export const updateAppAdminAiRequestSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  allowed: z.boolean(),
+}).strict();
+
 export const appAiSetupSchema = z.object({
   schemaVersion: z.literal(1),
   appId: uuid,
@@ -111,8 +164,8 @@ export const appAiSetupSchema = z.object({
     viewerAccount: aiAccountSummarySchema.nullable(),
     allowedPeople: z.number().int().nonnegative(),
     /**
-     * The viewer owns this app outside a company, so their own account may pay
-     * for all of its work (automatic work and app features included).
+     * The viewer owns this app on a personal installation. Their chats use
+     * their account automatically; they may authorize the app's other work.
      */
     viewerPaysForAll: z.boolean(),
   }).strict(),
@@ -145,6 +198,10 @@ export const appAiSetupSchema = z.object({
   }).strict(),
   /** The viewer's own accounts, offered for "Share one of my accounts". */
   viewerAccounts: z.array(aiAccountSummarySchema).max(100),
+  automatic: appAiAutomaticSchema,
+  repairs: appAiRepairsSchema,
+  /** Personal installations only; only the app owner can change it. */
+  adminAi: z.object({ allowed: z.boolean(), canEdit: z.boolean() }).strict().nullable().optional(),
 }).strict();
 
 export const updateAppAiSetupRequestSchema = z.object({
@@ -183,16 +240,38 @@ export const aiUsageWeekSchema = z.object({
   rows: z.array(aiUsageRowSchema).max(9),
 }).strict();
 
+/** A calendar date in the payer's time zone, e.g. 2026-10-17. */
+const calendarDate = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+
+/** The longest range one usage read covers. */
+export const APP_AI_USAGE_MAX_DAYS = 366;
+/** Ranges up to this many days are split into days; longer ones into weeks. */
+export const APP_AI_USAGE_DAILY_MAX_DAYS = 62;
+
+export const appAiUsageRangeSchema = z.object({
+  /** Inclusive calendar dates in `timeZone`. */
+  from: calendarDate,
+  to: calendarDate,
+  bucket: z.enum(["day", "week"]),
+  /** Oldest first. Week periods are clipped to the range at either end. */
+  periods: z.array(aiUsageWeekSchema).min(1).max(APP_AI_USAGE_MAX_DAYS),
+}).strict();
+
 export const appAiUsageSchema = z.object({
   schemaVersion: z.literal(1),
   appId: uuid,
   timeZone: z.string().min(1).max(100),
   /** Oldest first; the last week is the current one. */
   weeks: z.array(aiUsageWeekSchema).min(1).max(26),
+  /** Present when the request named a date range. */
+  range: appAiUsageRangeSchema.optional(),
 }).strict();
 
 export const appAiUsageQuerySchema = z.object({
   weeks: z.coerce.number().int().min(1).max(26).optional(),
+  /** Both or neither: an inclusive range of at most 366 days. */
+  from: calendarDate.optional(),
+  to: calendarDate.optional(),
 }).strict();
 
 export const organisationAiUsageSchema = z.object({

@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.20.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.21.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.20.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.20.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.21.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.21.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -412,7 +412,7 @@ integrations:
       types: [contact.created]
 ```
 
-Consumer slots need runtime SDK 2.2.0 or later; the 2.3.0 default qualifies. A
+Consumer slots need runtime SDK 2.2.0 or later; the 2.8.0 default qualifies. A
 provider contract that declares `sync`, `webhook`, or `events` must pin SDK
 2.6.0. Local validation checks both shapes before development or deployment.
 Integration sharing is evaluated for a person, so `integration custom-list`
@@ -517,6 +517,65 @@ continue history. Successful and failed terminal records are retained for 14
 days; active work remains visible until terminal. These commands never return
 job payloads, idempotency keys, or enqueuing user identifiers, and intentionally
 provide no cancel or redrive action.
+
+## Containers
+
+Container compute requires an installation with compute enabled and a configured
+payer. Declare jobs, services, and workers in `opencloud.yaml`; commands cannot
+override their image, resources, or permissions. SDK 2.8.0 is the default for
+new unpinned bundles. Existing explicit SDK pins remain unchanged.
+
+```bash
+opencloud containers list "$APP_ID"
+opencloud containers get "$APP_ID" web
+opencloud containers run "$APP_ID" report --input '{"month":"2026-11"}' \
+  --idempotency-key report-2026-11
+opencloud containers executions "$APP_ID" --workload report
+opencloud containers execution "$APP_ID" "$EXECUTION_ID"
+opencloud containers cancel "$APP_ID" "$EXECUTION_ID" --idempotency-key cancel-report-2026-11
+opencloud containers pause "$APP_ID" web --generation 3
+opencloud containers resume "$APP_ID" web --generation 4
+opencloud containers restart "$APP_ID" web --generation 5
+opencloud containers scale "$APP_ID" consumer --generation 2 --replicas 3
+opencloud containers events "$APP_ID" web --limit 50
+```
+
+`run` returns durable acceptance, followed by execution status and independently
+reported completion delivery. After a lost reply, repeat the same input and key
+to recover that execution. An unknown process outcome is never permission to
+repeat its effects. Control commands require the generation from `get`; scaling
+applies only to workers and resets at the next deployment. Usage includes exact
+decimal costs, integer quantities, and pending evidence.
+
+Every workload command also exists under `app dev containers`, taking a local
+directory in place of the app ID. It uses that directory's saved session:
+
+```bash
+opencloud app dev containers run ./app report --input '{}' --idempotency-key dev-report-1
+opencloud app dev containers get ./app web
+opencloud app dev logs ./app --workload web
+opencloud logs "$APP_ID" --workload web --page
+opencloud agent-feed "$APP_ID" --contract-version 2
+```
+
+Log pages expose source freshness and explicit gaps. Continue a cursor with
+exactly the same filters, `--from`, `--to`, and limit. Logs without any page or
+compute filter retain their legacy response. Feed v1 stays the default.
+
+Registry connections belong to one app and one exact host. They authorize
+trusted image fetching; containers never receive the credential:
+
+```bash
+opencloud containers registry create "$APP_ID" --name Images --host registry.example \
+  --username reader --password-stdin --idempotency-key registry-images-1 < registry-password.txt
+opencloud containers registry list "$APP_ID"
+opencloud containers registry remove "$APP_ID" "$CONNECTION_ID"
+```
+
+`compute settings`, `compute prices`, and `compute usage --from <iso> --to <iso>`
+use your stored account login and current payer authority. App tokens and Agent
+runtime credentials cannot run these commands. Use the browser for payer
+consent and budget changes. The CLI does not change a budget when resuming work.
 
 ## Agent Feed and alert rules
 

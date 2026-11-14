@@ -14,6 +14,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
+import { computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
 
@@ -521,13 +522,17 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
       ? (body.error as Record<string, unknown>)
       : {};
   const code = safeCode(body.code ?? nested.code, `HTTP_${error.status}`);
+  const compute = computeErrorSchema.safeParse({
+    statusCode: error.status, code, message: body.message ?? error.message, details: error.details,
+  });
   return {
     code,
     message: redactMessage(body.message ?? nested.message ?? error.message),
     status: error.status,
     ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(body.details) : {}),
+    ...(compute.success ? { details: compute.data.details } : {}),
     retryable:
-      typeof body.retryable === "boolean"
+      compute.success ? compute.data.details.retryable : typeof body.retryable === "boolean"
         ? body.retryable
         : typeof nested.retryable === "boolean"
           ? nested.retryable

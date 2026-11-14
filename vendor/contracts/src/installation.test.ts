@@ -10,6 +10,7 @@ describe("installation capabilities contract", () => {
       platformAi: false,
       appAiSubscriptionConnections: true,
       organisationBilling: false,
+      compute: { jobs: false, services: false, workers: false, containerFrontend: false },
     });
     expect(installationViewSchema.parse({ schemaVersion: 1, capabilities: { organisations: false } }))
       .toMatchObject({ capabilities: { organisations: false, appAiSubscriptionConnections: true, organisationBilling: false } });
@@ -33,7 +34,7 @@ describe("installation capabilities contract", () => {
     };
     expect(controlPlaneOperations.getDashboardSession.output.parse(session).capabilities).toBeUndefined();
     expect(controlPlaneOperations.getDashboardSession.output.parse({ ...session, capabilities: { organisations: false } }).capabilities)
-      .toEqual({ organisations: false, platformAi: false, appAiSubscriptionConnections: true, organisationBilling: false });
+      .toEqual({ organisations: false, platformAi: false, appAiSubscriptionConnections: true, organisationBilling: false, compute: { jobs: false, services: false, workers: false, containerFrontend: false } });
     expect(controlPlaneOperations.getAccountWelcome.output.parse({
       step: "complete", displayName: "", email: "person@example.test", continueUrl: "https://agent.example.test",
     }).organisationsEnabled).toBe(true);

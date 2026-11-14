@@ -10,7 +10,8 @@ export const APP_ROUTE_RESERVED_PREFIXES = Object.freeze([
 const routeIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
 const functionNameSchema = z.string().regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/).max(63);
 const methodSchema = z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]);
-export type AppRouteMethod = z.infer<typeof methodSchema>;
+const containerMethodSchema = z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
+export type AppRouteMethod = z.infer<typeof containerMethodSchema>;
 export type AppRouteParams = Readonly<Record<string, string | readonly string[]>>;
 
 export class AppRouteError extends Error {
@@ -44,6 +45,14 @@ const structuralRouteSchema = z.union([
     function: functionNameSchema,
     access: z.literal("inherit").default("inherit"),
     methods: z.array(methodSchema).min(1).max(6).refine(
+      (methods) => new Set(methods).size === methods.length, "route methods must be unique",
+    ),
+  }).strict(),
+  z.object({
+    ...routeFields,
+    container: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    access: z.literal("inherit").default("inherit"),
+    methods: z.array(containerMethodSchema).min(1).max(7).refine(
       (methods) => new Set(methods).size === methods.length, "route methods must be unique",
     ),
   }).strict(),
