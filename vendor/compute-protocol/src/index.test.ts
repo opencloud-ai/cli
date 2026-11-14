@@ -159,6 +159,21 @@ describe("compute protocol authority and compatibility", () => {
       { ...previous, quotaForfeitedBytes: "1000" },
     ]) expect(computeNetworkUsageObservationSchema.safeParse(invalid).success).toBe(false);
   });
+  it("distinguishes a proven never-started allowance from measured and lost counters", () => {
+    const receipt = { protocolVersion: 1, binding, sourceSequence: "1", allowanceId: id, grantedBytes: "1000", accounting: "unused", consumedBytes: "0", remainingBytes: "1000", expiresAt: lease.expiresAt, observedAt: lease.expiresAt, closedAt: lease.expiresAt, closeReason: "never_started", fenceConfirmed: true, fenceEvidence: "durable_no_start" };
+    expect(computeNetworkUsageObservationSchema.parse(receipt)).toEqual(receipt);
+    expect(computeNetworkUsagePageSchema.parse({ observations: [receipt], nextAfterSequence: "1" }).observations).toEqual([receipt]);
+    for (const invalid of [
+      { ...receipt, accounting: undefined }, { ...receipt, accounting: "measured" },
+      { ...receipt, accounting: "forfeited" }, { ...receipt, consumedBytes: "1" },
+      { ...receipt, consumedBytes: null }, { ...receipt, remainingBytes: null },
+      { ...receipt, remainingBytes: "999" }, { ...receipt, remainingBytes: "bad" },
+      { ...receipt, closedAt: null }, { ...receipt, closeReason: "stopped" },
+      { ...receipt, closeReason: "counter_lost" }, { ...receipt, fenceConfirmed: false },
+      { ...receipt, fenceEvidence: undefined }, { ...receipt, fenceEvidence: "retired_allowance" },
+      { ...receipt, quotaForfeitedBytes: "1000" },
+    ]) expect(computeNetworkUsageObservationSchema.safeParse(invalid).success).toBe(false);
+  });
   it("rejects malformed integer byte counts without throwing during validation", () => {
     expect(computePrepareImageResponseSchema.safeParse({ imageDigest: launch.imageDigest, compressedBytes: "bad", unpackedBytes: "1", os: "linux", architecture: "amd64" }).success).toBe(false);
     expect(computePrepareImageResponseSchema.safeParse({ imageDigest: launch.imageDigest, compressedBytes: "1", unpackedBytes: "10737418241", os: "linux", architecture: "amd64" }).success).toBe(false);

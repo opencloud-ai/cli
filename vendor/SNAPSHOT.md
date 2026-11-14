@@ -29,6 +29,9 @@ checks the decoded 32 MiB limit without a repeated-group regex stack overflow.
 from `ff05f2af`. Retired allowances with lost counters have explicit null byte
 measurements and separate full daily-quota forfeiture; measured receipts remain
 readable. This internal transport refinement adds no public CLI authority.
+The same two files are refreshed verbatim from `b21f1d1e` to distinguish proven
+never-started allowances with explicit `unused` accounting. Lost counters still
+require forfeiture; neither receipt is a diagnostic byte measurement.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from

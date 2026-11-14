@@ -353,11 +353,24 @@ const forfeitedNetworkUsageObservationSchema = z.object({
 }).strict().superRefine((value, context) => {
   if (value.quotaForfeitedBytes !== value.grantedBytes) context.addIssue({ code: "custom", path: ["quotaForfeitedBytes"], message: "Lost counters forfeit the entire signed grant against daily quota" });
 });
+const unusedNetworkUsageObservationSchema = z.object({
+  ...networkUsageObservationFields,
+  accounting: z.literal("unused"),
+  consumedBytes: z.literal("0"),
+  remainingBytes: computeIntegerSchema,
+  closedAt: computeTimestampSchema,
+  closeReason: z.literal("never_started"),
+  fenceConfirmed: z.literal(true),
+  fenceEvidence: z.literal("durable_no_start"),
+}).strict().superRefine((value, context) => {
+  if (value.remainingBytes !== value.grantedBytes) context.addIssue({ code: "custom", path: ["remainingBytes"], message: "A never-started allowance retains the entire signed grant" });
+});
 /** Authoritative quota evidence is separate from diagnostic bytes and monetary usage.
  * Only a guard-retired allowance proves the fence needed to forfeit unknown counters. */
 export const computeNetworkUsageObservationSchema = z.union([
   measuredNetworkUsageObservationSchema,
   forfeitedNetworkUsageObservationSchema,
+  unusedNetworkUsageObservationSchema,
 ]);
 export const computeNetworkUsagePageSchema = z.object({
   observations: z.array(computeNetworkUsageObservationSchema).max(100),
