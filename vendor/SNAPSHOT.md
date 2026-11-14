@@ -10,6 +10,15 @@ SDK source/tests are from `68650784` (SDK 2.8.0). The local default for new
 unpinned bundles is now 2.8.0; immutable older SDK artifacts are untouched.
 Unrelated brand and installer snapshots retain their previous provenance.
 
+The final candidate refresh takes `contracts/src/containers.ts` and its tests
+from platform `37f2ad50`, including exact 413/431 ingress errors and JSON Schema
+serialization with unchanged normalized payloads. `compute-protocol/src/index.ts`
+and its tests are from `3ccc51f2`, including the required explicit null-or-pinned
+digest for guarded unresolved image retention release. These files are also
+verbatim; private platform administration and MCP implementation are not vendored.
+`contracts/src/control-plane.ts` and its tests are refreshed from `56448bad` so
+alert detail can retain container metric provenance while Feed v1 stays unchanged.
+
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from
 `f7249b1c`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only

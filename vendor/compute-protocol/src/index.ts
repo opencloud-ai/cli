@@ -444,7 +444,10 @@ export const computeImageFetchRequestSchema = computeResolveImageRequestSchema.o
 export type ComputeResolvedImage = z.infer<typeof computeResolvedImageSchema>;
 export type ComputeImageFetchRequest = z.infer<typeof computeImageFetchRequestSchema>;
 export const computeReleaseImageRequestSchema = z.object({
-  retentionId: computeIdSchema, imageDigest: computePinnedImageSchema,
+  retentionId: computeIdSchema,
+  /** Null requires an unresolved retention under the shared resolve/release lock;
+   * a completed resolution must match its exact pinned digest. */
+  imageDigest: computePinnedImageSchema.nullable(),
   /** Durable Control receipt proving no retained definition, release, dev or execution references. */
   proofId: computeIdSchema,
 }).strict();

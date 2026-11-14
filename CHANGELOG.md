@@ -14,6 +14,9 @@
   diagnostics without becoming platform error reports.
 - Accept container frontends and routes, and default new unpinned app bundles
   to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
+- Refresh the shared compute schemas, preserving exact 413/431 request-size
+  diagnostics and their no-replay policy, and container metric provenance in
+  alert detail without changing Feed v1.
 
 ## 3.20.0
 

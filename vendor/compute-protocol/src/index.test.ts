@@ -55,8 +55,11 @@ describe("compute protocol authority and compatibility", () => {
     expect(computeImageFetchRequestSchema.safeParse(resolve).success).toBe(true);
     expect(computeImageFetchRequestSchema.safeParse({ sourceReference: resolve.sourceReference }).success).toBe(false);
     expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, imageDigest: launch.imageDigest, proofId: id }).success).toBe(true);
+    expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, imageDigest: null, proofId: id }).success).toBe(true);
+    expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, proofId: id }).success).toBe(false);
     expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, imageDigest: resolve.sourceReference, proofId: id }).success).toBe(false);
     expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, imageDigest: launch.imageDigest }).success).toBe(false);
+    expect(computeReleaseImageRequestSchema.safeParse({ retentionId: id, imageDigest: null }).success).toBe(false);
   });
   it("canonicalizes signed authority independently of object order and omits only the outer signature", () => {
     const one = canonicalComputeSignaturePayload("opencloud.compute.v1.lease", binding, lease);

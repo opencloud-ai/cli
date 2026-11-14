@@ -1186,6 +1186,7 @@ const metricSourceOutput = z.enum([
   "mixed",
   "none",
 ]);
+const containerMetricSourceOutput = z.enum(["browser", "authenticated", "function", "container", "mixed", "none"]);
 
 export const alertRuleDetailOutput = z
   .object({
@@ -1202,7 +1203,7 @@ export const alertRuleDetailOutput = z
       state: z.enum(["ok", "firing", "unknown", "invalid"]),
       value: z.number().nullable(),
       samples: z.number().int().nonnegative(),
-      source: metricSourceOutput,
+      source: containerMetricSourceOutput,
       observedAt: z.iso.datetime(),
       firstFiredAt: z.iso.datetime().nullable(),
       resolvedAt: z.iso.datetime().nullable(),
@@ -1213,7 +1214,7 @@ export const alertRuleDetailOutput = z
       z.object({
         value: z.number(),
         recordedAt: z.iso.datetime(),
-        source: z.enum(["browser", "authenticated", "function"]),
+        source: z.enum(["browser", "authenticated", "function", "container"]),
       }),
     ),
     delivery: alertFireDeliveryOutput.nullable(),
@@ -1342,7 +1343,6 @@ export const agentFeedV1Output = z
   })
   .passthrough();
 
-const containerMetricSourceOutput = z.enum(["browser", "authenticated", "function", "container", "mixed", "none"]);
 export const agentFeedV2Output = agentFeedV1Output.extend({
   contractVersion: z.literal("2"),
   signals: z.array(agentFeedSignalOutput.extend({

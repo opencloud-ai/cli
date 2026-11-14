@@ -90,11 +90,14 @@ export const containerServicePolicySchema = z.object({
   readinessProbe: computeProbeSchema,
   livenessProbe: computeProbeSchema.optional(),
 }).strict();
-export const containerWorkerPolicySchema = z.object({
+const containerWorkerPolicyInputSchema = z.object({
   replicas: z.number().int().min(0).max(20).default(1),
   maxReplicas: z.number().int().min(1).max(20).optional(),
   restart: z.literal("always").default("always"),
-}).strict().transform(value => ({ ...value, maxReplicas: value.maxReplicas ?? Math.max(1, value.replicas) }))
+}).strict();
+export const containerWorkerPolicySchema = containerWorkerPolicyInputSchema
+  .transform(value => ({ ...value, maxReplicas: value.maxReplicas ?? Math.max(1, value.replicas) }))
+  .pipe(containerWorkerPolicyInputSchema.required())
   .refine(value => value.replicas <= value.maxReplicas, "replicas must not exceed maxReplicas");
 export const containerDefinitionSchema = z.discriminatedUnion("kind", [
   z.object({ ...containerCommonFields, kind: z.literal("job"), job: containerJobPolicySchema }).strict(),
@@ -176,6 +179,8 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_STARTING_PENDING: error(503, "ingress", "policy", "ingress", "request", "confirmed_usage", "The service is still starting.", true),
   COMPUTE_SERVICE_UNAVAILABLE: error(503, "ingress", "policy", "ingress", "request", "confirmed_usage", "The service has no ready instance."),
   COMPUTE_CONCURRENCY_EXCEEDED: error(429, "capacity", "policy", "ingress", "request", "confirmed_usage", "The service's request capacity is full.", true),
+  COMPUTE_REQUEST_TOO_LARGE: error(413, "ingress", "app", "ingress", "none", "confirmed_usage", "The service request body exceeds the supported size limit."),
+  COMPUTE_REQUEST_HEADERS_TOO_LARGE: error(431, "ingress", "app", "ingress", "none", "confirmed_usage", "The service request headers exceed the supported size limit."),
   COMPUTE_REQUEST_TIMEOUT: error(504, "ingress", "app", "ingress", "none", "confirmed_usage", "The service request exceeded its deadline."),
   COMPUTE_UPSTREAM_FAILED: error(502, "ingress", "unknown", "ingress", "none", "confirmed_usage", "The container connection failed."),
   COMPUTE_READINESS_FAILED: error(503, "execution", "app", "running", "none", "confirmed_usage", "The service is not ready for traffic."),
@@ -325,7 +330,7 @@ export const computeEventSchema = z.object({
 }).strict();
 export const computeJobSubmitRequestSchema = z.object({
   input: computeBoundedJsonSchema.default({}),
-  inputFileIds: z.array(computeIdSchema).max(16).refine(ids => new Set(ids).size === ids.length, "Input file IDs must be unique").transform(ids => [...ids].sort()).default([]),
+  inputFileIds: z.array(computeIdSchema).max(16).refine(ids => new Set(ids).size === ids.length, "Input file IDs must be unique").overwrite(ids => [...ids].sort()).default([]),
 }).strict();
 export type ComputeJobSubmitRequest = z.infer<typeof computeJobSubmitRequestSchema>;
 export const computeControlRequestSchema = z.object({ expectedGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict();

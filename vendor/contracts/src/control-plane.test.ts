@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentFeedV1Output,
   controlPlaneAppDeploymentTruthSchema,
   controlPlaneAppSchema,
   controlPlaneOperations,
@@ -7,6 +8,32 @@ import {
 } from "./control-plane.js";
 
 describe("controlPlaneOperations", () => {
+  it("reads container alert detail provenance without widening Agent Feed v1", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const at = "2026-11-14T00:00:00Z";
+    const detail = {
+      rule: { id: "backlog", appId, name: "Backlog", metric: "backlog_depth", aggregation: "latest", operator: "gt", threshold: 10,
+        window: "5m", minimumSamples: 1, severity: "warning", enabled: true, origin: "manifest", createdAt: at, updatedAt: at },
+      metric: { name: "backlog_depth", type: "gauge", unit: "items", description: null },
+      evaluation: { state: "firing", value: 12, samples: 1, source: "container", observedAt: at, firstFiredAt: at, resolvedAt: null,
+        lastEvaluatedAt: at, lastTransitionAt: at },
+      points: [{ value: 12, recordedAt: at, source: "container" }], delivery: null,
+    };
+    expect(controlPlaneOperations.getAlertRule.output.parse(detail)).toEqual(detail);
+    for (const source of ["browser", "authenticated", "function"]) {
+      expect(controlPlaneOperations.getAlertRule.output.safeParse({ ...detail, evaluation: { ...detail.evaluation, source },
+        points: [{ ...detail.points[0], source }] }).success).toBe(true);
+    }
+    expect(controlPlaneOperations.getAlertRule.output.safeParse({ ...detail, points: [{ ...detail.points[0], source: "worker" }] }).success).toBe(false);
+    const alert = { id: "backlog", kind: "custom_metric", state: "firing", severity: "warning", title: "Backlog", observedAt: at,
+      lastTransitionAt: at, metric: { name: "backlog_depth", type: "gauge", value: 12, unit: "items", aggregation: "latest", window: "5m", samples: 1, source: "container" } };
+    const feed = { contractVersion: "1", app: { id: appId, name: "Example", slug: "example", state: "active", activeDeployment: null },
+      observedAt: at, telemetry: { status: "available", latestIngestedAt: at, ingestionLagSeconds: 0, stale: false }, signals: [],
+      alerts: [alert], recentBreaches: [], breachesTruncated: false, events: [], eventsTruncated: false, nextSince: at };
+    expect(agentFeedV1Output.safeParse(feed).success).toBe(false);
+    expect(agentFeedV1Output.safeParse({ ...feed, alerts: [{ ...alert, metric: { ...alert.metric, source: "function" } }] }).success).toBe(true);
+  });
+
   it("exposes exact organisation capacity to typed user callers without subject identities", () => {
     const operation = controlPlaneOperations.getOrganisationCapacity;
     expect(operation).toMatchObject({ method: "GET", path: "/v1/organisations/{organisationId}/capacity", auth: "user", scopes: [], idempotency: "none" });

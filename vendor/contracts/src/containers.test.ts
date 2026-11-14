@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseManifest } from "./manifest.js";
 import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest } from "./app-routes.js";
 import {
-  classifyComputeError, computeErrorCatalog, computeErrorSchema, computeJobSubmitRequestSchema,
+  classifyComputeError, isExpectedComputeError, computeErrorCatalog, computeErrorSchema, computeJobSubmitRequestSchema,
   computePriceDefinitionSchema, containerDefinitionSchema, normalizeComputeResources,
   unsupportedComputeCapabilities,
 } from "./containers.js";
@@ -109,6 +109,15 @@ describe("compute API errors and money", () => {
     expect(computeJobSubmitRequestSchema.safeParse({ input: {}, image }).success).toBe(false);
     expect(computeJobSubmitRequestSchema.safeParse({ input: "x".repeat(65_536) }).success).toBe(false);
     expect(computeJobSubmitRequestSchema.safeParse({ inputFileIds: [appId, appId] }).success).toBe(false);
+  });
+  it("preserves request size statuses without granting replay or blaming the platform", () => {
+    for (const [code, statusCode] of [["COMPUTE_REQUEST_TOO_LARGE", 413], ["COMPUTE_REQUEST_HEADERS_TOO_LARGE", 431]] as const) {
+      const failure = classifyComputeError(code);
+      expect(failure).toMatchObject({ statusCode, details: { origin: "app", phase: "ingress", retryable: false, retryScope: "none", billingDisposition: "confirmed_usage" } });
+      expect(isExpectedComputeError(code)).toBe(true);
+      expect(computeErrorSchema.parse({ ...failure, requestId: "compute-contracts-size-limit" }).requestId).toBe("compute-contracts-size-limit");
+      expect(computeErrorSchema.safeParse({ ...failure, statusCode: 422 }).success).toBe(false);
+    }
   });
   it("requires every precise price and fixed quantum, preserving explicit zeros", () => {
     expect(computePriceDefinitionSchema.parse(price).ratesMinorPerUnit.gib_scratch_second).toBe("0");
