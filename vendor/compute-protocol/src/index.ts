@@ -272,12 +272,40 @@ export const computeLogBatchSchema = z.object({
     droppedLines: computeIntegerSchema,
   }).strict()).max(100).default([]),
 }).strict();
-export const computeResourceObservationSchema = z.object({
-  ...requestFields, observedAt: computeTimestampSchema, cpuUsageNs: computeIntegerSchema.nullable(),
+/** Individual measurement times survive a terminal observation assembled from
+ * retained counters and freshly measured scratch. Null means unobserved. */
+export const computeResourceSamplingSchema = z.object({
+  phase: z.enum(["running", "terminal"]),
+  cpuObservedAt: computeTimestampSchema.nullable(),
+  memoryObservedAt: computeTimestampSchema.nullable(),
+  peakMemoryObservedAt: computeTimestampSchema.nullable(),
+  scratchObservedAt: computeTimestampSchema.nullable(),
+  networkObservedAt: computeTimestampSchema.nullable(),
+}).strict();
+export type ComputeResourceSampling = z.infer<typeof computeResourceSamplingSchema>;
+export const computeResourceSampleSchema = z.object({
+  observedAt: computeTimestampSchema, cpuUsageNs: computeIntegerSchema.nullable(),
   memoryBytes: computeIntegerSchema.nullable(), peakMemoryBytes: computeIntegerSchema.nullable(),
   scratchBytes: computeIntegerSchema.nullable(),
   network: z.object({ ingressBytes: computeIntegerSchema.nullable(), egressBytes: computeIntegerSchema.nullable(), coverage: z.enum(["complete", "partial", "unavailable"]) }).strict(),
-}).strict();
+  sampling: computeResourceSamplingSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (!value.sampling) return;
+  const counters = [
+    ["cpuObservedAt", value.cpuUsageNs !== null],
+    ["memoryObservedAt", value.memoryBytes !== null],
+    ["peakMemoryObservedAt", value.peakMemoryBytes !== null],
+    ["scratchObservedAt", value.scratchBytes !== null],
+    ["networkObservedAt", value.network.ingressBytes !== null || value.network.egressBytes !== null],
+  ] as const;
+  for (const [field, measured] of counters) {
+    const timestamp = value.sampling[field];
+    if (measured !== (timestamp !== null)) context.addIssue({ code: "custom", path: ["sampling", field], message: "Measurement and timestamp must both be known or both be null" });
+    if (timestamp !== null && Date.parse(timestamp) > Date.parse(value.observedAt)) context.addIssue({ code: "custom", path: ["sampling", field], message: "Measurement time cannot follow its observation" });
+  }
+});
+export type ComputeResourceSample = z.infer<typeof computeResourceSampleSchema>;
+export const computeResourceObservationSchema = computeResourceSampleSchema.safeExtend(requestFields).strict();
 /** One immutable terminal receipt per binding and requestId, accepted only from trusted ingress. */
 export const computeHttpObservationSchema = z.object({
   ...requestFields, requestId: z.string().min(1).max(200), observedAt: computeTimestampSchema,

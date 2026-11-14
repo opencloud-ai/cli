@@ -17,6 +17,8 @@
 - Refresh the shared compute schemas, preserving exact 413/431 request-size
   diagnostics and their no-replay policy, and container metric provenance in
   alert detail without changing Feed v1.
+- Preserve optional per-counter sampling times in terminal resource diagnostics,
+  so retained measurements remain distinguishable from newly measured values.
 
 ## 3.20.0
 

@@ -3,9 +3,21 @@ import { classifyComputeError } from "@opencloud/contracts/containers";
 import { ApiError } from "./api-client.js";
 import { computeInput, computeJson, computeKey, computeLogBody, computeQuery } from "./compute.js";
 import { isReportableFailure } from "./error-reports.js";
+import { computeInstanceDiagnosticsSchema } from "../vendor/contracts/src/compute-observation.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 describe("compute command boundaries", () => {
+  it("preserves terminal resource measurement times through the public snapshot", () => {
+    const measuredAt = "2026-11-14T00:00:00Z", terminalAt = "2026-11-14T00:00:30Z";
+    const diagnostics = { freshness: { status: "partial", observedAt: terminalAt, lagSeconds: 0, truncated: false },
+      sample: { observedAt: terminalAt, cpuUsageNs: "1000000000", memoryBytes: "4096", peakMemoryBytes: "8192", scratchBytes: "1024",
+        network: { ingressBytes: null, egressBytes: null, coverage: "unavailable" },
+        sampling: { phase: "terminal", cpuObservedAt: measuredAt, memoryObservedAt: measuredAt, peakMemoryObservedAt: measuredAt,
+          scratchObservedAt: terminalAt, networkObservedAt: null } } };
+    expect(computeInstanceDiagnosticsSchema.parse(diagnostics)).toEqual(diagnostics);
+    expect(computeInstanceDiagnosticsSchema.safeParse({ ...diagnostics, sample: { ...diagnostics.sample, sampling: undefined } }).success).toBe(true);
+  });
+
   it("pins a job submission to its environment and canonical input file set", () => {
     const input = { appId: id, name: "job", body: { input: computeJson('{"hello":"world"}'), inputFileIds: [id] } };
     expect(computeInput("submitContainerJob", input).body.input).toEqual({ hello: "world" });

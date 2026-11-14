@@ -18,6 +18,10 @@ digest for guarded unresolved image retention release. These files are also
 verbatim; private platform administration and MCP implementation are not vendored.
 `contracts/src/control-plane.ts` and its tests are refreshed from `56448bad` so
 alert detail can retain container metric provenance while Feed v1 stays unchanged.
+The final resource-sampling refinement takes `compute-protocol/src/index.ts`,
+its tests and `contracts/src/compute-observation.ts` verbatim from `b17c3617`.
+Optional running/terminal metadata preserves each counter's measurement time;
+older samples remain valid without inferred per-counter timestamps.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from

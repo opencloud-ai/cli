@@ -171,4 +171,27 @@ describe("compute protocol authority and compatibility", () => {
       cpuUsageNs: null, memoryBytes: null, peakMemoryBytes: null, scratchBytes: null,
       network: { ingressBytes: null, egressBytes: null, coverage: "unavailable" } }).memoryBytes).toBeNull();
   });
+  it("preserves retained counter times in terminal diagnostics without restamping them", () => {
+    const observation = { protocolVersion: 1, binding, observedAt: lease.expiresAt,
+      cpuUsageNs: "9007199254740993", memoryBytes: "1024", peakMemoryBytes: "2048", scratchBytes: "4096",
+      network: { ingressBytes: null, egressBytes: null, coverage: "unavailable" },
+      sampling: { phase: "terminal", cpuObservedAt: lease.issuedAt, memoryObservedAt: lease.issuedAt,
+        peakMemoryObservedAt: lease.issuedAt, scratchObservedAt: lease.expiresAt, networkObservedAt: null } };
+    expect(computeResourceObservationSchema.parse(observation)).toEqual(observation);
+    expect(computeResourceObservationSchema.parse(observation).sampling?.cpuObservedAt).not.toBe(observation.observedAt);
+    const partialNetwork = { ...observation, network: { ingressBytes: "0", egressBytes: null, coverage: "partial" },
+      sampling: { ...observation.sampling, networkObservedAt: lease.issuedAt } };
+    expect(computeResourceObservationSchema.safeParse(partialNetwork).success).toBe(true);
+    for (const sampling of [
+      { ...observation.sampling, phase: "stopped" },
+      { ...observation.sampling, cpuObservedAt: null },
+      { ...observation.sampling, cpuObservedAt: lease.killAfter },
+      { ...observation.sampling, networkObservedAt: lease.issuedAt },
+      { ...observation.sampling, scratchObservedAt: undefined },
+      { ...observation.sampling, futureAuthority: true },
+    ]) expect(computeResourceObservationSchema.safeParse({ ...observation, sampling }).success).toBe(false);
+    expect(computeResourceObservationSchema.safeParse({ ...observation, memoryBytes: null }).success).toBe(false);
+    expect(computeResourceObservationSchema.safeParse({ ...observation, memoryBytes: null,
+      sampling: { ...observation.sampling, memoryObservedAt: null } }).success).toBe(true);
+  });
 });
