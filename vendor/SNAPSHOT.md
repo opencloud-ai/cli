@@ -33,6 +33,16 @@ The same two files are refreshed verbatim from `b21f1d1e` to distinguish proven
 never-started allowances with explicit `unused` accounting. Lost counters still
 require forfeiture; neither receipt is a diagnostic byte measurement.
 
+Validation waiting takes `contracts/src/control-plane.test.ts` and
+`control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`
+verbatim from accepted platform `151106e207ee5c872bdbdecbbb13a2c05fcdc3c0`.
+`contracts/src/control-plane.ts` and
+`control-plane-client/src/development-readiness.test.ts` are verbatim from
+accepted platform `03bee78b8da592d638bf1565b1c11845c71a50cd`, adding the exact
+validation progress contract and documented development readiness allowance.
+The platform source prefix for these paths is `packages/`; the CLI prefix is
+`vendor/`. The CLI's durable mutation recovery remains in its own `src/`.
+
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from
 `f7249b1c`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only

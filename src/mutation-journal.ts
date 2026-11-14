@@ -112,8 +112,23 @@ export interface MutationJournalAuthorityBinding {
   familyId: string;
 }
 
+interface ValidationCoordinates {
+  draftId: string;
+  revision: number;
+  requestSha256: string;
+  deadline: string;
+}
+
+/** Only bounded receipt coordinates, never manifests, diagnostics or source. */
+export type SafeValidationCheckpoint = ValidationCoordinates & (
+  | { state: "dispatched" | "refused" }
+  | { state: "progress"; retryNotBefore: string }
+  | { state: "result"; validationId: string; passed: boolean; artifactSha256: string | null }
+);
+
 export interface SafeMutationCheckpoint {
   stage: string;
+  validation?: SafeValidationCheckpoint | undefined;
   artifactSha256?: string | undefined;
   serverArtifactSha256?: string | undefined;
   baseDeploymentId?: string | null | undefined;
@@ -231,6 +246,7 @@ const ENTRY_KEYS = [
 ].sort();
 const CHECKPOINT_KEYS = new Set([
   "stage",
+  "validation",
   "artifactSha256",
   "serverArtifactSha256",
   "baseDeploymentId",
@@ -490,6 +506,22 @@ function isIsoDate(value: unknown): value is string {
   );
 }
 
+function validValidationCheckpoint(value: unknown): value is SafeValidationCheckpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  const keys = ["state", "draftId", "revision", "requestSha256", "deadline"];
+  if (item.state === "progress") keys.push("retryNotBefore");
+  else if (item.state === "result") keys.push("validationId", "passed", "artifactSha256");
+  else if (item.state !== "dispatched" && item.state !== "refused") return false;
+  if (!exactKeys(item, keys.sort()) || typeof item.draftId !== "string" || !UUID.test(item.draftId) ||
+      !Number.isSafeInteger(item.revision) || Number(item.revision) <= 0 || typeof item.requestSha256 !== "string" ||
+      !SHA256.test(item.requestSha256) || !isIsoDate(item.deadline)) return false;
+  if (item.state === "progress" && !isIsoDate(item.retryNotBefore)) return false;
+  if (item.state === "result" && (typeof item.validationId !== "string" || !UUID.test(item.validationId) ||
+      typeof item.passed !== "boolean" || (item.artifactSha256 !== null && (typeof item.artifactSha256 !== "string" || !SHA256.test(item.artifactSha256))))) return false;
+  return true;
+}
+
 function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -501,6 +533,7 @@ function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
   ) {
     return null;
   }
+  if (candidate.validation !== undefined && !validValidationCheckpoint(candidate.validation)) return null;
   for (const key of [
     "draftId",
     "sessionId",
@@ -1123,6 +1156,7 @@ export class MutationRun {
   }
 
   async markAttempted(): Promise<void> {
+    this.assertValidationAcknowledged();
     await this.assertBeforeEffect();
     const now = this.journal.timestamp();
     this.entry = {
@@ -1139,6 +1173,7 @@ export class MutationRun {
   }
 
   async checkpointOperation(operationId: string): Promise<void> {
+    this.assertValidationAcknowledged();
     await this.assertAnchored();
     if (!UUID.test(operationId)) {
       throw new MutationJournalError(
@@ -1160,6 +1195,31 @@ export class MutationRun {
   }
 
   async checkpointStage(checkpoint: SafeMutationCheckpoint): Promise<void> {
+    this.assertValidationAcknowledged();
+    // Workflow stages cannot erase a validation dispatch/progress receipt.
+    await this.saveCheckpoint({ ...checkpoint, ...(this.checkpoint?.validation ? { validation: this.checkpoint.validation } : {}) });
+  }
+
+  async checkpointValidation(validation: SafeValidationCheckpoint): Promise<void> {
+    const previous = this.checkpoint?.validation;
+    if (!validValidationCheckpoint(validation)) {
+      throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Invalid validation receipt coordinates");
+    }
+    const sameRequest = previous && previous.draftId === validation.draftId && previous.revision === validation.revision &&
+      previous.requestSha256 === validation.requestSha256 && previous.deadline === validation.deadline;
+    if (validation.state !== "dispatched" && (!sameRequest || previous?.state !== "dispatched")) {
+      throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Validation response has no matching dispatched request");
+    }
+    if (validation.state === "dispatched") {
+      this.assertValidationAcknowledged();
+      if (previous?.state === "progress" && (!sameRequest || Date.now() < Date.parse(previous.retryNotBefore))) {
+        throw new MutationJournalError("MUTATION_REPLAY_MISMATCH", "Validation retry must retain its exact request, deadline and acknowledged wait");
+      }
+    }
+    await this.saveCheckpoint({ ...(this.checkpoint ?? { stage: "validating" }), validation });
+  }
+
+  private async saveCheckpoint(checkpoint: SafeMutationCheckpoint): Promise<void> {
     await this.assertAnchored();
     if (!parseCheckpoint(checkpoint)) {
       throw new MutationJournalError(
@@ -1206,6 +1266,7 @@ export class MutationRun {
   }
 
   failIfUnknown(): void {
+    this.assertValidationAcknowledged();
     if (this.entry.state === "unknown") {
       throw new MutationJournalError(
         this.entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN",
@@ -1215,6 +1276,7 @@ export class MutationRun {
   }
 
   async complete(): Promise<void> {
+    this.assertValidationAcknowledged();
     await this.assertAnchored();
     const now = this.journal.timestamp();
     this.entry = {
@@ -1226,6 +1288,14 @@ export class MutationRun {
     };
     await atomicWrite(this.file, this.entry);
     await this.assertAnchored();
+  }
+
+  private assertValidationAcknowledged(): void {
+    const validation = this.checkpoint?.validation;
+    if (validation?.state === "dispatched") {
+      throw new MutationJournalError("DRAFT_VALIDATION_OUTCOME_UNKNOWN",
+        `Validation for draft ${validation.draftId}, revision ${validation.revision} was dispatched without a durably acknowledged reply. No validation was repeated.`);
+    }
   }
 }
 

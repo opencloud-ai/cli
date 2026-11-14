@@ -20,6 +20,7 @@ import {
   MutationJournal,
   MutationJournalError,
   type SafeMutationCheckpoint,
+  type SafeValidationCheckpoint,
   anchorsDirectoryDescriptors,
   assertAppOwnerMutationJournalDirectory,
   linuxMountInfoContains,
@@ -725,6 +726,53 @@ describe("mutation journal", () => {
         await run.complete();
       },
     );
+  });
+
+  it("will not erase an unresolved validation dispatch after process reopening", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud draft validate" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "validate" } };
+    const dispatched: SafeValidationCheckpoint = { state: "dispatched", draftId: OTHER_APP_ID, revision: 2,
+      requestSha256: "a".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const first = await MutationJournal.open(binding);
+    await expect(first.run(intent, async run => {
+      await run.checkpointValidation(dispatched);
+      throw new Error("process interrupted before response");
+    })).rejects.toThrow("process interrupted before response");
+    const reopened = await MutationJournal.open(binding);
+    await reopened.run(intent, async run => {
+      expect(run.checkpoint?.validation).toEqual(dispatched);
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" }));
+      for (const attempt of [() => run.checkpointStage({ stage: "draft_ready" }), () => run.markAttempted(), () => run.complete()]) {
+        await expect(attempt()).rejects.toMatchObject({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" });
+      }
+      expect(run.checkpoint?.validation).toEqual(dispatched);
+    });
+  });
+
+  it("retains acknowledged validation progress and result through workflow checkpoint changes", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "deploy" } };
+    const coordinates = { draftId: OTHER_APP_ID, revision: 2, requestSha256: "b".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() - 1000).toISOString() };
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      await run.checkpointValidation({ ...coordinates, state: "dispatched" });
+      await expect(run.checkpointValidation({ ...progress, revision: 3 })).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      await run.checkpointValidation(progress);
+      await run.checkpointStage({ stage: "draft_ready", draftId: OTHER_APP_ID, revision: 2 });
+    });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(run.checkpoint?.validation).toEqual(progress);
+      await expect(run.checkpointValidation({ ...coordinates, deadline: new Date(Date.now() + 120_000).toISOString(), state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+      await run.checkpointValidation({ ...coordinates, state: "dispatched" });
+      const result: SafeValidationCheckpoint = { ...coordinates, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) };
+      await run.checkpointValidation(result);
+      await run.checkpointStage({ stage: "validated", draftId: OTHER_APP_ID, revision: 2 });
+      expect(run.checkpoint?.validation).toEqual(result);
+      await expect(run.checkpointValidation({ ...coordinates, state: "dispatched", source: "must not be retained" } as SafeValidationCheckpoint))
+        .rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+    });
   });
 
   it("atomically retains primary and secondary operation coordinates", async () => {

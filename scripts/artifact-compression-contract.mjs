@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -34,6 +34,8 @@ const state = {
   /** Adds a file to OpenCloud's artifact that the CLI never bundled. */
   extraArtifactFile: false,
   dropApplyReply: false,
+  interruptValidation: null,
+  busyBeforeInterruption: false,
   requests: [],
 };
 
@@ -195,6 +197,19 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
+      if (state.interruptValidation) {
+        if (state.busyBeforeInterruption) {
+          state.busyBeforeInterruption = false;
+          response.setHeader("Retry-After", "1");
+          return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+            details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 1 } });
+        }
+        const interrupt = state.interruptValidation;
+        state.interruptValidation = null;
+        interrupt();
+        request.socket.destroy();
+        return;
+      }
       const built = await serverBuild(draft);
       draft.status = "validated";
       draft.validatedDigest = built.sha256;
@@ -284,7 +299,7 @@ function release(draft, type) {
 
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
-async function runCli(argumentsList, { status = 0, remote = true } = {}) {
+async function runCli(argumentsList, { status = 0, remote = true, interruptValidation = false, busyBeforeInterruption = false } = {}) {
   const environment = { ...process.env };
   for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) {
     delete environment[key];
@@ -298,6 +313,10 @@ async function runCli(argumentsList, { status = 0, remote = true } = {}) {
   const child = spawn(process.execPath, [binary, ...prefix, ...argumentsList], {
     env: environment, stdio: ["ignore", "pipe", "pipe"],
   });
+  if (interruptValidation) {
+    state.interruptValidation = () => child.kill("SIGKILL");
+    state.busyBeforeInterruption = busyBeforeInterruption;
+  }
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
@@ -305,6 +324,36 @@ async function runCli(argumentsList, { status = 0, remote = true } = {}) {
   const exit = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
   assert.equal(exit, status, `${argumentsList.join(" ")}\n${stderr}`);
   return { stdout, stderr };
+}
+
+async function ageInterruptedLocks(directory) {
+  for (const item of await readdir(directory, { withFileTypes: true })) {
+    if (!item.isDirectory()) continue;
+    const nested = path.join(directory, item.name);
+    if (item.name.endsWith(".lock")) {
+      // Only this disposable fixture's locks, after its child has exited.
+      const stale = new Date(Date.now() - 120_000);
+      await utimes(nested, stale, stale);
+    } else await ageInterruptedLocks(nested);
+  }
+}
+
+async function assertValidationInterruption(argumentsList, key, busyBeforeInterruption = false) {
+  const args = [...argumentsList, "--idempotency-key", key];
+  const before = state.requests.length;
+  await runCli(args, { status: null, interruptValidation: true, busyBeforeInterruption });
+  const entries = await Promise.all((await readdir(path.join(temporary, "journal", "entries"))).map(async name =>
+    JSON.parse(await readFile(path.join(temporary, "journal", "entries", name), "utf8"))));
+  const entry = entries.find(value => value.idempotencyKey === key);
+  assert.equal(entry.checkpoint.validation.state, "dispatched", "Dispatch must be durable before the server sees the POST");
+  const expectedPosts = busyBeforeInterruption ? 2 : 1;
+  assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
+  await ageInterruptedLocks(temporary);
+  const reentryAt = state.requests.length;
+  const reopened = await runCli(args, { status: 1 });
+  assert.equal(JSON.parse(reopened.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+  assert.ok(state.requests.slice(reentryAt).every(request => request.method === "GET"), "Unacknowledged validation recovery must not overwrite files or replay any POST");
+  assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
 }
 
 const app = path.join(temporary, "app");
@@ -341,13 +390,21 @@ try {
     { artifactSha256: local, serverArtifactSha256: serverDigest },
   );
 
+  // Kill actual CLI children after POST admission, with no response or busy
+  // acknowledgement. Every normal consumer must reopen without another write.
+  await assertValidationInterruption(["draft", "validate", appId, lastDraft().id], "kill-direct-validation");
+  await assertValidationInterruption(["draft", "validate", appId, lastDraft().id], "kill-after-acknowledged-progress", true);
+  await assertValidationInterruption(["app", "dev", "sync", app], "kill-dev-sync-validation");
+  await assertValidationInterruption(["app", "dev", "start", app], "kill-dev-start-validation");
+  await assertValidationInterruption(["deploy", app], "kill-deploy-validation");
+
   // 2. dev sync follows a local change with OpenCloud's new digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v2</title>\n");
   state.dropApplyReply = true;
   const beforeSync = state.requests.length;
   const sync = JSON.parse((await runCli(["app", "dev", "sync", app])).stdout);
   assert.deepEqual({ files: sync.sourceOnlyFiles, count: sync.sourceOnlyFileCount }, { files: [], count: 0 });
-  const synced = lastDraft().validatedDigest;
+  const synced = state.drafts.get((await devState()).draftId).validatedDigest;
   assert.notEqual(synced, serverDigest);
   assert.equal((await devState()).serverArtifactSha256, synced);
   const syncRequests = state.requests.slice(beforeSync);
@@ -390,7 +447,7 @@ try {
   state.extraArtifactFile = false;
 
   process.stdout.write(
-    "Artifact compression contract passed: dev start, sync, verify, promote and deploy adopt OpenCloud's digest for identical content, the manifest retry names its keys, and real differences are refused.\n",
+    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches with no replay, canonical manifest retry, and real mismatch refusal.\n",
   );
 } finally {
   server.close();

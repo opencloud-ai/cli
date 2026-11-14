@@ -1068,6 +1068,14 @@ async function synchronizeValidatedDraft(
   revision: number;
   validation: unknown;
 }> {
+  run.failIfUnknown();
+  const validationProgress = run.checkpoint?.validation?.state === "progress" ? run.checkpoint.validation : null;
+  if (validationProgress) {
+    if (existingDraftId && existingDraftId !== validationProgress.draftId) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress belongs to a different source draft");
+    }
+    existingDraftId = validationProgress.draftId;
+  }
   printBundleFiles(bundle.files);
   printBundleWarnings(bundle.warnings);
   const note = sourceOnlyNote(upload.sourceOnlyFiles, platformBuilt(bundle));
@@ -1102,6 +1110,9 @@ async function synchronizeValidatedDraft(
       ));
     }
     draft = { id: existing.id, revision: existing.revision };
+    if (validationProgress && draft.revision !== validationProgress.revision) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "The draft changed after acknowledged validation progress; no request was repeated");
+    }
   } else {
     await run.markAttempted();
     const created = await control.call(
@@ -1181,6 +1192,9 @@ async function synchronizeValidatedDraft(
     }
     changes.sort((left, right) => left.path.localeCompare(right.path));
     if (!changes.length) break;
+    if (validationProgress) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Draft files changed after acknowledged validation progress; no files were overwritten");
+    }
     const batch = changes.slice(0, 200);
     await run.checkpointStage({
       stage: "applying",
