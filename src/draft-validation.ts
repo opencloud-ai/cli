@@ -4,6 +4,15 @@ import { ApiError, DraftValidationWaitTimeoutError, draftValidationWaitTimeoutMs
 import type { MutationRun } from "./mutation-journal.js";
 import { CliContractError } from "./owner-parity.js";
 
+// Only named API refusals establish that validation did not remain in flight.
+// A proxy timeout, generic execution failure or unrelated busy response does
+// not acknowledge the dispatched request, even when it has an HTTP status.
+const DEFINITE_REFUSALS = new Set([
+  "400:invalid_request", "400:bad_request", "401:unauthorized", "403:forbidden",
+  "404:not_found", "405:method_not_allowed", "409:DRAFT_REVISION_CHANGED",
+  "413:payload_too_large", "415:unsupported_media_type",
+]);
+
 /** Wait only on explicit progress for the journaled revision, never a lost reply. */
 export async function validateDraftWithProgress(control: OpenCloudClient, input: {
   appId: string;
@@ -51,7 +60,7 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
             parsed.data.details.revision === input.revision) {
           await input.journal.checkpointValidation({ ...coordinates, state: "progress",
             retryNotBefore: new Date(Date.now() + parsed.data.details.retryAfterSeconds * 1_000).toISOString() });
-        } else {
+        } else if (!error.retryable && DEFINITE_REFUSALS.has(`${error.status}:${error.code}`)) {
           await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
         }
       }
@@ -75,7 +84,8 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
       },
     });
   } catch (error) {
-    if (!(error instanceof ApiError) && !(error instanceof DraftValidationWaitTimeoutError)) {
+    if (input.journal.checkpoint?.validation?.state === "dispatched" ||
+        (!(error instanceof ApiError) && !(error instanceof DraftValidationWaitTimeoutError))) {
       await input.journal.markUnknown("DRAFT_VALIDATION_OUTCOME_UNKNOWN");
     }
     throw error;

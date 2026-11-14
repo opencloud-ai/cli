@@ -1069,7 +1069,7 @@ async function synchronizeValidatedDraft(
   validation: unknown;
 }> {
   run.failIfUnknown();
-  const validationProgress = run.checkpoint?.validation?.state === "progress" ? run.checkpoint.validation : null;
+  let validationProgress = run.checkpoint?.validation?.state === "progress" ? run.checkpoint.validation : null;
   if (validationProgress) {
     if (existingDraftId && existingDraftId !== validationProgress.draftId) {
       throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress belongs to a different source draft");
@@ -1233,6 +1233,18 @@ async function synchronizeValidatedDraft(
     appId: bundle.manifest.appId, draftId: draft.id, revision, journal: run,
     manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: platformBuilt(bundle) },
   });
+  if (validationProgress) {
+    const receipt = run.checkpoint?.validation;
+    if (receipt?.state !== "result" || receipt.draftId !== validationProgress.draftId ||
+        receipt.revision !== validationProgress.revision || receipt.requestSha256 !== validationProgress.requestSha256 ||
+        receipt.deadline !== validationProgress.deadline || receipt.validationId !== result.id ||
+        receipt.passed !== result.passed || receipt.artifactSha256 !== result.artifactSha256) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress has no matching durable result; no files were overwritten");
+    }
+    // Canonical manifest normalization is a new deliberate edit after the
+    // exact pending validation has returned and its result is durable.
+    validationProgress = null;
+  }
   if (!result.passed) {
     printValidationErrors(result.diagnostics);
     // A definite validation failure changed nothing live, so the next attempt,

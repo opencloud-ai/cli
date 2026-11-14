@@ -92,12 +92,38 @@ describe("CLI authoritative validation", () => {
       expect(request.journal.markUnknown).toHaveBeenCalledExactlyOnceWith("DRAFT_VALIDATION_OUTCOME_UNKNOWN");
     });
 
-  it.each([new ApiError(429, { code: "FRONTEND_BUILD_BUSY", retryable: true }), new ApiError(429, { code: "RATE_LIMITED" }),
-    new ApiError(409, { code: "DRAFT_REVISION_CHANGED" }), new ApiError(403, { code: "forbidden" })])(
-    "stops on unrelated rate limits, old busy responses, changed revisions and revoked access", async error => {
-      const call = vi.fn().mockRejectedValue(error), request = input();
-      await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).rejects.toBe(error);
-      expect(call).toHaveBeenCalledOnce();
-      expect(request.journal.markUnknown).not.toHaveBeenCalled();
-    });
+  it.each([
+    ...[408, 500, 502, 503, 504].map(status => new ApiError(status, { code: "internal_error" })),
+    new ApiError(504, { code: "DRAFT_REVISION_CHANGED", retryable: false }),
+    new ApiError(503, { code: "APP_LOCK_BUSY", retryable: true }),
+    new ApiError(429, { code: "FRONTEND_BUILD_BUSY", retryable: true }),
+    new ApiError(429, { code: "RATE_LIMITED" }),
+    new ApiError(429, { ...busy.body as object, details: { appId, draftId, revision: 4, retryAfterSeconds: 2 } }),
+    new ApiError(409, { code: "conflict" }),
+    new ApiError(403, { code: "unknown_failure" }),
+    new ApiError(403, { code: "forbidden", retryable: true }),
+  ])("keeps an unclassified HTTP failure uncertain across reopening", async error => {
+    const call = vi.fn().mockRejectedValue(error), request = input();
+    await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).rejects.toThrow("journal outcome is uncertain");
+    expect(call).toHaveBeenCalledOnce();
+    expect(request.journal.checkpoint?.validation?.state).toBe("dispatched");
+    expect(request.journal.markUnknown).toHaveBeenCalledExactlyOnceWith("DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+    const retry = vi.fn();
+    await expect(validateDraftWithProgress({ call: retry } as unknown as OpenCloudClient,
+      { ...request, journal: journal(structuredClone(request.journal.checkpoint)) })).rejects.toThrow("unacknowledged validation dispatch");
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [400, "invalid_request"], [400, "bad_request"], [401, "unauthorized"], [403, "forbidden"],
+    [404, "not_found"], [405, "method_not_allowed"], [409, "DRAFT_REVISION_CHANGED"],
+    [413, "payload_too_large"], [415, "unsupported_media_type"],
+  ] as const)("records the defined refusal %s/%s without retrying it", async (status, code) => {
+    const error = new ApiError(status, { code });
+    const call = vi.fn().mockRejectedValue(error), request = input();
+    await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).rejects.toBe(error);
+    expect(call).toHaveBeenCalledOnce();
+    expect(request.journal.markUnknown).not.toHaveBeenCalled();
+    expect(request.journal.checkpoint?.validation?.state).toBe("refused");
+  });
 });

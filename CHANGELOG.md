@@ -7,9 +7,11 @@
   reads without automatically repeating the request.
 - Wait for slow draft validation using short requests pinned to the exact
   revision. Retry only explicit validation-progress responses; keep lost
-  replies and interrupted dispatches uncertain in the mutation journal.
-  Persist each dispatch and acknowledged response before continuing.
+  replies, proxy failures and interrupted dispatches uncertain in the mutation
+  journal. Persist each dispatch and acknowledged response before continuing.
   Deployment, development and direct draft validation share this behavior.
+  Resumed validation can still normalize the source manifest after its exact
+  result has been durably acknowledged.
 - Add production and isolated development container commands for jobs, HTTP
   services, and workers: list, get, run, executions, execution, cancel, pause,
   resume, restart, scale, and events. Mutations retain their exact scope and

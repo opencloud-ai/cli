@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import * as tar from "tar";
+import YAML from "yaml";
 
 // Drives the built CLI through dev start, sync, verify, promote and deploy
 // against a fake control plane that bundles each uploaded draft for real and
@@ -36,6 +37,9 @@ const state = {
   dropApplyReply: false,
   interruptValidation: null,
   busyBeforeInterruption: false,
+  busyValidation: false,
+  validationHttpFailure: null,
+  canonicalReceiptKey: null,
   requests: [],
 };
 
@@ -185,6 +189,15 @@ const server = createServer(async (request, response) => {
     if (parts[5] === "files" && request.method === "PATCH") {
       const input = JSON.parse(body);
       assert.equal(input.expectedRevision, draft.revision);
+      if (state.canonicalReceiptKey && input.changes.some(change => change.path === "opencloud.json")) {
+        const receipt = (await validationEntry(state.canonicalReceiptKey)).checkpoint.validation;
+        assert.equal(receipt.state, "result", "Canonical writes require a durable authoritative validation result");
+        assert.equal(receipt.draftId, draft.id);
+        assert.equal(receipt.revision, draft.revision);
+        assert.equal(receipt.validationId, draft.validation.id);
+        assert.equal(receipt.artifactSha256, draft.validation.artifactSha256);
+        assert.equal(receipt.passed, true);
+      }
       for (const change of input.changes) {
         if (change.delete) draft.files.delete(change.path);
         else {
@@ -197,6 +210,13 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
+      assert.equal(JSON.parse(body).expectedRevision, draft.revision);
+      if (state.busyValidation) {
+        state.busyValidation = false;
+        response.setHeader("Retry-After", "2");
+        return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+          details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
+      }
       if (state.interruptValidation) {
         if (state.busyBeforeInterruption) {
           state.busyBeforeInterruption = false;
@@ -214,13 +234,21 @@ const server = createServer(async (request, response) => {
       draft.status = "validated";
       draft.validatedDigest = built.sha256;
       draft.validatedRevision = draft.revision;
-      return send(response, 200, {
+      draft.validation = {
         id: randomUUID(), draftId: draft.id, revision: draft.revision, passed: true,
         artifactSha256: built.sha256, manifest: built.manifest, canonicalSourceManifest: "opencloud.yaml",
         sourceManifest: draft.files.has("opencloud.yaml") ? "opencloud.yaml" : "opencloud.json",
         sourceFiles: [...draft.files.keys()].sort(), artifactFiles: built.files, diagnostics: [],
         nextAction: "Start or apply a development session for this exact validated revision.", createdAt: now,
-      });
+      };
+      if (state.validationHttpFailure) {
+        const status = state.validationHttpFailure;
+        state.validationHttpFailure = null;
+        // The upstream accepted and completed the validation before a proxy
+        // substituted an error. The next POST would succeed if blindly sent.
+        return send(response, status, { code: "internal_error", message: "Synthetic proxy failure" });
+      }
+      return send(response, 200, draft.validation);
     }
     if (parts[5] === "dev-sessions" && request.method === "POST") {
       assert.equal(JSON.parse(body).apply, false, "Create and retain the session before applying a revision");
@@ -299,7 +327,8 @@ function release(draft, type) {
 
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
-async function runCli(argumentsList, { status = 0, remote = true, interruptValidation = false, busyBeforeInterruption = false } = {}) {
+async function runCli(argumentsList, { status = 0, remote = true, interruptValidation = false, busyBeforeInterruption = false,
+  interruptAfterProgress = false } = {}) {
   const environment = { ...process.env };
   for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) {
     delete environment[key];
@@ -317,10 +346,15 @@ async function runCli(argumentsList, { status = 0, remote = true, interruptValid
     state.interruptValidation = () => child.kill("SIGKILL");
     state.busyBeforeInterruption = busyBeforeInterruption;
   }
+  if (interruptAfterProgress) state.busyValidation = true;
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
-  child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+    // Progress is printed only after the matching receipt is durably saved.
+    if (interruptAfterProgress && stderr.includes("Validation is still running for draft")) child.kill("SIGKILL");
+  });
   const exit = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
   assert.equal(exit, status, `${argumentsList.join(" ")}\n${stderr}`);
   return { stdout, stderr };
@@ -342,9 +376,7 @@ async function assertValidationInterruption(argumentsList, key, busyBeforeInterr
   const args = [...argumentsList, "--idempotency-key", key];
   const before = state.requests.length;
   await runCli(args, { status: null, interruptValidation: true, busyBeforeInterruption });
-  const entries = await Promise.all((await readdir(path.join(temporary, "journal", "entries"))).map(async name =>
-    JSON.parse(await readFile(path.join(temporary, "journal", "entries", name), "utf8"))));
-  const entry = entries.find(value => value.idempotencyKey === key);
+  const entry = await validationEntry(key);
   assert.equal(entry.checkpoint.validation.state, "dispatched", "Dispatch must be durable before the server sees the POST");
   const expectedPosts = busyBeforeInterruption ? 2 : 1;
   assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
@@ -354,6 +386,40 @@ async function assertValidationInterruption(argumentsList, key, busyBeforeInterr
   assert.equal(JSON.parse(reopened.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
   assert.ok(state.requests.slice(reentryAt).every(request => request.method === "GET"), "Unacknowledged validation recovery must not overwrite files or replay any POST");
   assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
+}
+
+async function validationEntry(key) {
+  const entries = await Promise.all((await readdir(path.join(temporary, "journal", "entries"))).map(async name =>
+    JSON.parse(await readFile(path.join(temporary, "journal", "entries", name), "utf8"))));
+  const entry = entries.find(value => value.idempotencyKey === key);
+  assert.ok(entry, `Missing validation journal for ${key}`);
+  return entry;
+}
+
+async function assertValidationHttpFailure(argumentsList, key, status) {
+  const args = [...argumentsList, "--idempotency-key", key];
+  const before = state.requests.length;
+  state.validationHttpFailure = status;
+  const failed = await runCli(args, { status: 1 });
+  assert.equal(JSON.parse(failed.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+  const entry = await validationEntry(key);
+  assert.equal(entry.state, "unknown");
+  assert.equal(entry.checkpoint.validation.state, "dispatched");
+  assert.equal(state.drafts.get(entry.checkpoint.validation.draftId).validation.passed, true, "The upstream accepted this validation");
+  const reentryAt = state.requests.length;
+  const reopened = await runCli(args, { status: 1 });
+  assert.equal(JSON.parse(reopened.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+  assert.ok(state.requests.slice(reentryAt).every(request => request.method === "GET"));
+  assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, 1,
+    `HTTP ${status} must not authorize another validation POST on reopen`);
+}
+
+async function interruptAcknowledgedProgress(args, key) {
+  await runCli([...args, "--idempotency-key", key], { status: null, interruptAfterProgress: true });
+  const receipt = (await validationEntry(key)).checkpoint.validation;
+  assert.equal(receipt.state, "progress");
+  await ageInterruptedLocks(temporary);
+  return receipt;
 }
 
 const app = path.join(temporary, "app");
@@ -398,6 +464,13 @@ try {
   await assertValidationInterruption(["app", "dev", "start", app], "kill-dev-start-validation");
   await assertValidationInterruption(["deploy", app], "kill-deploy-validation");
 
+  for (const status of [408, 500, 502, 503, 504]) {
+    await assertValidationHttpFailure(["draft", "validate", appId, lastDraft().id], `http-${status}-direct-validation`, status);
+  }
+  await assertValidationHttpFailure(["app", "dev", "sync", app], "http-504-dev-sync-validation", 504);
+  await assertValidationHttpFailure(["app", "dev", "start", app], "http-504-dev-start-validation", 504);
+  await assertValidationHttpFailure(["deploy", app], "http-504-deploy-validation", 504);
+
   // 2. dev sync follows a local change with OpenCloud's new digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v2</title>\n");
   state.dropApplyReply = true;
@@ -428,14 +501,47 @@ try {
   assert.equal(lastDraft().status, "deployed");
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, lastDraft().validatedDigest);
 
-  // 5. A manifest OpenCloud resolves differently is retried with the canonical
-  //    opencloud.json, and the message names the key.
+  // 5. Reopen acknowledged validation progress before normalizing a manifest
+  //    OpenCloud resolves differently. One container supplies the documented
+  //    waiting budget; this fake API bundles it without contacting a registry.
   state.resolveYamlDifferently = true;
+  const manifest = YAML.parse(await readFile(path.join(app, "opencloud.yaml"), "utf8"));
+  manifest.containers = [{ name: "validation-fixture", kind: "job", image: "registry.example/fixture:1", job: {} }];
+  await write("opencloud.yaml", YAML.stringify(manifest));
   await write("frontend/index.html", "<!doctype html><title>Counter v4</title>\n");
-  const retried = await runCli(["deploy", app]);
+  const normalizationKey = "resume-progress-canonical-manifest";
+  const progress = await interruptAcknowledgedProgress(["deploy", app], normalizationKey);
+  state.canonicalReceiptKey = normalizationKey;
+  const resumedAt = state.requests.length;
+  const retried = await runCli(["deploy", app, "--idempotency-key", normalizationKey]);
   assert.match(retried.stderr, /resolved opencloud\.yaml differently from this CLI \(runtime\)/);
   assert.ok(lastDraft().files.has("opencloud.json"));
+  assert.equal(lastDraft().id, progress.draftId, "Resume must retain the exact source draft");
+  const resumedWrites = state.requests.slice(resumedAt).filter(request => request.method !== "GET");
+  assert.deepEqual(resumedWrites.map(request => [request.method, request.path.split("/").at(-1)]), [
+    ["POST", "validate"], ["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"],
+  ]);
+  assert.equal((await validationEntry(normalizationKey)).state, "completed");
+  state.canonicalReceiptKey = null;
   state.resolveYamlDifferently = false;
+
+  // Initial revision and file drift still refuse every write before a resumed
+  // progress receipt has obtained its exact authoritative result.
+  for (const drift of ["revision", "files"]) {
+    const key = `resume-progress-${drift}-drift`;
+    const pending = await interruptAcknowledgedProgress(["deploy", app], key);
+    const draft = state.drafts.get(pending.draftId);
+    if (drift === "revision") draft.revision += 1;
+    else {
+      const content = Buffer.from("concurrent source edit");
+      draft.files.set("frontend/index.html", { content, sha256: sha256(content) });
+    }
+    const before = state.requests.length;
+    const refused = await runCli(["deploy", app, "--idempotency-key", key], { status: 1 });
+    assert.equal(JSON.parse(refused.stderr.trim().split("\n").at(-1)).error.code, "MUTATION_REPLAY_MISMATCH");
+    assert.ok(state.requests.slice(before).every(request => request.method === "GET"), "Initial progress drift must not be overwritten");
+    assert.deepEqual((await validationEntry(key)).checkpoint.validation, pending);
+  }
 
   // 6. A real difference in OpenCloud's artifact still fails, and says which.
   state.extraArtifactFile = true;
@@ -447,7 +553,7 @@ try {
   state.extraArtifactFile = false;
 
   process.stdout.write(
-    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches with no replay, canonical manifest retry, and real mismatch refusal.\n",
+    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures with no replay, resumed canonical manifest normalization, initial drift refusal, and real mismatch refusal.\n",
   );
 } finally {
   server.close();
