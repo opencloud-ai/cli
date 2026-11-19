@@ -33,6 +33,13 @@
   overflow, retaining the decoded 32 MiB limit and canonical encoding checks.
 - `app connect` says what the connected folder can do, in words that fit a
   person or any agent, instead of naming Codex.
+- An app command run in a folder that is not connected fails with
+  `WORKSPACE_NOT_CONNECTED` and says what is missing: a signed-in person is
+  told to run `app connect` with the command's app ID (or in the folder the
+  command named), or to run the command in a connected folder; only someone
+  without an account login is also told to run `login`. It used to say "Run
+  opencloud login, then opencloud app connect <app-id> in this directory."
+  to everyone.
 - The local `validate` summary lists the containers (name, kind and image) and
   routes it read, next to the counts of migrations, Functions, queues and cron.
 - An invalid manifest fails with `INVALID_MANIFEST` and one short line per

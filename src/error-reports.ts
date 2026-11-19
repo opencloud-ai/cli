@@ -223,6 +223,7 @@ const CALLER_OUTCOME_CODES = new Set([
   "SECRET_TOO_LARGE",
   "SOURCE_TOO_LARGE",
   "TOKEN_FILE_EXISTS",
+  "WORKSPACE_NOT_CONNECTED",
 ]);
 
 function record(value: unknown): Record<string, unknown> | null {

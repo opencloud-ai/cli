@@ -156,6 +156,7 @@ import {
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
+import { notConnectedMessage } from "./guidance.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
@@ -206,6 +207,12 @@ const invocation: {
   undescribed: boolean;
 } = { route: null, optionNames: [], privateValues: [], workspace: null, undescribed: false };
 
+/**
+ * The running command, for guidance printed on this terminal only: its path
+ * below the program and its arguments by name. Error reports never use it.
+ */
+const runningCommand: { route: string[]; args: Map<string, string> } = { route: [], args: new Map() };
+
 program.hook("preAction", (_program, actionCommand) => {
   try {
     Object.assign(invocation, describeInvocation(actionCommand));
@@ -213,7 +220,50 @@ program.hook("preAction", (_program, actionCommand) => {
     // Report bookkeeping never stops a command.
     invocation.undescribed = true;
   }
+  const route: string[] = [];
+  for (let current: Command | null = actionCommand; current?.parent; current = current.parent) {
+    route.unshift(current.name());
+  }
+  runningCommand.route = route;
+  runningCommand.args = new Map(
+    actionCommand.registeredArguments.flatMap((argument, index) => {
+      const value: unknown = actionCommand.processedArgs[index];
+      return typeof value === "string" ? [[argument.name(), value] as const] : [];
+    }),
+  );
 });
+
+/**
+ * No credential applies to an app command: the folder has no app connection,
+ * and perhaps there is no account login either. The top-level handler words
+ * the message once it knows which, since checking the login reads the OS
+ * credential store, which nothing else here needs.
+ */
+class WorkspaceNotConnectedError extends Error {
+  readonly code = "WORKSPACE_NOT_CONNECTED";
+
+  constructor(readonly cwd: string | undefined) {
+    super(notConnectedMessage({ signedIn: null }));
+    this.name = "WorkspaceNotConnectedError";
+  }
+
+  async describe(): Promise<void> {
+    let signedIn: boolean | null;
+    try {
+      signedIn = Boolean(await credentialStore.loadAccount(normalizeApiUrl(targetApiUrl(this.cwd))));
+    } catch {
+      signedIn = null;
+    }
+    const directory = runningCommand.args.get("directory");
+    const here = process.env.INIT_CWD ?? process.cwd();
+    this.message = notConnectedMessage({
+      signedIn,
+      appId: runningCommand.args.get("app-id"),
+      // A directory argument of "." is this folder.
+      directory: directory !== undefined && path.resolve(here, directory) !== path.resolve(here) ? directory : undefined,
+    });
+  }
+}
 
 function sessionFile(): string {
   return resolveSessionFile(
@@ -340,13 +390,15 @@ function client(cwd?: string): OpenCloudClient {
         : { token: legacy.token }),
     });
   }
-  throw callerFailure(new Error(
-    legacy?.state === "awaiting_email_verification"
-      ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
-      : legacy?.state === "starting"
-        ? "Onboarding has not completed. Re-run the same opencloud onboard command."
-        : "Run opencloud login, then opencloud app connect <app-id> in this directory.",
-  ));
+  if (legacy?.state === "awaiting_email_verification") {
+    throw callerFailure(new Error(
+      "Email verification is still pending. Run opencloud onboard-complete after confirming the email.",
+    ));
+  }
+  if (legacy?.state === "starting") {
+    throw callerFailure(new Error("Onboarding has not completed. Re-run the same opencloud onboard command."));
+  }
+  throw callerFailure(new WorkspaceNotConnectedError(cwd));
 }
 
 /**
@@ -6754,6 +6806,7 @@ if (asksForVersion(process.argv.slice(2))) {
     ) {
       return;
     }
+    if (error instanceof WorkspaceNotConnectedError) await error.describe();
     // Only the message and hint follow the brand; the report keeps the original.
     process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
     process.exitCode = 1;

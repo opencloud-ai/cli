@@ -223,6 +223,51 @@ describe("validate", () => {
   });
 });
 
+describe("an app command in a folder that is not connected", () => {
+  const operationId = "40000000-0000-4000-8000-0000000000aa";
+
+  it("tells a signed-in person to connect the folder, not to sign in", async () => {
+    const context = await workspace("unconnected-signed-in", { signedIn: true });
+    const followed = await run(["operation", "get", operationId, "--follow"], context);
+    expect(followed.status).toBe(1);
+    expect(JSON.parse(followed.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "WORKSPACE_NOT_CONNECTED",
+        message: "This folder is not connected to an app. You are signed in, so run opencloud app connect <app-id> here, or run this command in a folder connected to the app.",
+        retryable: false,
+      },
+    });
+    const named = await run(["containers", "get", appId, "renderer"], context);
+    expect(JSON.parse(named.stderr).error.message).toContain(`run opencloud app connect ${appId} here`);
+    const branded = await run(["containers", "get", appId, "renderer"], context, {
+      OPENCLOUD_CLI_PRODUCT_NAME: "Sprout", OPENCLOUD_CLI_COMMAND: "sprout",
+    });
+    expect(JSON.parse(branded.stderr).error.message).toContain(`run sprout app connect ${appId} here`);
+    expect(requests).toEqual([]);
+  });
+
+  it("names a directory argument that is not connected", async () => {
+    const context = await workspace("unconnected-directory", { signedIn: true });
+    await app(context);
+    const started = await run(["app", "dev", "start", "app"], context);
+    expect(started.status).toBe(1);
+    expect(JSON.parse(started.stderr).error).toMatchObject({
+      code: "WORKSPACE_NOT_CONNECTED",
+      message: "The folder app is not connected to an app. You are signed in, so run opencloud app connect <app-id> in that folder.",
+    });
+  });
+
+  it("asks for a login first when there is none", async () => {
+    const context = await workspace("unconnected-signed-out");
+    const followed = await run(["operation", "get", operationId], context);
+    expect(JSON.parse(followed.stderr).error).toMatchObject({
+      code: "WORKSPACE_NOT_CONNECTED",
+      message: "You are not signed in, and this folder is not connected to an app. Run opencloud login, then opencloud app connect <app-id> here.",
+    });
+  });
+});
+
 describe("app connect", () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });
