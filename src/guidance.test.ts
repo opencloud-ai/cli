@@ -27,7 +27,19 @@ describe("what to run after the mutation journal stopped a command", () => {
     expect(journalHint("MUTATION_IN_PROGRESS", { ...pending, state: "unknown", unknownCode: "DEV_APPLY_OUTCOME_UNKNOWN" }, devStart)).toBe(
       "Check whether the earlier request took effect with `opencloud app dev status 'my app'`. If it did not, add a new --idempotency-key to send this request.",
     );
-    expect(journalHint("MUTATION_IN_PROGRESS", { ...pending, state: "completed" }, devStart)).toBe("Use a new --idempotency-key for this request.");
+    expect(journalHint("MUTATION_IN_PROGRESS", { ...pending, state: "completed" }, devStart)).toBe("Run the command again.");
+  });
+
+  it("asks for a new key when the given key already names another request", () => {
+    const run = { route: ["containers", "run"], args: new Map([["app-id", appId], ["name", "summarise"]]) };
+    const job = { command: "opencloud containers run", idempotencyKey: "summary-request-1", state: "completed", appId };
+    expect(journalHint("IDEMPOTENCY_KEY_REUSED", job, run)).toBe("Use a new --idempotency-key for this request.");
+    expect(journalHint("IDEMPOTENCY_KEY_REUSED", { ...job, state: "attempted" }, run)).toBe(
+      `To finish that request, run it again with the input it had: \`opencloud containers run ${appId} summarise --idempotency-key summary-request-1\`. Use a new --idempotency-key for this request.`,
+    );
+    expect(journalHint("IDEMPOTENCY_KEY_REUSED", { ...job, state: "unknown" }, run)).toBe(
+      `Check whether that request took effect with \`opencloud operation list ${appId}\`. Use a new --idempotency-key for this request.`,
+    );
   });
 
   it("says how to find out whether an unconfirmed apply or validation took effect", () => {

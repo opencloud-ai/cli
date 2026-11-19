@@ -54,6 +54,12 @@
   the journal generated, passed back, resumes that entry instead of starting
   a second one under the same key. Unknown outcomes carry `pending` too and
   say what to check, such as `app dev status` for a development apply.
+- A given `--idempotency-key` that already names a different request, such as
+  `containers run` repeated with other input, fails with
+  `IDEMPOTENCY_KEY_REUSED` (not retryable), like the platform's reused-key
+  conflicts, instead of a retryable `MUTATION_IN_PROGRESS`. A request sent
+  without a key still waits for the target's unresolved one with
+  `MUTATION_IN_PROGRESS`.
 - A development apply OpenCloud refuses (a coded 4xx answer or a compute
   error such as `COMPUTE_NO_CAPACITY`) is recorded as refused, so running the
   command again sends a new apply instead of waiting out the old one's

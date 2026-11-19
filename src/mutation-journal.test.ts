@@ -998,12 +998,49 @@ describe("mutation journal", () => {
     }).catch((error: unknown) => expect(error).toMatchObject({
       code: "DEV_APPLY_OUTCOME_UNKNOWN", pending: { idempotencyKey: pendingKey, state: "unknown", unknownCode: "DEV_APPLY_OUTCOME_UNKNOWN" },
     }));
+    // Given explicitly, that key names a request that differs from this one: a
+    // reused key, which waiting never clears.
     await expect(journal.run({ ...edited, explicitIdempotencyKey: pendingKey }, async () => undefined)).rejects.toMatchObject({
-      code: "MUTATION_IN_PROGRESS",
-      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN), and this request differs from it. No request was started.`,
+      code: "IDEMPOTENCY_KEY_REUSED",
+      retryable: false,
+      message: `Idempotency key ${pendingKey} belongs to an earlier \`opencloud app dev start\` request that may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN). No request was started.`,
       pending: { state: "unknown" },
     });
+    // Without a key, the same request waits for the unresolved one instead.
+    await expect(journal.run(edited, async () => undefined)).rejects.toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      retryable: true,
+      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN), and this request differs from it. No request was started.`,
+    });
     expect(await readdir(path.join(directory, "entries"))).toHaveLength(1);
+  });
+
+  it("refuses an explicit key whose unfinished request differs, as a reused key", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const explicitIdempotencyKey = "summary-request-1";
+    const intent = { commandId: "opencloud containers run" as const, safeScope: { appId: APP_ID, name: "summarise" },
+      safeRequest: { requestSha256: "a".repeat(64) }, explicitIdempotencyKey };
+    await expect(journal.run(intent, async (run) => {
+      await run.markAttempted();
+      throw new Error("reply lost");
+    })).rejects.toThrow("reply lost");
+    for (const changed of [
+      { ...intent, safeRequest: { requestSha256: "b".repeat(64) } },
+      { ...intent, commandId: "opencloud containers cancel" as const },
+    ]) {
+      await expect(journal.run(changed, async () => undefined)).rejects.toMatchObject({
+        code: "IDEMPOTENCY_KEY_REUSED",
+        retryable: false,
+        message: "Idempotency key summary-request-1 belongs to an earlier `opencloud containers run` request that has not finished (state attempted). No request was started.",
+        pending: { command: "opencloud containers run", idempotencyKey: explicitIdempotencyKey, generatedKey: false, state: "attempted" },
+      });
+    }
+    // The same request with that key still resumes it.
+    await journal.run(intent, async (run) => {
+      expect(run.recovered).toBe(true);
+      await run.complete();
+    });
   });
 
   it("keeps an explicit key that is not the pending entry's own on its own entry", async () => {
@@ -1057,7 +1094,8 @@ describe("mutation journal", () => {
         async () => undefined,
       ),
     ).rejects.toMatchObject({
-      code: "MUTATION_IN_PROGRESS",
+      code: "IDEMPOTENCY_KEY_REUSED",
+      retryable: false,
       message: "Idempotency key explicit-stable-key-1 was already used for a different `opencloud app configure` request, which finished. No request was started.",
       pending: { idempotencyKey: explicitIdempotencyKey, generatedKey: false, state: "completed", operationId: "44444444-4444-4444-8444-444444444444" },
     });

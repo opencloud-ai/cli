@@ -61,8 +61,16 @@ export function journalHint(code: string, pending: PendingView, running: Running
     ? quoted(`${commandLine(running.route, [...running.args.values()])} --idempotency-key ${pending.idempotencyKey}`)
     : quoted(`${pending.command} … --idempotency-key ${pending.idempotencyKey}`);
   const check = checkCommand(pending, running);
-  if (code === "MUTATION_IN_PROGRESS") {
+  if (code === "IDEMPOTENCY_KEY_REUSED") {
+    // The key is taken whatever happened to its request: this one needs a new key.
     if (pending.state === "completed") return "Use a new --idempotency-key for this request.";
+    if (pending.state === "unknown") {
+      return `Check whether that request took effect with ${check}. Use a new --idempotency-key for this request.`;
+    }
+    return `To finish that request, run it again with the input it had: ${resume}. Use a new --idempotency-key for this request.`;
+  }
+  if (code === "MUTATION_IN_PROGRESS") {
+    if (pending.state === "completed") return "Run the command again.";
     if (pending.state === "unknown") {
       return `Check whether the earlier request took effect with ${check}. If it did not, add a new --idempotency-key to send this request.`;
     }

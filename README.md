@@ -215,6 +215,9 @@ target fails with `MUTATION_IN_PROGRESS`. Its `pending` field names the
 unresolved request (command, idempotency key, state and server coordinates),
 and its `hint` gives the exact command that resumes it with that same key, a
 command that shows what it did, and how to send a separate request instead.
+An `--idempotency-key` that already names a different request, finished or
+not, fails with `IDEMPOTENCY_KEY_REUSED` instead. Waiting never clears it, so
+it is not retryable: send the new request with a new key.
 A key the journal generated, passed back with `--idempotency-key`, resumes
 that same entry; it never starts a second one under the same key. Unknown
 outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `DRAFT_VALIDATION_OUTCOME_UNKNOWN`,

@@ -1959,16 +1959,35 @@ export class MutationJournal {
         ) {
           // Name the request that holds this target, so it can be resumed with
           // its own key or checked; the CLI adds the exact commands.
+          const pending = pendingMutation(entry, this.binding.appId);
+          const unknown = entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN";
+          if (explicitKey !== null && entry.idempotencyKey === explicitKey) {
+            // The given key already names another request. That never clears
+            // by waiting: only a new key sends this one, as the platform's own
+            // reused-key conflicts say, so it is not retryable.
+            throw new MutationJournalError(
+              "IDEMPOTENCY_KEY_REUSED",
+              entry.state === "completed"
+                ? `Idempotency key ${entry.idempotencyKey} was already used for a different \`${entry.commandId}\` request, which finished. No request was started.`
+                : entry.state === "unknown"
+                  ? `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that may have taken effect (${unknown}). No request was started.`
+                  : `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that has not finished (state ${entry.state}). No request was started.`,
+              false,
+              pending,
+            );
+          }
+          // Without a key of its own, this request waits for the target's
+          // unresolved one; running it again works once that one is resolved.
           const holder = `\`${entry.commandId}\` request with idempotency key ${entry.idempotencyKey}`;
           throw new MutationJournalError(
             "MUTATION_IN_PROGRESS",
             entry.state === "completed"
-              ? `Idempotency key ${entry.idempotencyKey} was already used for a different \`${entry.commandId}\` request, which finished. No request was started.`
+              ? `An earlier \`${entry.commandId}\` request for this target finished just as this one started, so no request was started. Run the command again.`
               : entry.state === "unknown"
-                ? `An earlier ${holder} may have taken effect (${entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN"}), and this request differs from it. No request was started.`
+                ? `An earlier ${holder} may have taken effect (${unknown}), and this request differs from it. No request was started.`
                 : `An earlier ${holder} has not finished (state ${entry.state}), and this request differs from it. No request was started.`,
             true,
-            pendingMutation(entry, this.binding.appId),
+            pending,
           );
         }
       } else {

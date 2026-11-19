@@ -152,7 +152,13 @@ try {
     assert.equal(effects.get(`${route}/containers/job/executions:${key}`).input.private, "input-payload");
     const conflictBefore = requests.length;
     const changed = args.map(value => value === '{"private":"input-payload"}' ? '{"private":"changed"}' : value);
-    await run(changed, 1);
+    // J2b: a key that already named a finished submission is reused with
+    // other input. That needs a new key, so it is a conflict, never retryable.
+    const reused = (await run(changed, 1)).error;
+    assert.equal(reused.code, "IDEMPOTENCY_KEY_REUSED");
+    assert.equal(reused.retryable, false);
+    assert.equal(reused.pending.state, "completed");
+    assert.equal(reused.hint, "Use a new --idempotency-key for this request.");
     assert.equal(business(conflictBefore).length, 0, "changed input replay reached the API");
     const waiting = await run([...prefix, "execution", scope, executionId]);
     assert.equal(waiting.completionDelivery.state, "not_configured");
