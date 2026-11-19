@@ -65,8 +65,11 @@ describe("compute command boundaries", () => {
   it("filters logs by the platform's surface names and plurals, refusing anything else before a request", () => {
     for (const name of ["function", "container", "http", "ai", "platform"]) expect(logSurface(name)).toBe(name);
     expect(logSurface(" Functions ")).toBe("function");
+    // The older name for Function lines, which the published guide and earlier CLIs use.
+    expect(logSurface("runtime")).toBe("function");
+    expect(logSurface("Runtime")).toBe("function");
     expect(logSurface("containers")).toBe("container");
-    for (const unknown of ["runtime", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
+    for (const unknown of ["edge", "runtimes", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
       expect(() => logSurface(unknown)).toThrowError(expect.objectContaining({
         code: "LOG_SURFACE_UNKNOWN",
         message: `Unknown log surface ${JSON.stringify(unknown)}: use function, container, http, ai or platform`,

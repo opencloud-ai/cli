@@ -604,8 +604,9 @@ exactly the same filters, `--from`, `--to`, and limit. Logs without any page or
 compute filter retain their legacy response. Feed v1 stays the default.
 `--surface` selects where lines came from: `function` (the app's Functions),
 `container`, `http` (the edge), `ai` (the AI gateway) or `platform`;
-`functions` and `containers` work too. Any other value, such as the earlier
-`runtime`, fails with `LOG_SURFACE_UNKNOWN` before a request is sent.
+`functions` and `containers` work too, and so does `runtime`, the older name
+for `function`, which is sent as `function`. Any other value fails with
+`LOG_SURFACE_UNKNOWN` before a request is sent.
 
 Registry connections belong to one app and one exact host. They authorize
 trusted image fetching; containers never receive the credential:

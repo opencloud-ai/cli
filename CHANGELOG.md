@@ -26,10 +26,11 @@
   passed to `log` on its log lines; they used to be dropped while the answer
   was parsed.
 - `logs` and `app dev logs` name the surfaces `--surface` accepts in their help
-  (`function`, `container`, `http`, `ai` and `platform`, plus `functions`
-  and `containers`) and refuse any other value with `LOG_SURFACE_UNKNOWN`
-  before sending a request, as the platform does, instead of returning an empty
-  page. A plural is sent by its name.
+  (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
+  `containers` and `runtime`, the older name for `function`) and refuse any
+  other value with `LOG_SURFACE_UNKNOWN` before sending a request, as the
+  platform does, instead of returning an empty page. An alias is sent by the
+  name it stands for.
 - Accept container frontends and routes, and default new unpinned app bundles
   to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
 - Refresh the shared compute schemas, preserving exact 413/431 request-size

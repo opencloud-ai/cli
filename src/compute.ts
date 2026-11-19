@@ -60,9 +60,14 @@ export interface ComputeLogOptions extends ComputeQueryOptions {
  * its containers, the HTTP edge, the AI gateway, or the platform itself.
  */
 export const LOG_SURFACES = ["function", "container", "http", "ai", "platform"] as const;
-/** Plurals people type for a surface, which the platform accepts too. */
+/**
+ * Other names the platform accepts for a surface: the plurals people type, and
+ * `runtime`, the older name for Function lines that the published telemetry
+ * guide and earlier CLIs use.
+ */
 const LOG_SURFACE_ALIASES: Readonly<Record<string, (typeof LOG_SURFACES)[number]>> = {
   functions: "function",
+  runtime: "function",
   containers: "container",
 };
 
