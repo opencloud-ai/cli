@@ -126,6 +126,7 @@ async function run(args, status = 0, stdin = "", account = false) {
 const business = offset => requests.slice(offset).filter(r => r.path !== "/version");
 
 try {
+  const controlOutputs = new Map();
   for (const isDev of [false, true]) {
     const prefix = isDev ? ["app", "dev", "containers"] : ["containers"];
     const scope = isDev ? directory : appId;
@@ -150,12 +151,18 @@ try {
     assert.equal(requests.at(-1).query.cursor, "opaque+/=");
     await run([...prefix, "cancel", scope, executionId, "--idempotency-key", `cancel-${isDev}`]);
     for (const action of ["pause", "resume", "restart", "scale"]) {
-      await run([...prefix, action, scope, "worker", "--generation", "3", "--idempotency-key", `${action}-${isDev}-key`, ...(action === "scale" ? ["--replicas", "2"] : [])]);
+      const receipt = await run([...prefix, action, scope, "worker", "--generation", "3", "--idempotency-key", `${action}-${isDev}-key`, ...(action === "scale" ? ["--replicas", "2"] : [])]);
+      controlOutputs.set(`${action}:${isDev}`, receipt);
       assert.equal(requests.at(-1).body.expectedGeneration, 3);
       assert.equal(requests.at(-1).path, `${route}/containers/worker/${action}`);
     }
     await run([...prefix, "events", scope, "worker", "--limit", "2"]);
     assert.equal(requests.at(-1).path, `${route}/containers/worker/events`);
+  }
+  // Production and development controls print the same full receipt (W3 saw them differ).
+  for (const action of ["pause", "resume", "restart", "scale"]) {
+    assert.deepEqual(Object.keys(controlOutputs.get(`${action}:false`)).sort(), ["acceptedAt", "generation", "operationId", "workloadName"]);
+    assert.deepEqual(controlOutputs.get(`${action}:true`), controlOutputs.get(`${action}:false`), `${action} output differs between production and development`);
   }
   assert.equal((await run(["logs", appId])).status, "success", "legacy logs changed shape");
   const page = await run(["logs", appId, "--workload", "job", "--execution", executionId, "--from", now, "--to", "2026-11-14T01:00:00Z"]);
