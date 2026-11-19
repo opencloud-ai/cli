@@ -327,6 +327,20 @@ describe("app request with an app access token", spawning, () => {
   });
 });
 
+describe("log surfaces", spawning, () => {
+  it("names the surfaces --surface accepts in both log commands' help", async () => {
+    const context = await workspace("log-surfaces");
+    for (const args of [["logs", "--help"], ["app", "dev", "logs", "--help"]]) {
+      const help = await run(args, context);
+      expect(help.status, help.stderr).toBe(0);
+      // Commander wraps option text to the terminal's width.
+      expect(help.stdout.replace(/\s+/g, " ")).toContain(
+        "--surface <surface> where the lines came from: function (the app's Functions), container, http (the edge), ai (the AI gateway) or platform; functions and containers also work",
+      );
+    }
+  });
+});
+
 describe("app connect", spawning, () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });

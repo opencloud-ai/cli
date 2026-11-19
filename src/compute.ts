@@ -5,6 +5,7 @@ import {
 } from "@opencloud/contracts/control-plane";
 import { computeIdempotencyKeySchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
+import { CliContractError } from "./cli-contract-error.js";
 
 /** Validate before opening a journal or making any request. */
 export function computeInput<T extends ControlPlaneOperationId>(
@@ -54,12 +55,39 @@ export interface ComputeLogOptions extends ComputeQueryOptions {
   execution?: string; instance?: string;
 }
 
+/**
+ * Where log lines come from, as the platform names them: an app's Functions,
+ * its containers, the HTTP edge, the AI gateway, or the platform itself.
+ */
+export const LOG_SURFACES = ["function", "container", "http", "ai", "platform"] as const;
+/** Plurals people type for a surface, which the platform accepts too. */
+const LOG_SURFACE_ALIASES: Readonly<Record<string, (typeof LOG_SURFACES)[number]>> = {
+  functions: "function",
+  containers: "container",
+};
+
+/**
+ * The surface a log page asks for, by name or alias, as the platform reads it.
+ * Any other value would only match nothing, so it is refused before a request
+ * with the platform's own code and wording.
+ */
+export function logSurface(value: string): (typeof LOG_SURFACES)[number] {
+  const name = value.trim().toLowerCase();
+  const surface = Object.hasOwn(LOG_SURFACE_ALIASES, name) ? LOG_SURFACE_ALIASES[name] : name;
+  const known = LOG_SURFACES.find((candidate) => candidate === surface);
+  if (known) return known;
+  throw callerFailure(new CliContractError(
+    "LOG_SURFACE_UNKNOWN",
+    `Unknown log surface ${JSON.stringify(value.trim().slice(0, 40))}: use function, container, http, ai or platform`,
+  ));
+}
+
 export function computeLogBody(options: ComputeLogOptions) {
   return {
     from: options.from, to: options.to, limit: Number(options.limit ?? 200),
     ...(options.contains !== undefined ? { contains: options.contains } : {}),
     ...(options.level !== undefined ? { level: options.level } : {}),
-    ...(options.surface !== undefined ? { surface: options.surface } : {}),
+    ...(options.surface !== undefined ? { surface: logSurface(options.surface) } : {}),
     ...(options.workload !== undefined ? { workloadName: options.workload } : {}),
     ...(options.kind !== undefined ? { kind: options.kind } : {}),
     ...(options.execution !== undefined ? { executionId: options.execution } : {}),

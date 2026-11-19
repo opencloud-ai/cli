@@ -188,7 +188,17 @@ try {
   assert.deepEqual(page.entries[0].fields, loggedFields, "logs --page keeps a Function's logged fields");
   assert.deepEqual((await run(["logs", appId, "--page", "--from", now, "--to", "2026-11-14T01:00:00Z"])).entries[0].fields, loggedFields);
   assert.equal(page.computeObservation.gaps[0].droppedLines, "3");
-  const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  // W1b, W2b: Function lines are the `function` surface; a plural is accepted
+  // and sent by its name, and an unknown surface is refused before a request.
+  await run(["logs", appId, "--surface", "functions", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  assert.equal(requests.at(-1).body.surface, "function");
+  const surfaceBefore = requests.length;
+  const unknownSurface = (await run(["logs", appId, "--surface", "runtime", "--from", now, "--to", "2026-11-14T01:00:00Z"], 1)).error;
+  assert.equal(unknownSurface.code, "LOG_SURFACE_UNKNOWN");
+  assert.equal(unknownSurface.message, 'Unknown log surface "runtime": use function, container, http, ai or platform');
+  assert.equal(requests.length, surfaceBefore, "an unknown surface reached the API");
+  const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--surface", "container", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  assert.equal(requests.at(-1).body.surface, "container");
   assert.deepEqual(devPage.entries[0].fields, loggedFields, "app dev logs keeps a Function's logged fields");
   assert.equal(requests.at(-1).path, `/v1/apps/${appId}/dev-sessions/${sessionId}/logs/page`);
   assert.equal((await run(["agent-feed", appId])).contractVersion, "1");

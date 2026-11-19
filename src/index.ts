@@ -6676,11 +6676,15 @@ containerRegistry.command("remove").argument("<app-id>").argument("<connection-i
   });
 
 
+/** Both log commands filter by the platform's surface names; see logSurface. */
+const LOG_SURFACE_HELP =
+  "where the lines came from: function (the app's Functions), container, http (the edge), ai (the AI gateway) or platform; functions and containers also work";
+
 program
   .command("logs")
   .argument("<app-id>")
   .option("--page", "return a normalized page with cursor and source freshness")
-  .option("--surface <surface>")
+  .option("--surface <surface>", LOG_SURFACE_HELP)
   .option("--workload <name>", "container workload name")
   .option("--kind <kind>", "job, service, or worker")
   .option("--execution <id>", "container execution ID")
@@ -6717,7 +6721,7 @@ dev.command("logs")
   .option("--to <iso>", "ISO time", new Date().toISOString())
   .option("--contains <text>")
   .option("--level <level>")
-  .option("--surface <surface>")
+  .option("--surface <surface>", LOG_SURFACE_HELP)
   .option("--workload <name>")
   .option("--kind <kind>", "job, service, or worker")
   .option("--execution <id>")

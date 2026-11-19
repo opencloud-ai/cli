@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyComputeError } from "@opencloud/contracts/containers";
 import { ApiError, OpenCloudClient } from "./api-client.js";
-import { computeInput, computeJson, computeKey, computeLogBody, computeQuery } from "./compute.js";
+import { computeInput, computeJson, computeKey, computeLogBody, computeQuery, logSurface } from "./compute.js";
 import { isReportableFailure } from "./error-reports.js";
 import { structuredCliError } from "./owner-parity.js";
 import { computeInstanceDiagnosticsSchema } from "../vendor/contracts/src/compute-observation.js";
@@ -62,6 +62,19 @@ describe("compute command boundaries", () => {
       expect(() => computeInput("scaleContainer", { appId: id, name: "worker", body })).toThrow();
     }
   });
+  it("filters logs by the platform's surface names and plurals, refusing anything else before a request", () => {
+    for (const name of ["function", "container", "http", "ai", "platform"]) expect(logSurface(name)).toBe(name);
+    expect(logSurface(" Functions ")).toBe("function");
+    expect(logSurface("containers")).toBe("container");
+    for (const unknown of ["runtime", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
+      expect(() => logSurface(unknown)).toThrowError(expect.objectContaining({
+        code: "LOG_SURFACE_UNKNOWN",
+        message: `Unknown log surface ${JSON.stringify(unknown)}: use function, container, http, ai or platform`,
+      }));
+    }
+    expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "functions" }).surface).toBe("function");
+  });
+
   it("binds log filters without exposing another environment selector", () => {
     const body = computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", workload: "job", execution: id, cursor: "opaque+/=" });
     expect(computeInput("queryDevLogsPage", { appId: id, sessionId: id, body }).body.executionId).toBe(id);
