@@ -4860,6 +4860,12 @@ program
       functions: bundle.manifest.functions.length,
       queues: bundle.manifest.queues.length,
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
+      // Named, so authors can see their containers and routes were read.
+      containers:
+        bundle.manifest.schemaVersion === 3
+          ? (bundle.manifest.containers ?? []).map(({ name, kind, image }) => ({ name, kind, image }))
+          : [],
+      routes: bundle.manifest.schemaVersion === 3 ? (bundle.manifest.routes ?? []) : [],
       secrets: bundle.manifest.secrets,
       files: bundle.files,
       e2eTest: bundle.e2eTest

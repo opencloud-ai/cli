@@ -33,6 +33,8 @@
   overflow, retaining the decoded 32 MiB limit and canonical encoding checks.
 - `app connect` says what the connected folder can do, in words that fit a
   person or any agent, instead of naming Codex.
+- The local `validate` summary lists the containers (name, kind and image) and
+  routes it read, next to the counts of migrations, Functions, queues and cron.
 
 ## 3.20.0
 

@@ -131,6 +131,62 @@ async function run(
   return { status, stdout, stderr };
 }
 
+const image = `registry.example.test/team/renderer@sha256:${"a".repeat(64)}`;
+
+/** A schema-3 app with an optional manifest tail, scaffolded by `init`. */
+async function app(context: { home: string; folder: string }, manifestTail = "") {
+  const directory = path.join(context.folder, "app");
+  const initialized = await run(["init", directory, "--app-id", appId], context);
+  expect(initialized.status, initialized.stderr).toBe(0);
+  if (manifestTail) {
+    const manifest = path.join(directory, "opencloud.yaml");
+    await writeFile(manifest, `${await readFile(manifest, "utf8")}${manifestTail}`);
+  }
+  return directory;
+}
+
+describe("validate", () => {
+  it("names the containers and routes it read", async () => {
+    const context = await workspace("validate-summary");
+    const directory = await app(context, [
+      "containers:",
+      "  - name: renderer",
+      "    kind: service",
+      `    image: ${image}`,
+      "    service:",
+      "      startupProbe: { path: /ready }",
+      "      readinessProbe: { path: /ready }",
+      "  - name: thumbnails",
+      "    kind: job",
+      `    image: ${image}`,
+      "    job: {}",
+      "routes:",
+      "  - id: render",
+      "    path: /render",
+      "    container: renderer",
+      "    methods: [POST]",
+      "",
+    ].join("\n"));
+    const validated = await run(["validate", directory], context);
+    expect(validated.status, validated.stderr).toBe(0);
+    const summary = JSON.parse(validated.stdout) as Record<string, unknown>;
+    expect(summary.containers).toEqual([
+      { name: "renderer", kind: "service", image },
+      { name: "thumbnails", kind: "job", image },
+    ]);
+    expect(summary.routes).toEqual([
+      { id: "render", path: "/render", container: "renderer", access: "inherit", methods: ["POST"] },
+    ]);
+  });
+
+  it("reports none for an app without containers or routes", async () => {
+    const context = await workspace("validate-empty");
+    const validated = await run(["validate", await app(context)], context);
+    expect(validated.status, validated.stderr).toBe(0);
+    expect(JSON.parse(validated.stdout)).toMatchObject({ containers: [], routes: [] });
+  });
+});
+
 describe("app connect", () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });
