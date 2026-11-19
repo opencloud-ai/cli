@@ -15,7 +15,10 @@
 - Add production and isolated development container commands for jobs, HTTP
   services, and workers: list, get, run, executions, execution, cancel, pause,
   resume, restart, scale, and events. Mutations retain their exact scope and
-  idempotency key; workload controls compare the observed generation.
+  idempotency key; workload controls compare the observed generation and
+  answer with `workloadName`, the new `generation` (the one the next control
+  names) and `acceptedAt`. The change is saved when they answer; there is no
+  operation to follow, so its effect shows in `get` and `events`.
 - Add app-bound registry management with passwords read from standard input,
   and account-only compute payer settings, prices, and usage reads. Consent
   and budget changes remain in the browser.
@@ -31,6 +34,13 @@
   other value with `LOG_SURFACE_UNKNOWN` before sending a request, as the
   platform does, instead of returning an empty page. An alias is sent by the
   name it stands for.
+- When OpenCloud refuses the input itself, the error keeps what it should be
+  in `details`: the `field`, the values it `allowed` and their `aliases`
+  (`LOG_SURFACE_UNKNOWN`, whether the platform or the CLI refused it), or each
+  refused field with its `code` and `message` (`invalid_request`). Only those
+  bounded parts are kept, with credentials redacted. An owner-only action
+  refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
+  forward as the error's `hint`.
 - Accept container frontends and routes, and default new unpinned app bundles
   to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
 - Refresh the shared compute schemas, preserving exact 413/431 request-size

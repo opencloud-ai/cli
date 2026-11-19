@@ -50,6 +50,18 @@ tests, the Function SDK 2.8.0 source, are refreshed verbatim from the same
 commit: its container types name `waitReason` and every catalog code (a test
 compares them with this catalog), and it refuses a service request body over
 4 MiB, as the contract does. The CLI bundle does not import the Function SDK.
+`contracts/src/{compute-control-plane.ts,containers.ts,control-plane.ts}` and
+`control-plane-client/src/browser.test.ts` are then refreshed verbatim from
+platform `2858c4d11` (`feat/container-runtime-exploration`): pause, resume,
+restart and scale answer with `computeControlReceiptSchema` (`workloadName`,
+the new `generation` and `acceptedAt`), which replaces
+`computeOperationReceiptSchema` and its `operationId`, because the change
+commits at once and has no operation to follow. The log page's `surface`
+filter documents the accepted names and aliases; its shape is unchanged.
+Upstream `compute-observation.test.ts` and `control-plane-client/src/compute.test.ts`
+also changed in that range and are still not copied: they import the private
+administrator contracts and client. The CLI's own tests and
+`test:contract` read the new receipt instead.
 
 Validation waiting takes `contracts/src/control-plane.test.ts` and
 `control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`

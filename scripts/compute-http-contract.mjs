@@ -87,7 +87,8 @@ const server = createServer(async (request, response) => {
     if (!effects.has(identity)) effects.set(identity, body);
     else assert.deepEqual(body, effects.get(identity), "server replay changed the request");
     value = url.pathname.endsWith("/executions") || url.pathname.endsWith("/cancel") ? execution(isDev)
-      : { operationId: revisionId, workloadName: "worker", generation: 4, acceptedAt: now };
+      // A control change commits at once: the receipt names the next generation, no operation.
+      : { workloadName: "worker", generation: 4, acceptedAt: now };
     if (dropNext) { dropNext = false; response.destroy(); return; }
   } else if (url.pathname.endsWith("/containers")) value = { workloads: [workload(isDev)], nextCursor: "opaque+/=", observedAt: now };
   else if (url.pathname.endsWith("/container-executions")) value = { executions: [execution(isDev)], nextCursor: null, observedAt: now };
@@ -179,7 +180,7 @@ try {
   }
   // Production and development controls print the same full receipt (W3 saw them differ).
   for (const action of ["pause", "resume", "restart", "scale"]) {
-    assert.deepEqual(Object.keys(controlOutputs.get(`${action}:false`)).sort(), ["acceptedAt", "generation", "operationId", "workloadName"]);
+    assert.deepEqual(controlOutputs.get(`${action}:false`), { workloadName: "worker", generation: 4, acceptedAt: now });
     assert.deepEqual(controlOutputs.get(`${action}:true`), controlOutputs.get(`${action}:false`), `${action} output differs between production and development`);
   }
   assert.equal((await run(["logs", appId])).status, "success", "legacy logs changed shape");
@@ -197,7 +198,9 @@ try {
   const surfaceBefore = requests.length;
   const unknownSurface = (await run(["logs", appId, "--surface", "edge", "--from", now, "--to", "2026-11-14T01:00:00Z"], 1)).error;
   assert.equal(unknownSurface.code, "LOG_SURFACE_UNKNOWN");
-  assert.equal(unknownSurface.message, 'Unknown log surface "edge": use function, container, http, ai or platform');
+  assert.equal(unknownSurface.message, 'Unknown log surface "edge": use function, container, http, ai or platform (runtime, the older name for function, still works)');
+  assert.deepEqual(unknownSurface.details, { field: "surface", allowed: ["function", "container", "http", "ai", "platform"],
+    aliases: { functions: "function", runtime: "function", containers: "container" } });
   assert.equal(requests.length, surfaceBefore, "an unknown surface reached the API");
   const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--surface", "container", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
   assert.equal(requests.at(-1).body.surface, "container");

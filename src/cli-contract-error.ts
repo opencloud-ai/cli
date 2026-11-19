@@ -29,11 +29,16 @@ export class CliContractError extends Error {
   readonly issues: ReadableIssue[] | undefined;
   /** Extra identifiers printed beside the code, such as release IDs. */
   readonly fields: CliErrorFields | undefined;
+  /** What the refused input should have been, shaped as OpenCloud's own details. */
+  readonly details: Record<string, unknown> | undefined;
 
   constructor(
     readonly code: string,
     message: string,
-    options: { retryable?: boolean; cause?: unknown; issues?: ReadableIssue[]; hint?: string; fields?: CliErrorFields } = {},
+    options: {
+      retryable?: boolean; cause?: unknown; issues?: ReadableIssue[]; hint?: string; fields?: CliErrorFields;
+      details?: Record<string, unknown>;
+    } = {},
   ) {
     super(
       message,
@@ -43,6 +48,7 @@ export class CliContractError extends Error {
     this.retryable = options.retryable ?? false;
     this.issues = options.issues;
     this.fields = options.fields;
+    this.details = options.details;
     if (options.hint) withHint(this, options.hint);
   }
 }

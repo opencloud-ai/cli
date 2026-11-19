@@ -159,7 +159,7 @@ describe("browser OpenCloudClient", () => {
       id: "a".repeat(64),
       timestamp: "2026-11-19T12:00:00.000Z",
       level: "info",
-      surface: "runtime",
+      surface: "function",
       message: "render job accepted",
       requestId: "request-1",
       fields: { executionId: "00000000-0000-4000-8000-000000000003", attempt: 1 },

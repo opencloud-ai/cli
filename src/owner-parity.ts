@@ -495,6 +495,34 @@ function identifiers(details: Record<string, unknown>, names: string[]): Record<
       : []));
 }
 
+const shortText = (value: unknown, limit: number): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= limit;
+
+/**
+ * What a refused request's details say about the input, as OpenCloud names it:
+ * the field, the values it accepts and their aliases (an unknown log surface),
+ * and each refused field with its reason (a malformed request). Only these,
+ * checked and bounded, so nothing else in a body is printed.
+ */
+export function inputDetails(details: Record<string, unknown>): Record<string, unknown> | null {
+  const picked: Record<string, unknown> = {};
+  if (shortText(details.field, 200)) picked.field = details.field;
+  if (Array.isArray(details.allowed) && details.allowed.length <= 50 && details.allowed.every((value) => shortText(value, 100))) {
+    picked.allowed = details.allowed;
+  }
+  const aliases = record(details.aliases);
+  const aliasEntries = Object.entries(aliases);
+  if (aliasEntries.length && aliasEntries.length <= 50 && aliasEntries.every(([name, value]) => shortText(name, 100) && shortText(value, 100))) {
+    picked.aliases = Object.fromEntries(aliasEntries);
+  }
+  if (Array.isArray(details.fields)) {
+    const fields = details.fields.slice(0, 20).map(record).filter((value) => shortText(value.field, 200) && shortText(value.message, 300))
+      .map((value) => ({ field: value.field, ...(shortText(value.code, 100) ? { code: value.code } : {}), message: redactMessage(value.message) }));
+    if (fields.length) picked.fields = fields;
+  }
+  return Object.keys(picked).length ? picked : null;
+}
+
 /** The next step OpenCloud names for an error, in `details.suggestedFix`. */
 function suggestedFix(details: Record<string, unknown>): string | null {
   const value = details.suggestedFix;
@@ -532,6 +560,7 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
   });
   const details = Object.keys(record(body.details)).length ? record(body.details) : record(nested.details);
   const fix = code === "ACTIVE_DEPLOYMENT_CHANGED" ? null : suggestedFix(details);
+  const input = compute.success ? null : inputDetails(details);
   return {
     code,
     message: redactMessage(body.message ?? nested.message ?? error.message),
@@ -543,7 +572,7 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
           ...identifiers(details, ["baseDeploymentId"]) }
       : {}),
     ...(fix ? { hint: fix } : {}),
-    ...(compute.success ? { details: compute.data.details } : {}),
+    ...(compute.success ? { details: compute.data.details } : input ? { details: input } : {}),
     retryable:
       compute.success ? compute.data.details.retryable : typeof body.retryable === "boolean"
         ? body.retryable
@@ -698,10 +727,12 @@ function structuredFields(error: unknown): Record<string, unknown> {
   const message = isZodError(error) && issues?.length
     ? issueSummary("The input", issues)
     : error instanceof Error ? error.message : (candidate.message ?? error);
+  const details = error instanceof CliContractError && error.details ? inputDetails(error.details) : null;
   return {
     code: safeCode(candidate.code, "CLI_ERROR"),
     message: redactMessage(message),
     retryable: candidate.retryable === true,
+    ...(details ? { details } : {}),
     ...(issues?.length
       ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }
       : {}),

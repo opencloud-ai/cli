@@ -356,7 +356,8 @@ export const computeJobSubmitRequestSchema = z.object({
 export type ComputeJobSubmitRequest = z.infer<typeof computeJobSubmitRequestSchema>;
 export const computeControlRequestSchema = z.object({ expectedGeneration: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) }).strict();
 export const computeScaleRequestSchema = computeControlRequestSchema.extend({ replicas: z.number().int().min(0).max(20) });
-export const computeOperationReceiptSchema = z.object({ operationId: computeIdSchema, workloadName: containerNameSchema, generation: z.number().int().positive(), acceptedAt: computeTimestampSchema }).strict();
+// A control change commits at once; its effects show in the workload read and its events. The generation is the one to name next.
+export const computeControlReceiptSchema = z.object({ workloadName: containerNameSchema, generation: z.number().int().positive(), acceptedAt: computeTimestampSchema }).strict();
 const computeListFields = {
   workloadName: containerNameSchema.optional(), kind: containerKindSchema.optional(),
   from: computeTimestampSchema.optional(), to: computeTimestampSchema.optional(),

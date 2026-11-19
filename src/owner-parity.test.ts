@@ -370,6 +370,35 @@ describe("owner-parity CLI helpers", () => {
     })).error.hint).toBe("Correct the migration source, validate the new draft revision, then apply it again.");
   });
 
+  it("prints what OpenCloud says about refused input: the field, accepted values, aliases and each refused field", () => {
+    const surface = structuredCliError(new ApiError(400, {
+      code: "LOG_SURFACE_UNKNOWN",
+      message: 'Unknown log surface "edge": use function, container, http, ai or platform (runtime, the older name for function, still works)',
+      details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function", containers: "container" } },
+    }));
+    expect(surface.error).toMatchObject({
+      code: "LOG_SURFACE_UNKNOWN", status: 400, retryable: false,
+      details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function", containers: "container" } },
+    });
+    const malformed = structuredCliError(new ApiError(400, {
+      code: "invalid_request",
+      message: "Request validation failed: query.limit: Too big: expected number to be <=100",
+      details: { fields: [{ field: "query.limit", code: "too_big", message: "Too big: expected number to be <=100" }, { field: "body", message: "Bearer oc_owner_do-not-print-0123456789" }, { nope: 1 }] },
+    }));
+    expect(malformed.error.details).toEqual({ fields: [
+      { field: "query.limit", code: "too_big", message: "Too big: expected number to be <=100" },
+      { field: "body", message: "[REDACTED]" },
+    ] });
+    // The CLI login's owner-only refusal: OpenCloud's next step is the hint.
+    const owner = structuredCliError(new ApiError(403, {
+      code: "OWNER_ACTION_BROWSER_ONLY",
+      message: "This credential can manage the app but can't run owner-only actions on the live app.",
+      details: { appId: "11111111-1111-4111-8111-111111111111", suggestedFix: "Do this in the app or on its page in the dashboard, or ask the owner to approve an app access token for a script: opencloud app access-token request 11111111-1111-4111-8111-111111111111 --name <name>" },
+    }));
+    expect(owner.error).toMatchObject({ code: "OWNER_ACTION_BROWSER_ONLY", status: 403, hint: expect.stringMatching(/^Do this in the app or on its page/) });
+    expect(owner.error).not.toHaveProperty("details");
+  });
+
   it("names the unresolved journal entry and a hint added for the failure", () => {
     const pending = {
       command: "opencloud app dev start" as const, idempotencyKey: "ocj1:f96d3c45-0000-4000-8000-000000000001", generatedKey: true,

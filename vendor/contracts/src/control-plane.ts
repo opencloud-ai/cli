@@ -1436,7 +1436,13 @@ export const appLogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 const appLogsPageBaseFields = {
     contains: z.string().max(200).optional(),
     level: appLogLevelSchema.optional(),
-    surface: z.string().trim().min(1).max(200).optional(),
+    surface: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Where the lines came from: function, container, http, ai or platform. functions and runtime (the older name) also select function, and containers selects container. Any other value is refused."),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
     cursor: z.string().max(2_048).optional(),

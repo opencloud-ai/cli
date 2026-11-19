@@ -72,9 +72,17 @@ describe("compute command boundaries", () => {
     for (const unknown of ["edge", "runtimes", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
       expect(() => logSurface(unknown)).toThrowError(expect.objectContaining({
         code: "LOG_SURFACE_UNKNOWN",
-        message: `Unknown log surface ${JSON.stringify(unknown)}: use function, container, http, ai or platform`,
+        message: `Unknown log surface ${JSON.stringify(unknown)}: use function, container, http, ai or platform (runtime, the older name for function, still works)`,
       }));
     }
+    // The same details the platform answers with, printed with the error.
+    let refusal: unknown;
+    try { logSurface("edge"); } catch (error) { refusal = error; }
+    expect(structuredCliError(refusal).error).toMatchObject({
+      code: "LOG_SURFACE_UNKNOWN",
+      details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"],
+        aliases: { functions: "function", runtime: "function", containers: "container" } },
+    });
     expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "functions" }).surface).toBe("function");
   });
 
@@ -134,6 +142,19 @@ describe("compute command boundaries", () => {
       const value = classifyComputeError(code);
       expect(isReportableFailure(new ApiError(value.statusCode, value)), code).toBe(false);
     }
+  });
+
+  it("reads a control change's receipt, which names the next generation and no operation", async () => {
+    const receipt = { workloadName: "worker", generation: 5, acceptedAt: now };
+    const app = "11111111-1111-4111-8111-111111111111";
+    for (const operation of ["pauseContainer", "resumeContainer", "restartContainer"] as const) {
+      expect(await answering(receipt).call(operation, { appId: app, name: "worker", body: { expectedGeneration: 4 } }, { idempotencyKey: "control-key-1" }))
+        .toEqual(receipt);
+    }
+    expect(await answering(receipt).call("scaleContainer", { appId: app, name: "worker", body: { expectedGeneration: 4, replicas: 2 } }, { idempotencyKey: "control-key-2" }))
+      .toEqual(receipt);
+    expect(await answering(receipt).call("pauseDevContainer", { appId: app, sessionId: app, name: "worker", body: { expectedGeneration: 4 } }, { idempotencyKey: "control-key-3" }))
+      .toEqual(receipt);
   });
 
   it("keeps the release, host and go-live codes structured, retryable as the catalog says", () => {

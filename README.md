@@ -317,7 +317,12 @@ before any apply is sent with `ACTIVE_DEPLOYMENT_CHANGED` (naming the
 session's release and the live one), `DEV_SESSION_STALE`,
 `DEV_SESSION_STOPPED` or `DEV_SESSION_EXPIRED`, as OpenCloud itself answers;
 run `app dev stop`, then `app dev start`, as the error's `hint` says. Any
-error whose OpenCloud answer has `details.suggestedFix` prints it as `hint`.
+error whose OpenCloud answer has `details.suggestedFix` prints it as `hint`,
+as an owner-only action refused to a CLI login does
+(`OWNER_ACTION_BROWSER_ONLY`). When OpenCloud refuses the input itself,
+the error's `details` keep what it should be: the `field`, the values it
+`allowed` and their `aliases` (an unknown log surface), or each refused field
+with its `code` and `message` in `fields` (`invalid_request`).
 
 Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-
@@ -585,8 +590,12 @@ opencloud containers events "$APP_ID" web --limit 50
 reported completion delivery. After a lost reply, repeat the same input and key
 to recover that execution. An unknown process outcome is never permission to
 repeat its effects. Control commands require the generation from `get`; scaling
-applies only to workers and resets at the next deployment. Usage includes exact
-decimal costs, integer quantities, and pending evidence.
+applies only to workers and resets at the next deployment. `pause`, `resume`,
+`restart` and `scale` answer with `workloadName`, the new `generation` and
+`acceptedAt`. The change is already saved when the command answers, so there is
+no operation to follow: watch its effect in `get` and `events`, and give the
+returned `generation` to the next control command. Usage includes exact decimal
+costs, integer quantities, and pending evidence.
 
 Every workload command also exists under `app dev containers`, taking a local
 directory in place of the app ID. It uses that directory's saved session:

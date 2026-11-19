@@ -81,9 +81,11 @@ export function logSurface(value: string): (typeof LOG_SURFACES)[number] {
   const surface = Object.hasOwn(LOG_SURFACE_ALIASES, name) ? LOG_SURFACE_ALIASES[name] : name;
   const known = LOG_SURFACES.find((candidate) => candidate === surface);
   if (known) return known;
+  // The platform's own code, wording and details for the same refusal.
   throw callerFailure(new CliContractError(
     "LOG_SURFACE_UNKNOWN",
-    `Unknown log surface ${JSON.stringify(value.trim().slice(0, 40))}: use function, container, http, ai or platform`,
+    `Unknown log surface ${JSON.stringify(value.trim().slice(0, 40))}: use function, container, http, ai or platform (runtime, the older name for function, still works)`,
+    { details: { field: "surface", allowed: [...LOG_SURFACES], aliases: { ...LOG_SURFACE_ALIASES } } },
   ));
 }
 
