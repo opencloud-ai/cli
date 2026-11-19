@@ -70,7 +70,9 @@ const server = createServer(async (request, response) => {
   } else if (url.pathname.endsWith("/logs/query")) {
     value = { status: "success", data: { resultType: "streams", result: [] } };
   } else if (url.pathname.endsWith("/logs/page")) {
-    value = { entries: [], nextCursor: "logs+/=", computeObservation: { ...freshness, gaps: [{ instanceId: null, workloadName: "job", from: now, to: now, droppedLines: "3" }], retentionSeconds: 604800 } };
+    // A Function's log line keeps the fields it logged.
+    value = { entries: [{ id: "f".repeat(64), timestamp: now, level: "info", surface: "runtime", message: "check summary", requestId: null,
+      fields: { checked: 5, up: 4, slowest: { url: "https://example.test", ms: 647 } } }], nextCursor: "logs+/=", computeObservation: { ...freshness, gaps: [{ instanceId: null, workloadName: "job", from: now, to: now, droppedLines: "3" }], retentionSeconds: 604800 } };
   } else if (url.pathname.endsWith("/agent-feed")) {
     value = { contractVersion: query.contractVersion ?? "1", app: { id: appId, name: "Compute", slug: "compute", state: "active", activeDeployment: null },
       observedAt: now, telemetry: { status: "unavailable", latestIngestedAt: null, ingestionLagSeconds: null, stale: true },
@@ -176,8 +178,12 @@ try {
   }
   assert.equal((await run(["logs", appId])).status, "success", "legacy logs changed shape");
   const page = await run(["logs", appId, "--workload", "job", "--execution", executionId, "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  const loggedFields = { checked: 5, up: 4, slowest: { url: "https://example.test", ms: 647 } };
+  assert.deepEqual(page.entries[0].fields, loggedFields, "logs --page keeps a Function's logged fields");
+  assert.deepEqual((await run(["logs", appId, "--page", "--from", now, "--to", "2026-11-14T01:00:00Z"])).entries[0].fields, loggedFields);
   assert.equal(page.computeObservation.gaps[0].droppedLines, "3");
-  await run(["app", "dev", "logs", directory, "--kind", "job", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  assert.deepEqual(devPage.entries[0].fields, loggedFields, "app dev logs keeps a Function's logged fields");
   assert.equal(requests.at(-1).path, `/v1/apps/${appId}/dev-sessions/${sessionId}/logs/page`);
   assert.equal((await run(["agent-feed", appId])).contractVersion, "1");
   assert.equal((await run(["agent-feed", appId, "--contract-version", "2"])).computeSources.usage.status, "partial");

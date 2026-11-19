@@ -22,6 +22,9 @@
 - Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
   source freshness. Expected app and policy errors keep their structured
   diagnostics without becoming platform error reports.
+- `logs --page` and `app dev logs` keep the structured `fields` a Function
+  passed to `log` on its log lines; they used to be dropped while the answer
+  was parsed.
 - Accept container frontends and routes, and default new unpinned app bundles
   to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
 - Refresh the shared compute schemas, preserving exact 413/431 request-size

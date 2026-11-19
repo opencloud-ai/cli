@@ -154,6 +154,31 @@ describe("browser OpenCloudClient", () => {
     });
   });
 
+  it("keeps the fields a Function logged on a development log page", async () => {
+    const entry = {
+      id: "a".repeat(64),
+      timestamp: "2026-11-19T12:00:00.000Z",
+      level: "info",
+      surface: "runtime",
+      message: "render job accepted",
+      requestId: "request-1",
+      fields: { executionId: "00000000-0000-4000-8000-000000000003", attempt: 1 },
+    };
+    const client = browser(
+      vi.fn(async () =>
+        Response.json({ entries: [entry], nextCursor: null }),
+      ) as typeof fetch,
+    );
+
+    const page = await client.call("queryDevLogsPage", {
+      appId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      body: { from: "2026-11-19T11:00:00.000Z", to: "2026-11-19T12:00:01.000Z" },
+    });
+
+    expect(page.entries[0]?.fields).toEqual(entry.fields);
+  });
+
   it("retains typed request and operation evidence from JSON errors", async () => {
     const body = {
       statusCode: 409,

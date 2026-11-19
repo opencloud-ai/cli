@@ -50,6 +50,13 @@ accepted platform `03bee78b8da592d638bf1565b1c11845c71a50cd`, adding the exact
 validation progress contract and documented development readiness allowance.
 The platform source prefix for these paths is `packages/`; the CLI prefix is
 `vendor/`. The CLI's durable mutation recovery remains in its own `src/`.
+`contracts/src/{control-plane.ts,api.ts}` and
+`control-plane-client/src/browser.test.ts` are then refreshed verbatim from
+platform `ea8759cf4` (`feat/container-runtime-exploration`): log page entries
+keep the optional `fields` a Function logged. The same files bring the
+platform's compute-off operation views (used by MCP only), Agent Feed v2
+schemas factored into named parts with unchanged shapes, and its current
+draft validation descriptions; no parsed shape the CLI reads changes.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from

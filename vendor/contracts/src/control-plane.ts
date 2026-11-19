@@ -1343,23 +1343,39 @@ export const agentFeedV1Output = z
   })
   .passthrough();
 
+const agentFeedV2SignalOutput = agentFeedSignalOutput.extend({
+  source: z.enum(["control", "runtime", "usage", "browser", "authenticated", "function", "container", "mixed", "none"]),
+  samples: z.number().int().nonnegative().optional(),
+});
+const agentFeedV2AlertOutput = agentFeedAlertOutput.extend({
+  metric: agentFeedAlertOutput.shape.metric.unwrap().extend({ source: containerMetricSourceOutput }).optional(),
+});
+const agentFeedV2BreachOutput = agentFeedBreachOutput.extend({
+  metric: agentFeedBreachOutput.shape.metric.extend({ source: containerMetricSourceOutput }),
+});
+const agentFeedV2EventOutput = z.union([agentFeedEventOutput, computeFeedEventSchema]);
+
 export const agentFeedV2Output = agentFeedV1Output.extend({
   contractVersion: z.literal("2"),
-  signals: z.array(agentFeedSignalOutput.extend({
-    source: z.enum(["control", "runtime", "usage", "browser", "authenticated", "function", "container", "mixed", "none"]),
-    samples: z.number().int().nonnegative().optional(),
-  })).max(100),
-  alerts: z.array(agentFeedAlertOutput.extend({
-    metric: agentFeedAlertOutput.shape.metric.unwrap().extend({ source: containerMetricSourceOutput }).optional(),
-  })).max(100),
-  recentBreaches: z.array(agentFeedBreachOutput.extend({
-    metric: agentFeedBreachOutput.shape.metric.extend({ source: containerMetricSourceOutput }),
-  })).max(100),
-  events: z.array(z.union([agentFeedEventOutput, computeFeedEventSchema])).max(100),
+  signals: z.array(agentFeedV2SignalOutput).max(100),
+  alerts: z.array(agentFeedV2AlertOutput).max(100),
+  recentBreaches: z.array(agentFeedV2BreachOutput).max(100),
+  events: z.array(agentFeedV2EventOutput).max(100),
   computeSources: computeSourceFreshnessSetSchema,
 });
 export const agentFeedOutput = z.discriminatedUnion("contractVersion", [agentFeedV1Output, agentFeedV2Output]);
 export type AgentFeedV2Response = z.infer<typeof agentFeedV2Output>;
+/** MCP structured output is one object, never a union: the v1 fields, with the
+ * v2 values and `computeSources` admitted, so both versions keep their
+ * top-level fields. Installations without compute serve plain v1 instead. */
+export const agentFeedAnyVersionOutput = agentFeedV1Output.extend({
+  contractVersion: z.enum(["1", "2"]),
+  signals: z.array(agentFeedV2SignalOutput),
+  alerts: z.array(agentFeedV2AlertOutput),
+  recentBreaches: z.array(agentFeedV2BreachOutput),
+  events: z.array(agentFeedV2EventOutput),
+  computeSources: computeSourceFreshnessSetSchema.optional(),
+});
 
 const cronInvocationOutput = z
   .object({
@@ -1417,8 +1433,7 @@ export const accountOperationsPageQuerySchema =
 
 export const appLogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 
-const appLogsPageRequestFields = {
-    ...computeLogFilterFields,
+const appLogsPageBaseFields = {
     contains: z.string().max(200).optional(),
     level: appLogLevelSchema.optional(),
     surface: z.string().trim().min(1).max(200).optional(),
@@ -1426,6 +1441,10 @@ const appLogsPageRequestFields = {
     to: z.iso.datetime({ offset: true }),
     cursor: z.string().max(2_048).optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
+};
+const appLogsPageRequestFields = {
+    ...computeLogFilterFields,
+    ...appLogsPageBaseFields,
 };
 function appLogsRangeIssue(value: { from: string; to: string }, context: z.RefinementCtx) {
     if (Date.parse(value.from) >= Date.parse(value.to)) {
@@ -1439,6 +1458,8 @@ function appLogsRangeIssue(value: { from: string; to: string }, context: z.Refin
 export const appLogsPageRequestSchema = z.object({
   ...appLogsPageRequestFields, environment: z.literal("production").optional(), developmentSessionId: z.never().optional(),
 }).superRefine(appLogsRangeIssue);
+/** A log page request as read before container filters: other fields are stripped, never refused. */
+export const appLogsPageRequestV1Schema = z.object(appLogsPageBaseFields).superRefine(appLogsRangeIssue);
 export const devAppLogsPageRequestSchema = z.object({
   ...appLogsPageRequestFields, environment: z.literal("development").optional(), developmentSessionId: z.never().optional(),
 }).superRefine(appLogsRangeIssue);
@@ -1451,6 +1472,10 @@ export const appLogEntryOutput = z.object({
   surface: z.string(),
   message: z.string(),
   requestId: z.string().nullable(),
+  fields: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("The structured fields a Function passed to log, on lines its runtime wrote."),
 });
 
 export const appLogsPageOutput = z.object({
@@ -3639,12 +3664,12 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/drafts/{draftId}/validate",
     summary: "Validate a draft",
     description:
-      "Runs the canonical bundler and records an authoritative digest. A request waits at most 25 seconds for validation, then returns HTTP 429 DRAFT_VALIDATION_IN_PROGRESS with retryable=true, Retry-After, and exact appId/draftId/revision coordinates. Repeat only that revision using expectedRevision to join the existing validation. A lost response is not proof of failure or permission to start concurrent work.",
+      "Runs the canonical bundler and records an authoritative digest.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
       body: z.object({
-        expectedRevision: z.number().int().positive().optional().describe("Refuse before validation if this exact draft revision is no longer current"),
+        expectedRevision: z.number().int().positive().optional().describe("Validate only this exact draft revision. The request then waits at most 25 seconds and otherwise returns HTTP 429 DRAFT_VALIDATION_IN_PROGRESS (retryable) with the revision; repeat with it to join the same validation. Without it, the earlier contract applies: up to 70 seconds, then HTTP 429 FRONTEND_BUILD_BUSY (retryable) while the work continues."),
         version: z
           .string()
           .min(1)
@@ -3660,7 +3685,7 @@ getAiConnectionModels: operation({
       toolName: "validate_draft",
       title: "Validate source draft",
       description:
-        "Run authoritative validation for one draft revision. If DRAFT_VALIDATION_IN_PROGRESS is returned, wait retryAfterSeconds and call again with the returned revision as expectedRevision. Never switch revisions while waiting or retry an uncertain transport failure automatically.",
+        "Run authoritative validation, record its result, and replace the status for this draft revision.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
@@ -5238,7 +5263,7 @@ getAiConnectionModels: operation({
       query: z
         .object({
           since: z.iso.datetime({ offset: true }).optional(),
-          contractVersion: z.enum(["1", "2"]).optional(),
+          contractVersion: z.enum(["1", "2"]).optional().describe("Omit for the v1 contract. 2 adds container events, source freshness and container metric provenance."),
         })
         .optional(),
     }),
@@ -5374,7 +5399,7 @@ getAiConnectionModels: operation({
   }),
   queryDevLogsPage: operation({
     method: "POST", path: "/v1/apps/{appId}/dev-sessions/{sessionId}/logs/page",
-    summary: "Query development container logs", description: "Read bounded logs for this exact authorized development session. Cursors bind every filter and cannot cross production or another session.",
+    summary: "Query development logs", description: "Read bounded logs for this exact authorized development session: its Functions' lines, with the fields they logged, and its container lines. Container filters select container lines only. Cursors bind every filter and cannot cross production or another session.",
     auth: "bearer", scopes: ["app:observe"],
     input: appPath.extend({ sessionId: uuid, body: devAppLogsPageRequestSchema }),
     output: appLogsPageOutput, bodyKey: "body", idempotency: "none",
@@ -5619,6 +5644,47 @@ getAiConnectionModels: operation({
 } as const;
 
 export type ControlPlaneOperationId = keyof typeof controlPlaneOperations;
+
+/** What an installation without compute serves for a shared operation that
+ * container compute extended: the earlier input, output and MCP text. */
+export interface ComputeOffOperationView {
+  readonly input?: z.ZodObject;
+  readonly output?: z.ZodType;
+  readonly mcpDescription?: string;
+}
+
+/**
+ * Installations without compute keep these shared operations exactly as they
+ * were before container compute, so agent-facing text and schemas match the
+ * running installation. MCP builds its tool surface from them there; the
+ * surface sits behind accepted connector submissions, so it must not change.
+ */
+export const computeOffOperationViews: { readonly [K in ControlPlaneOperationId]?: ComputeOffOperationView } = {
+  validateDraft: {
+    input: controlPlaneOperations.validateDraft.input.extend({
+      body: controlPlaneOperations.validateDraft.input.shape.body.omit({ expectedRevision: true }),
+    }),
+  },
+  startDevSession: {
+    mcpDescription:
+      "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
+  },
+  applyDevRevision: {
+    mcpDescription: "Sync the validated draft to its development preview; migration changes reset isolated dev data.",
+  },
+  getAgentFeed: {
+    input: controlPlaneOperations.getAgentFeed.input.extend({
+      query: controlPlaneOperations.getAgentFeed.input.shape.query.unwrap().omit({ contractVersion: true }).optional(),
+    }),
+    output: agentFeedV1Output,
+  },
+  getUsage: {
+    output: controlPlaneOperations.getUsage.output.omit({ compute: true }),
+  },
+  queryLogsPage: {
+    input: controlPlaneOperations.queryLogsPage.input.extend({ body: appLogsPageRequestV1Schema }),
+  },
+};
 
 export type ControlPlaneOperationInput<T extends ControlPlaneOperationId> =
   z.infer<(typeof controlPlaneOperations)[T]["input"]>;

@@ -7,7 +7,7 @@
     "source": "recursive --help output from the release-candidate package build",
     "entrypoint": "node_modules/@opencloud/cli/dist/index.cjs",
     "rootUsage": "opencloud [options] [command]",
-    "entrypointSha256": "34c405afdaa5b9722f3d7e02887bb30cefd196adcddb7d42e3bd4188cb2c46b9",
+    "entrypointSha256": "325217422533921908f2933e984e08d17ac9b68000a978603d2f71c8cbbb4eec",
     "groupCount": 31,
     "leafCount": 173
   },

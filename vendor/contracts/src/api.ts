@@ -340,6 +340,8 @@ export interface AppLogEntry {
   surface: string;
   message: string;
   requestId: string | null;
+  /** The structured fields a Function passed to `log`, on lines its runtime wrote. */
+  fields?: Record<string, unknown>;
 }
 
 export interface AppLogsPage {
