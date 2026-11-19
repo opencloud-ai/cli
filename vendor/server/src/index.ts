@@ -943,10 +943,90 @@ export interface OpenCloudJobsClient {
 
 export type OpenCloudContainerJson = null | boolean | number | string | OpenCloudContainerJson[] | { [key: string]: OpenCloudContainerJson };
 export type OpenCloudContainerState = "queued" | "preparing" | "starting" | "running" | "retry_wait" | "collecting" | "cancelling" | "succeeded" | "failed" | "timed_out" | "cancelled" | "outcome_unknown";
+/** Why a waiting job hasn't started yet, as the platform last found it. */
+export type OpenCloudContainerWaitReason =
+  | "no_capacity"
+  | "host_unavailable"
+  | "capacity_limit"
+  | "budget"
+  | "concurrency"
+  | "paused"
+  | "previous_attempt"
+  | "app_busy"
+  | "platform_error";
+/** The platform's container error codes. A newer platform may add codes. */
+export type OpenCloudContainerErrorCode =
+  | "COMPUTE_NOT_ENABLED"
+  | "COMPUTE_NOT_OFFERED"
+  | "COMPUTE_BILLING_UNAVAILABLE"
+  | "COMPUTE_PAYMENT_REQUIRED"
+  | "COMPUTE_BUDGET_EXCEEDED"
+  | "COMPUTE_CAPACITY_EXCEEDED"
+  | "COMPUTE_QUEUE_FULL"
+  | "COMPUTE_NO_CAPACITY"
+  | "COMPUTE_HOST_UNAVAILABLE"
+  | "COMPUTE_INVALID_DEFINITION"
+  | "COMPUTE_UNSUPPORTED_IMAGE"
+  | "COMPUTE_IMAGE_TOO_LARGE"
+  | "COMPUTE_REVISION_UNAVAILABLE"
+  | "COMPUTE_RELEASE_REPLACED"
+  | "COMPUTE_REVISION_CONFLICT"
+  | "COMPUTE_IDEMPOTENCY_CONFLICT"
+  | "COMPUTE_AUTHORITY_REVOKED"
+  | "COMPUTE_CAPABILITY_INVALID"
+  | "COMPUTE_NOT_LIVE"
+  | "COMPUTE_METRIC_INVALID"
+  | "COMPUTE_METRIC_LIMIT"
+  | "COMPUTE_NOT_FOUND"
+  | "COMPUTE_PROTOCOL_UNSUPPORTED"
+  | "COMPUTE_IMAGE_NOT_FOUND"
+  | "COMPUTE_IMAGE_ACCESS_DENIED"
+  | "COMPUTE_IMAGE_PULL_FAILED"
+  | "COMPUTE_INPUT_UNAVAILABLE"
+  | "COMPUTE_INPUT_TRANSFER_FAILED"
+  | "COMPUTE_QUEUE_TIMEOUT"
+  | "COMPUTE_STARTUP_FAILED"
+  | "COMPUTE_STARTUP_TIMEOUT"
+  | "COMPUTE_EXIT_NONZERO"
+  | "COMPUTE_OUT_OF_MEMORY"
+  | "COMPUTE_SCRATCH_EXHAUSTED"
+  | "COMPUTE_TIMEOUT"
+  | "COMPUTE_CANCELLED"
+  | "COMPUTE_OUTPUT_INVALID"
+  | "COMPUTE_OUTPUT_DIRECTORY_MISSING"
+  | "COMPUTE_OUTPUT_COLLECTION_FAILED"
+  | "COMPUTE_COMPLETION_FAILED"
+  | "COMPUTE_OUTCOME_UNKNOWN"
+  | "COMPUTE_WORKER_LOST"
+  | "COMPUTE_LEASE_EXPIRED"
+  | "COMPUTE_RUNTIME_UNAVAILABLE"
+  | "COMPUTE_STOP_FAILED"
+  | "COMPUTE_STARTING_PENDING"
+  | "COMPUTE_SERVICE_UNAVAILABLE"
+  | "COMPUTE_CONCURRENCY_EXCEEDED"
+  | "COMPUTE_REQUEST_TOO_LARGE"
+  | "COMPUTE_REQUEST_HEADERS_TOO_LARGE"
+  | "COMPUTE_REQUEST_TIMEOUT"
+  | "COMPUTE_UPSTREAM_FAILED"
+  | "COMPUTE_FUNCTION_FAILED"
+  | "COMPUTE_READINESS_FAILED"
+  | "COMPUTE_LIVENESS_FAILED"
+  | "COMPUTE_CRASH_LOOP"
+  | "COMPUTE_EGRESS_DENIED"
+  | "COMPUTE_EGRESS_LIMIT"
+  | "COMPUTE_METER_CONFLICT"
+  | "COMPUTE_METERING_UNAVAILABLE"
+  | "COMPUTE_PRICE_INVALID"
+  | "COMPUTE_PRICE_VERSION_CONFLICT"
+  | "COMPUTE_BILLING_EXPORT_FAILED"
+  | "COMPUTE_BILLING_MISMATCH"
+  | "COMPUTE_INTERNAL_ERROR"
+  | (string & {});
 export interface OpenCloudContainerError {
   statusCode: number;
-  code: string;
+  code: OpenCloudContainerErrorCode;
   message: string;
+  /** Its classification (`retryable`, `phase`, ...) and facts such as `exitCode` or `upstreamStatus`. */
   details: Readonly<Record<string, unknown>>;
 }
 export interface OpenCloudContainerExecution {
@@ -956,6 +1036,8 @@ export interface OpenCloudContainerExecution {
   environment: "production" | "development";
   developmentSessionId: string | null;
   state: OpenCloudContainerState;
+  /** Set while the job waits to start (`queued`, `retry_wait`); otherwise null. */
+  waitReason: OpenCloudContainerWaitReason | null;
   acceptedAt: string;
   queueDeadline: string;
   statusUrl: string;
@@ -3095,7 +3177,7 @@ function containersClient(bindings: RuntimeBindings, requestId: string): OpenClo
     async request(workload, input, options) {
       if (!input || !input.path?.startsWith("/") || input.path.startsWith("//") || input.path.length > 4_096 || /[\\#\u0000-\u001f\u007f]/.test(input.path)) invalid("Service path must be a bounded relative application path");
       const bytes = typeof input.body === "string" ? new TextEncoder().encode(input.body) : input.body;
-      if (bytes && (!(bytes instanceof Uint8Array) || bytes.byteLength > 32 * 1024 * 1024)) invalid("Service body exceeds 32 MiB");
+      if (bytes && (!(bytes instanceof Uint8Array) || bytes.byteLength > 4 * 1024 * 1024)) invalid("Service request body exceeds 4 MiB");
       const result = await request<{ status: number; headers: Record<string, string>; bodyBase64: string }>("request", {
         name: name(workload), path: input.path, method: input.method ?? "GET", headers: input.headers ?? {},
         ...(bytes ? { bodyBase64: encodeBase64(bytes) } : {}),

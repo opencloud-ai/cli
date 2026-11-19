@@ -38,9 +38,12 @@
 - Read the platform's newer container answers: a waiting job's `waitReason`
   (`no_capacity`, `host_unavailable`, `capacity_limit`, `budget`,
   `concurrency`, `paused`, `previous_attempt`, `app_busy` or `platform_error`,
-  null otherwise), a failed job's `error.details.exitCode` and `signal`, and
-  the `COMPUTE_HOST_UNAVAILABLE`, `COMPUTE_NOT_LIVE`, `COMPUTE_RELEASE_REPLACED`
-  and `COMPUTE_CAPABILITY_INVALID` codes with their structured details.
+  null otherwise), a failed job's `error.details.exitCode` and `signal`, a
+  Function's error status as `details.upstreamStatus`, and the
+  `COMPUTE_HOST_UNAVAILABLE`, `COMPUTE_NOT_LIVE`, `COMPUTE_RELEASE_REPLACED`,
+  `COMPUTE_CAPABILITY_INVALID`, `COMPUTE_NOT_OFFERED`, `COMPUTE_METRIC_INVALID`,
+  `COMPUTE_METRIC_LIMIT`, `COMPUTE_OUTPUT_DIRECTORY_MISSING` and
+  `COMPUTE_FUNCTION_FAILED` codes with their structured details.
   `containers execution`, `executions` and `run` print them as received. An
   answer this CLI's contract cannot read fails with `API_CONTRACT_MISMATCH`,
   naming the field, instead of a bare schema error.

@@ -40,6 +40,16 @@ container usability fixes): executions carry a required, nullable
 request body to a service is capped at 4 MiB while responses keep 32 MiB.
 Failed jobs' `details.exitCode` and `details.signal` were already optional
 fields of the error details.
+The same file is refreshed again verbatim from platform `da2040de5`: the
+catalog adds `COMPUTE_NOT_OFFERED`, `COMPUTE_METRIC_INVALID`,
+`COMPUTE_METRIC_LIMIT`, `COMPUTE_OUTPUT_DIRECTORY_MISSING` and
+`COMPUTE_FUNCTION_FAILED` (which replaces `COMPUTE_UPSTREAM_FAILED` on
+container capability calls), and error details gain an optional
+`upstreamStatus`. Its tests are unchanged. `server/src/index.ts` and its
+tests, the Function SDK 2.8.0 source, are refreshed verbatim from the same
+commit: its container types name `waitReason` and every catalog code (a test
+compares them with this catalog), and it refuses a service request body over
+4 MiB, as the contract does. The CLI bundle does not import the Function SDK.
 
 Validation waiting takes `contracts/src/control-plane.test.ts` and
 `control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`

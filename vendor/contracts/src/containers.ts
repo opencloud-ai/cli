@@ -140,6 +140,7 @@ function error(statusCode: number, category: ErrorCategory, origin: ErrorOrigin,
 /** Defaults never infer platform blame from customer stderr or an HTTP status alone. */
 export const computeErrorCatalog = Object.freeze({
   COMPUTE_NOT_ENABLED: error(403, "configuration", "policy", "admission", "none", "none", "Container compute is not enabled for this account."),
+  COMPUTE_NOT_OFFERED: error(422, "configuration", "policy", "validation", "none", "none", "This installation doesn't offer containers. Remove the containers, and a container frontend, from opencloud.yaml to use this app here."),
   COMPUTE_BILLING_UNAVAILABLE: error(503, "billing", "policy", "admission", "none", "none", "Compute billing is not available for this account."),
   COMPUTE_PAYMENT_REQUIRED: error(402, "billing", "policy", "admission", "none", "none", "Compute payment is required."),
   COMPUTE_BUDGET_EXCEEDED: error(429, "billing", "policy", "admission", "none", "confirmed_usage", "The compute spending limit has been reached."),
@@ -157,6 +158,8 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_AUTHORITY_REVOKED: error(403, "authority", "policy", "running", "none", "confirmed_usage", "The workload's execution authority was revoked."),
   COMPUTE_CAPABILITY_INVALID: error(401, "authority", "app", "running", "request", "none", "The container capability is missing, malformed or no longer current. Read OPENCLOUD_CONTAINER_CAPABILITY_FILE again for every call."),
   COMPUTE_NOT_LIVE: error(503, "authority", "policy", "startup", "request", "none", "This copy isn't serving yet: its release goes live when the deploy or sync switches to it. Retry shortly.", true),
+  COMPUTE_METRIC_INVALID: error(422, "configuration", "app", "running", "none", "none", "The container recorded a metric it may not record, or one that doesn't match its declaration: declare it in observability.metrics and the container's permissions.metrics, use only declared dimension values, and never record a negative counter increment."),
+  COMPUTE_METRIC_LIMIT: error(429, "capacity", "policy", "running", "request", "none", "The app reached its custom metric limits (1,200 measurements a minute, 100,000 kept). Record fewer measurements, or retry later.", true),
   COMPUTE_NOT_FOUND: error(404, "authority", "policy", "admission", "none", "none", "The container resource was not found."),
   COMPUTE_PROTOCOL_UNSUPPORTED: error(422, "configuration", "app", "validation", "none", "none", "This protocol is not supported."),
   COMPUTE_IMAGE_NOT_FOUND: error(422, "image", "app", "image", "none", "none", "The requested container image was not found."),
@@ -173,6 +176,7 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_TIMEOUT: error(408, "execution", "app", "running", "none", "confirmed_usage", "The job reached its execution deadline."),
   COMPUTE_CANCELLED: error(409, "execution", "policy", "stopping", "none", "confirmed_usage", "The execution was cancelled."),
   COMPUTE_OUTPUT_INVALID: error(422, "files", "app", "collecting", "none", "confirmed_usage", "The job output violates its declared file policy."),
+  COMPUTE_OUTPUT_DIRECTORY_MISSING: error(422, "files", "app", "collecting", "none", "confirmed_usage", "The job declares outputs but didn't create its output directory. Create it (for example with mkdir -p), even when the job writes nothing."),
   COMPUTE_OUTPUT_COLLECTION_FAILED: error(503, "files", "unknown", "collecting", "collection", "pending_evidence", "The stopped job's outputs could not be collected.", true),
   COMPUTE_COMPLETION_FAILED: error(502, "execution", "app", "completion", "notification", "confirmed_usage", "Completion notification failed; the compute result is retained.", true),
   COMPUTE_OUTCOME_UNKNOWN: error(409, "execution", "unknown", "running", "observer_reconciliation", "pending_evidence", "The execution outcome is not yet known. Do not repeat its effects."),
@@ -187,6 +191,7 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_REQUEST_HEADERS_TOO_LARGE: error(431, "ingress", "app", "ingress", "none", "confirmed_usage", "The service request headers exceed the supported size limit."),
   COMPUTE_REQUEST_TIMEOUT: error(504, "ingress", "app", "ingress", "none", "confirmed_usage", "The service request exceeded its deadline."),
   COMPUTE_UPSTREAM_FAILED: error(502, "ingress", "unknown", "ingress", "none", "confirmed_usage", "The container connection failed."),
+  COMPUTE_FUNCTION_FAILED: error(502, "execution", "app", "running", "none", "none", "The Function answered with an error status (details.upstreamStatus); its logs say why. The same idempotency key keeps this answer: use a new key to run it again."),
   COMPUTE_READINESS_FAILED: error(503, "execution", "app", "running", "none", "confirmed_usage", "The service is not ready for traffic."),
   COMPUTE_LIVENESS_FAILED: error(503, "execution", "app", "running", "none", "confirmed_usage", "The service failed its liveness check."),
   COMPUTE_CRASH_LOOP: error(409, "execution", "app", "running", "none", "confirmed_usage", "Repeated failures paused this workload. Fix it before resuming."),
@@ -216,6 +221,8 @@ export const computeErrorDetailsSchema = z.object({
   attempt: z.number().int().min(1).max(5).optional(),
   exitCode: z.number().int().min(0).max(255).optional(),
   signal: z.string().regex(/^SIG[A-Z0-9]{1,20}$/).optional(),
+  /** The HTTP status a Function answered a container's call with. */
+  upstreamStatus: z.number().int().min(100).max(599).optional(),
 }).strict();
 export const computeErrorSchema = z.object({
   statusCode: z.number().int().min(400).max(599),

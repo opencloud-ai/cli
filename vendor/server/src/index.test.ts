@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OPEN_CLOUD_SDK_VERSION,
@@ -13,6 +14,20 @@ const devSessionId = "00000000-0000-4000-8000-000000000002";
 const userId = "00000000-0000-4000-8000-000000000003";
 const fileId = "00000000-0000-4000-8000-000000000004";
 const idempotencyKey = "00000000-0000-4000-8000-000000000005";
+
+describe("container types", () => {
+  it("name every container error code and wait reason the platform answers with", async () => {
+    const { computeErrorCatalog, computeExecutionWaitReasonSchema } = await import("@opencloud/contracts");
+    const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+    const union = (name: string) =>
+      [...(source.match(new RegExp(`export type ${name} =([^;]+);`))?.[1] ?? "").matchAll(/"([A-Za-z_]+)"/g)]
+        .map((match) => match[1])
+        .sort();
+    expect(union("OpenCloudContainerErrorCode")).toEqual(Object.keys(computeErrorCatalog).sort());
+    expect(union("OpenCloudContainerWaitReason")).toEqual([...computeExecutionWaitReasonSchema.options].sort());
+    expect(source).toContain("waitReason: OpenCloudContainerWaitReason | null;");
+  });
+});
 
 describe("container Function client", () => {
   const scoped = () => installRuntime("production", {
@@ -63,6 +78,25 @@ describe("container Function client", () => {
     const ambiguous = scoped();
     defineFunction({ input: schema.object({}), handler: ({ containers }) => containers.run("transcode", {}, { idempotencyKey: "transcode:source-1" }) });
     expect((await ambiguous.invoke()).status).toBe(502);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a service request body at 4 MiB before fetching", async () => {
+    const fetch = vi.fn(async () => Response.json({ status: 200, headers: {}, bodyBase64: "" }));
+    vi.stubGlobal("fetch", fetch);
+    const oversized = scoped();
+    defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+      await containers.request("image-api", { path: "/render", method: "POST", body: new Uint8Array(4 * 1024 * 1024 + 1) });
+      return {};
+    } });
+    expect((await oversized.invoke()).status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+    const largest = scoped();
+    defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+      const result = await containers.request("image-api", { path: "/render", method: "POST", body: new Uint8Array(4 * 1024 * 1024) });
+      return { status: result.status };
+    } });
+    expect((await largest.invoke()).status).toBe(200);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

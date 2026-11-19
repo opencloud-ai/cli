@@ -102,6 +102,24 @@ describe("compute command boundaries", () => {
     await expect(answering(older).call("getContainerExecution", { ...input, executionId: "not-an-id" })).rejects.toMatchObject({ name: "ZodError" });
   });
 
+  it("reads a job that never created its output directory, and keeps a Function's error status on a capability answer", async () => {
+    const input = { appId: "11111111-1111-4111-8111-111111111111", executionId: "11111111-1111-4111-8111-111111111111" };
+    const missing = classifyComputeError("COMPUTE_OUTPUT_DIRECTORY_MISSING");
+    const failed = await answering(execution({ state: "failed", attempt: 1, finishedAt: now, error: missing })).call("getContainerExecution", input);
+    expect(failed.error).toMatchObject({ code: "COMPUTE_OUTPUT_DIRECTORY_MISSING", details: { origin: "app", phase: "collecting" } });
+    const upstream = classifyComputeError("COMPUTE_FUNCTION_FAILED", { upstreamStatus: 500 });
+    const failure = new ApiError(upstream.statusCode, { ...upstream, requestId: "request-2" });
+    expect(structuredCliError(failure).error).toMatchObject({
+      code: "COMPUTE_FUNCTION_FAILED", status: 502, retryable: false, details: { upstreamStatus: 500, origin: "app" },
+    });
+    // A Function's own error, a container's metric mistake or an installation
+    // without containers is the app's or policy's, never a platform fault.
+    for (const code of ["COMPUTE_FUNCTION_FAILED", "COMPUTE_METRIC_INVALID", "COMPUTE_METRIC_LIMIT", "COMPUTE_NOT_OFFERED", "COMPUTE_OUTPUT_DIRECTORY_MISSING"] as const) {
+      const value = classifyComputeError(code);
+      expect(isReportableFailure(new ApiError(value.statusCode, value)), code).toBe(false);
+    }
+  });
+
   it("keeps the release, host and go-live codes structured, retryable as the catalog says", () => {
     for (const [code, status, retryable, reported] of [
       ["COMPUTE_NOT_LIVE", 503, true, false],
