@@ -62,6 +62,16 @@
   development-session refusals keep their session and release IDs.
 - `app connect` says what the connected folder can do, in words that fit a
   person or any agent, instead of naming Codex.
+- Test a private app's routes from a script. `app request` accepts every
+  route method, a body (`--body`, `--body-file`, `--content-type`), a
+  `--timeout`, and `--show-body` to print up to 64 KiB of the response. With
+  `--access-token-env NAME` it sends the app access token held in that
+  environment variable, which the owner revealed in the browser, so the
+  request acts as the owner. The token is read only from the variable, sent
+  only to the app's own HTTPS address, refused unless it is an `oc_app_`
+  token, and never printed, stored or reported; output names
+  `"credential": "app_access_token"`. Without it the request stays signed
+  out, and the body stays unprinted unless asked for.
 - An app command run in a folder that is not connected fails with
   `WORKSPACE_NOT_CONNECTED` and says what is missing: a signed-in person is
   told to run `app connect` with the command's app ID (or in the folder the

@@ -31,7 +31,7 @@ import {
 import { ApiError, OpenCloudClient } from "./api-client.js";
 import { validateDraftWithProgress } from "./draft-validation.js";
 import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
-import { requestApp } from "./app-edge.js";
+import { APP_REQUEST_METHODS, requestApp, type AppRequestMethod } from "./app-edge.js";
 import {
   withDevStateLock,
   withDevWorkflowLock,
@@ -3946,30 +3946,98 @@ dev
     });
   });
 
+/** The most a request body read for `app request` may hold: a container route's limit. */
+const APP_REQUEST_BODY_LIMIT = 32 * 1024 * 1024;
+
 app
   .command("request")
   .description(
-    "Request an app path through the edge without printing the response body",
+    "Send one request to the live app through the edge, signed out or with an app access token; the response body is printed only with --show-body",
   )
   .argument("<app-id>")
   .argument("[path]", "same-origin app path", "/")
   .addOption(
     new Option("--method <method>", "HTTP method")
-      .choices(["GET", "HEAD"])
+      .choices([...APP_REQUEST_METHODS])
       .default("GET"),
   )
+  .option("--body <text>", "request body; not with GET or HEAD")
+  .option("--body-file <path>", "read the request body from this file instead")
+  .option("--content-type <type>", "request body type (default application/json for JSON, otherwise text/plain)")
+  .option(
+    "--access-token-env <name>",
+    "name of an environment variable holding an app access token (oc_app_…) the owner revealed in the browser; the request then acts as the owner. Never pass the token itself",
+  )
+  .option("--show-body", "print up to 64 KiB of the response body")
+  .option("--timeout <seconds>", "maximum wait for the response", "30")
   .action(async (appId, requestPath, options) => {
+    const method = options.method as AppRequestMethod;
+    if (options.body !== undefined && options.bodyFile !== undefined) {
+      throw new CliContractError("INVALID_OPTION", "Pass --body or --body-file, not both");
+    }
+    const hasBody = options.body !== undefined || options.bodyFile !== undefined;
+    if (hasBody && (method === "GET" || method === "HEAD")) {
+      throw new CliContractError("INVALID_OPTION", `A ${method} request has no body; choose another --method`);
+    }
+    if (options.contentType !== undefined && !hasBody) {
+      throw new CliContractError("INVALID_OPTION", "--content-type needs --body or --body-file");
+    }
+    const timeoutMs = parseBoundedNumber(options.timeout, "--timeout", 1, 600) * 1_000;
+    let body: { content: Buffer; contentType: string } | undefined;
+    if (hasBody) {
+      const content = options.body !== undefined
+        ? Buffer.from(String(options.body))
+        : await readFile(callerPath(String(options.bodyFile))).catch((error: unknown) => {
+          throw callerFailure(error);
+        });
+      if (content.length > APP_REQUEST_BODY_LIMIT) {
+        throw new CliContractError("INVALID_OPTION", `The request body exceeds ${APP_REQUEST_BODY_LIMIT} bytes`);
+      }
+      body = { content, contentType: options.contentType ?? (isJsonText(content) ? "application/json" : "text/plain; charset=utf-8") };
+    }
+    // Read from the environment the person named, never from an argument, so
+    // it stays out of process listings, shell history and this command's output.
+    let accessToken: string | undefined;
+    if (options.accessTokenEnv !== undefined) {
+      const name = String(options.accessTokenEnv);
+      // A token given here by mistake is refused without being repeated.
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || /^oc_/i.test(name)) {
+        throw new CliContractError("INVALID_OPTION", "--access-token-env takes the name of an environment variable, not the token");
+      }
+      accessToken = process.env[name]?.trim() || undefined;
+      if (!accessToken) {
+        throw new CliContractError("ACCESS_TOKEN_MISSING", `The environment variable ${name} is not set. Put the app access token the owner revealed in the browser there; never on the command line.`);
+      }
+      if (!/^oc_app_[A-Za-z0-9_-]{16,500}$/.test(accessToken)) {
+        throw new CliContractError("ACCESS_TOKEN_INVALID", `The environment variable ${name} does not hold an app access token (oc_app_…); only those are sent to the app.`);
+      }
+      // Kept out of an error report too, whatever a message might quote.
+      invocation.privateValues = [...invocation.privateValues, accessToken];
+    }
     const value = await client().get(`/v1/apps/${appId}`);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
     const publicEdgeHost = process.env.OPENCLOUD_PUBLIC_EDGE_HOST;
     output(
       await requestApp(value, requestPath, {
-        method: options.method as "GET" | "HEAD",
+        method,
+        ...(body ? { body } : {}),
+        ...(accessToken ? { accessToken } : {}),
+        showBody: options.showBody === true,
+        timeoutMs,
         ...(edgeUrl ? { edgeUrl } : {}),
         ...(publicEdgeHost ? { publicEdgeHost } : {}),
       }),
     );
   });
+
+function isJsonText(content: Buffer): boolean {
+  try {
+    JSON.parse(content.toString("utf8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 addOperationOptions(
   app

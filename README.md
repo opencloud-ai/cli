@@ -637,6 +637,33 @@ agent; they do not authorize automatic rollback or destructive repair.
 
 ## Verification
 
+`app request` sends one request to the live app's canonical address through
+the edge and prints its status, type, size and digest; it never retries. It is
+signed out unless it is given an app access token, and the response body is
+printed (up to 64 KiB) only with `--show-body`. Any method a route accepts can
+be sent, with `--body` or `--body-file` and `--content-type` (application/json
+when the body is JSON, otherwise text/plain).
+
+To test a private app's routes, Functions or container services from a
+script, the app's owner approves an app access token in the browser
+(`opencloud app access-token request "$APP_ID" --name "Route tests"` prints the
+approval link) and keeps the revealed `oc_app_…` value wherever they keep
+secrets. Set an environment variable from there, never on a command line, and
+name it with `--access-token-env`; the request then acts as the owner, as
+OpenCloud does for any program the owner gives that token:
+
+```bash
+opencloud app request "$APP_ID" /render --method POST \
+  --content-type text/markdown --body '# Hello' \
+  --access-token-env ROUTE_TEST_TOKEN --show-body
+```
+
+The CLI reads the token only from that variable, sends it only to the app's
+own HTTPS address, and never prints, stores or reports it; output says
+`"credential": "app_access_token"`. It accepts only `oc_app_` tokens, which
+work on deployed app hosts, not development previews, and never authorize
+control-plane commands. Revoke a token with `app access-token revoke`.
+
 Installation-managed runtimes can set `OPENCLOUD_PUBLIC_EDGE_HOST` to route
 `app request` through a local public-edge bridge when public-address loopback
 is unavailable. This changes address resolution only: the canonical HTTP Host,

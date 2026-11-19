@@ -268,6 +268,59 @@ describe("an app command in a folder that is not connected", () => {
   });
 });
 
+describe("app request with an app access token", () => {
+  const token = "oc_app_synthetic-guidance-route-token-0123456789";
+  const appRecord = () => ({
+    id: appId, visibility: "private", state: "active", activeDeploymentId: "40000000-0000-4000-8000-0000000000dd",
+    appUrl: "https://guidance.example.test", authUrl: "https://auth.example.test",
+  });
+
+  it("tests a private route as the owner with the token named by an environment variable, never printing it", async () => {
+    const context = await workspace("request-token");
+    responder = (request) => {
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}`) return { status: 200, body: appRecord() };
+      if (request.method === "POST" && request.path === "/render" && request.headers.host === "guidance.example.test") {
+        return request.headers.authorization === `Bearer ${token}`
+          ? { status: 200, body: { html: `<h1>${request.body.replace(/^# /, "")}</h1>` } }
+          : { status: 401, body: { code: "unauthorized" } };
+      }
+      return undefined;
+    };
+    const args = ["--token", "synthetic-control-plane", "app", "request", appId, "/render", "--method", "POST",
+      "--body", "# Hello", "--content-type", "text/markdown", "--access-token-env", "ROUTE_TEST_TOKEN", "--show-body"];
+    const sent = await run(args, context, { ROUTE_TEST_TOKEN: token, OPENCLOUD_EDGE_URL: apiUrl });
+    expect(sent.status, sent.stderr).toBe(0);
+    expect(JSON.parse(sent.stdout)).toMatchObject({
+      appId, url: "https://guidance.example.test/render", method: "POST", credential: "app_access_token",
+      ok: true, status: 200, body: JSON.stringify({ html: "<h1>Hello</h1>" }), bodyTruncated: false,
+    });
+    expect(sent.stdout + sent.stderr).not.toContain(token);
+    const route = requests.find((request) => request.path === "/render");
+    expect(route?.headers["content-type"]).toBe("text/markdown");
+    expect(requests.filter((request) => request.path === "/render")).toHaveLength(1);
+  });
+
+  it("refuses a missing or foreign token, and a body on GET, before sending anything", async () => {
+    const context = await workspace("request-token-refused");
+    responder = (request) => request.path === `/v1/apps/${appId}` ? { status: 200, body: appRecord() } : undefined;
+    const base = ["--token", "synthetic-control-plane", "app", "request", appId, "/render"];
+    const missing = await run([...base, "--access-token-env", "ROUTE_TEST_TOKEN"], context, { OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(missing.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_MISSING" });
+    const foreign = "oc_owner_synthetic-control-plane-credential";
+    const wrong = await run([...base, "--access-token-env", "ROUTE_TEST_TOKEN"], context, { ROUTE_TEST_TOKEN: foreign, OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(wrong.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_INVALID" });
+    expect(wrong.stderr).not.toContain("synthetic-control-plane-credential");
+    for (const given of [token, "oc_app_Synthetic0123456789abcdefWithoutHyphens"]) {
+      const valueGiven = await run([...base, "--access-token-env", given], context, { OPENCLOUD_EDGE_URL: apiUrl });
+      expect(JSON.parse(valueGiven.stderr).error).toMatchObject({ code: "INVALID_OPTION" });
+      expect(valueGiven.stderr).not.toContain(given);
+    }
+    const getBody = await run([...base, "--body", "{}"], context, { OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(getBody.stderr).error).toMatchObject({ code: "INVALID_OPTION", message: "A GET request has no body; choose another --method" });
+    expect(requests).toEqual([]);
+  });
+});
+
 describe("app connect", () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });

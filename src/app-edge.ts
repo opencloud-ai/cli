@@ -14,15 +14,25 @@ const appEdgeRecordSchema = z.object({
 
 type AppEdgeRecord = z.infer<typeof appEdgeRecordSchema>;
 
+export const APP_REQUEST_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
+export type AppRequestMethod = (typeof APP_REQUEST_METHODS)[number];
+/** The most of a response body `--show-body` prints. */
+export const APP_REQUEST_BODY_SHOWN = 64 * 1024;
+
 export interface AppRequestSummary {
   appId: string;
   url: string;
-  method: "GET" | "HEAD";
+  method: AppRequestMethod;
+  /** The credential sent: an app access token, or none (signed out). */
+  credential: "app_access_token" | null;
   ok: boolean;
   status: number;
   contentType: string | null;
   bodyBytes: number;
   bodySha256: string;
+  /** Only when asked for: the start of the body, as text. */
+  body?: string;
+  bodyTruncated?: boolean;
 }
 
 export interface AppSmokeSummary {
@@ -55,34 +65,67 @@ function appTarget(app: AppEdgeRecord, requestPath: string): URL {
   return target;
 }
 
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * One request to the app's canonical origin, sent once and never retried.
+ * Without a credential it is signed out. With an app access token, the edge
+ * acts as the app's owner on runtime routes, as for any program the owner
+ * gave the token; the token goes only to that origin over HTTPS (or to a
+ * loopback test edge) and appears in no output.
+ */
 export async function requestApp(
   rawApp: unknown,
   requestPath = "/",
   options: {
     edgeUrl?: string;
     publicEdgeHost?: string;
-    method?: "GET" | "HEAD";
+    method?: AppRequestMethod;
+    body?: { content: Buffer; contentType: string };
+    accessToken?: string;
+    showBody?: boolean;
+    timeoutMs?: number;
     transport?: EdgeTransport;
   } = {},
 ): Promise<AppRequestSummary> {
   const app = appEdgeRecordSchema.parse(rawApp);
   const target = appTarget(app, requestPath);
   const method = options.method ?? "GET";
+  if (options.accessToken) {
+    const destination = new URL(options.edgeUrl ?? app.appUrl);
+    if (destination.protocol !== "https:" && !LOOPBACK.has(destination.hostname)) {
+      throw callerFailure(new Error("An app access token is sent only over HTTPS; no request was sent"));
+    }
+  }
   const transport = options.transport ?? new EdgeTransport(options.edgeUrl, options.publicEdgeHost);
   const response = await transport.request(
     app.appUrl,
     `${target.pathname}${target.search}`,
-    { method },
+    {
+      method,
+      headers: {
+        ...(options.accessToken ? { authorization: `Bearer ${options.accessToken}` } : {}),
+        ...(options.body ? { "content-type": options.body.contentType, "content-length": String(options.body.content.length) } : {}),
+      },
+      ...(options.body ? { body: options.body.content } : {}),
+      ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    },
   );
+  // The edge never forwards the token; an app that echoed one still prints none.
+  const shown = (text: string) => (options.accessToken ? text.split(options.accessToken).join("[REDACTED]") : text);
   return {
     appId: app.id,
     url: target.href,
     method,
+    credential: options.accessToken ? "app_access_token" : null,
     ok: response.ok,
     status: response.status,
     contentType: firstHeader(response.headers["content-type"]),
     bodyBytes: Buffer.byteLength(response.body),
     bodySha256: createHash("sha256").update(response.body).digest("hex"),
+    ...(options.showBody
+      ? { body: shown(response.body.slice(0, APP_REQUEST_BODY_SHOWN)), bodyTruncated: response.body.length > APP_REQUEST_BODY_SHOWN }
+      : {}),
   };
 }
 

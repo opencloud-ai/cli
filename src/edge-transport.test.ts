@@ -132,6 +132,57 @@ describe("edge transport", () => {
     expect(printed).not.toContain("127.0.0.1");
   });
 
+  it("sends an app access token, method and body once, and prints the body only when asked, without the token", async () => {
+    const token = "oc_app_synthetic-route-test-token-0123456789";
+    const received: Array<{ method: string; authorization: string | undefined; type: string | undefined; body: string }> = [];
+    const edge = await adapter(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      received.push({ method: request.method ?? "", authorization: request.headers.authorization,
+        type: request.headers["content-type"], body: Buffer.concat(chunks).toString("utf8") });
+      response.writeHead(200, { "content-type": "text/html" });
+      // An app that echoed the credential: the CLI still prints none.
+      response.end(`<h1>Hello</h1><!-- ${String(request.headers.authorization)} -->`);
+    });
+    const app = appRecord({ visibility: "private" });
+    const quiet = await requestApp(app, "/render", {
+      edgeUrl: edge.url, method: "POST", accessToken: token,
+      body: { content: Buffer.from("# Hello"), contentType: "text/markdown" },
+    });
+    expect(quiet).toMatchObject({ method: "POST", credential: "app_access_token", status: 200, ok: true });
+    expect(quiet).not.toHaveProperty("body");
+    const shown = await requestApp(app, "/render", {
+      edgeUrl: edge.url, method: "POST", accessToken: token, showBody: true,
+      body: { content: Buffer.from("# Hello"), contentType: "text/markdown" },
+    });
+    expect(shown.body).toBe("<h1>Hello</h1><!-- Bearer [REDACTED] -->");
+    expect(shown.bodyTruncated).toBe(false);
+    expect(JSON.stringify([quiet, shown])).not.toContain(token);
+    expect(received).toEqual([
+      { method: "POST", authorization: `Bearer ${token}`, type: "text/markdown", body: "# Hello" },
+      { method: "POST", authorization: `Bearer ${token}`, type: "text/markdown", body: "# Hello" },
+    ]);
+    // Signed out, as before: no credential is sent.
+    expect(await requestApp(appRecord(), "/", { edgeUrl: edge.url })).toMatchObject({ credential: null, method: "GET" });
+    expect(received.at(-1)?.authorization).toBeUndefined();
+  });
+
+  it("sends an app access token only over HTTPS or to a loopback test edge", async () => {
+    let requests = 0;
+    const edge = await adapter((_request, response) => {
+      requests += 1;
+      response.end();
+    });
+    const token = "oc_app_synthetic-route-test-token-0123456789";
+    await expect(requestApp(appRecord({ appUrl: "http://demo.opcl.test" }), "/", { accessToken: token }))
+      .rejects.toThrow("An app access token is sent only over HTTPS; no request was sent");
+    await expect(requestApp(appRecord(), "/", { accessToken: token, edgeUrl: "http://edge.example.test" }))
+      .rejects.toThrow("sent only over HTTPS");
+    expect(requests).toBe(0);
+    await requestApp(appRecord(), "/", { accessToken: token, edgeUrl: edge.url });
+    expect(requests).toBe(1);
+  });
+
   it("rejects request paths that replace the canonical origin", async () => {
     const transport = new EdgeTransport();
     expect(() =>

@@ -194,6 +194,8 @@ export function errorReportStatus(settings: ErrorReportSettings): {
  * ran. Every other code is reported.
  */
 const CALLER_OUTCOME_CODES = new Set([
+  "ACCESS_TOKEN_INVALID",
+  "ACCESS_TOKEN_MISSING",
   "ACTIVE_DEPLOYMENT_CHANGED",
   "APP_MISMATCH",
   "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
