@@ -2286,7 +2286,8 @@ app
         storedIn: connected.stored.location,
         expiresAt: connected.stored.credential.expiresAt,
       },
-      next: brandText("Codex can now build, validate, preview, and deploy this app with the OpenCloud CLI."),
+      // People and every kind of agent run this command; name neither.
+      next: brandText("This folder is connected. OpenCloud CLI commands run here can now build, validate, preview, and deploy this app."),
     });
   });
 

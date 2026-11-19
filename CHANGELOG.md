@@ -31,6 +31,8 @@
   so retained measurements remain distinguishable from newly measured values.
 - Validate maximum-size compute HTTP bodies without a Base64 regex stack
   overflow, retaining the decoded 32 MiB limit and canonical encoding checks.
+- `app connect` says what the connected folder can do, in words that fit a
+  person or any agent, instead of naming Codex.
 
 ## 3.20.0
 
