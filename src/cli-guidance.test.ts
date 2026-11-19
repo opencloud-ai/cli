@@ -131,6 +131,12 @@ async function run(
   return { status, stdout, stderr };
 }
 
+/**
+ * Each test starts the built CLI several times; beside the rest of the suite
+ * on a busy host that can outlast Vitest's 5-second default.
+ */
+const spawning = { timeout: 30_000 };
+
 const image = `registry.example.test/team/renderer@sha256:${"a".repeat(64)}`;
 
 /** A schema-3 app with an optional manifest tail, scaffolded by `init`. */
@@ -145,7 +151,7 @@ async function app(context: { home: string; folder: string }, manifestTail = "")
   return directory;
 }
 
-describe("validate", () => {
+describe("validate", spawning, () => {
   it("names the containers and routes it read", async () => {
     const context = await workspace("validate-summary");
     const directory = await app(context, [
@@ -223,7 +229,7 @@ describe("validate", () => {
   });
 });
 
-describe("an app command in a folder that is not connected", () => {
+describe("an app command in a folder that is not connected", spawning, () => {
   const operationId = "40000000-0000-4000-8000-0000000000aa";
 
   it("tells a signed-in person to connect the folder, not to sign in", async () => {
@@ -268,7 +274,7 @@ describe("an app command in a folder that is not connected", () => {
   });
 });
 
-describe("app request with an app access token", () => {
+describe("app request with an app access token", spawning, () => {
   const token = "oc_app_synthetic-guidance-route-token-0123456789";
   const appRecord = () => ({
     id: appId, visibility: "private", state: "active", activeDeploymentId: "40000000-0000-4000-8000-0000000000dd",
@@ -321,7 +327,7 @@ describe("app request with an app access token", () => {
   });
 });
 
-describe("app connect", () => {
+describe("app connect", spawning, () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });
     responder = (request) =>
