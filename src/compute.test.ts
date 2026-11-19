@@ -1,9 +1,35 @@
 import { describe, expect, it } from "vitest";
 import { classifyComputeError } from "@opencloud/contracts/containers";
-import { ApiError } from "./api-client.js";
+import { ApiError, OpenCloudClient } from "./api-client.js";
 import { computeInput, computeJson, computeKey, computeLogBody, computeQuery } from "./compute.js";
 import { isReportableFailure } from "./error-reports.js";
+import { structuredCliError } from "./owner-parity.js";
 import { computeInstanceDiagnosticsSchema } from "../vendor/contracts/src/compute-observation.js";
+
+const now = "2026-11-19T12:00:00.000Z";
+const usage = {
+  quantities: { vcpuSeconds: "0", memoryGiBSeconds: "0", scratchGiBSeconds: "0" }, currency: null, grossEstimatedCostMinor: null,
+  appliedCreditMinor: null, netEstimatedCostMinor: null, priceVersionIds: [], pendingEvidenceCount: 0, lastSettledAt: null, observedAt: now,
+};
+
+/** One execution as the platform's read API returns it. */
+function execution(fields: Record<string, unknown>) {
+  return {
+    executionId: "11111111-1111-4111-8111-111111111111", workloadName: "thumbnailer", revisionId: "22222222-2222-4222-8222-222222222222",
+    environment: "production", developmentSessionId: null, state: "queued", waitReason: null, acceptedAt: now,
+    queueDeadline: "2026-11-19T12:30:00.000Z", statusUrl: "/v1/apps/x/container-executions/y", attempt: 0, startedAt: null,
+    finishedAt: null, executionDeadline: null, phaseDeadline: null, error: null, outputFileIds: [],
+    completionDelivery: { state: "not_configured", attempts: 0, lastAttemptAt: null, nextAttemptAt: null, error: null }, usage,
+    ...fields,
+  };
+}
+
+function answering(body: unknown) {
+  return new OpenCloudClient({
+    apiUrl: "https://api.example.test", token: "synthetic-compute-reader",
+    fetch: async () => Response.json(body),
+  });
+}
 
 const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 describe("compute command boundaries", () => {
@@ -51,5 +77,43 @@ describe("compute command boundaries", () => {
     const override = classifyComputeError("COMPUTE_STARTUP_FAILED", { origin: "platform" });
     expect(isReportableFailure(new ApiError(override.statusCode, override))).toBe(true);
     expect(isReportableFailure(new ApiError(503, "Unknown"))).toBe(true);
+  });
+
+  it("reads why a waiting job has not started and the exit code of a failed one", async () => {
+    const input = { appId: "11111111-1111-4111-8111-111111111111", executionId: "11111111-1111-4111-8111-111111111111" };
+    const waiting = await answering(execution({ waitReason: "host_unavailable" })).call("getContainerExecution", input);
+    expect(waiting.waitReason).toBe("host_unavailable");
+    const exited = classifyComputeError("COMPUTE_EXIT_NONZERO", { exitCode: 3 });
+    const failed = await answering(execution({ state: "failed", attempt: 1, finishedAt: now, error: exited })).call("getContainerExecution", input);
+    expect(failed.error?.details.exitCode).toBe(3);
+    expect(failed.waitReason).toBeNull();
+  });
+
+  it("says an answer from another API version does not match, instead of blaming the input", async () => {
+    const { waitReason: _omitted, ...older } = execution({});
+    const input = { appId: "11111111-1111-4111-8111-111111111111", executionId: "11111111-1111-4111-8111-111111111111" };
+    const failure = await answering(older).call("getContainerExecution", input).catch((error: unknown) => error);
+    const error = structuredCliError(failure).error;
+    expect(error).toMatchObject({ code: "API_CONTRACT_MISMATCH", retryable: false, issues: [{ path: "waitReason" }] });
+    expect(error.message).toMatch(/^OpenCloud's answer to getContainerExecution has 1 problem: waitReason: must be one of "no_capacity", /);
+    expect(error.message).toMatch(/\. This CLI and the OpenCloud API may be different versions\.$/);
+    expect(isReportableFailure(failure)).toBe(true);
+    // Invalid input is still the caller's, refused before any request.
+    await expect(answering(older).call("getContainerExecution", { ...input, executionId: "not-an-id" })).rejects.toMatchObject({ name: "ZodError" });
+  });
+
+  it("keeps the release, host and go-live codes structured, retryable as the catalog says", () => {
+    for (const [code, status, retryable, reported] of [
+      ["COMPUTE_NOT_LIVE", 503, true, false],
+      ["COMPUTE_HOST_UNAVAILABLE", 503, true, true],
+      ["COMPUTE_RELEASE_REPLACED", 409, false, false],
+    ] as const) {
+      const failure = new ApiError(status, { ...classifyComputeError(code), requestId: "request-1" });
+      expect(structuredCliError(failure).error).toMatchObject({
+        code, status, retryable, requestId: "request-1",
+        details: expect.objectContaining({ retryable }),
+      });
+      expect(isReportableFailure(failure)).toBe(reported);
+    }
   });
 });

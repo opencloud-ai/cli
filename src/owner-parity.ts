@@ -17,7 +17,8 @@ import { ApiError, OpenCloudClient } from "./api-client.js";
 import { computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
-import { isZodError, issueSummary, readableIssues, type ReadableIssue } from "./readable-issues.js";
+import { CliContractError } from "./cli-contract-error.js";
+import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 
 export interface OperationOptions {
   idempotencyKey?: string;
@@ -33,25 +34,7 @@ export interface OperationLike {
   [key: string]: unknown;
 }
 
-export class CliContractError extends Error {
-  readonly retryable: boolean;
-  /** One readable line per problem, as `path: what is expected`. */
-  readonly issues: ReadableIssue[] | undefined;
-
-  constructor(
-    readonly code: string,
-    message: string,
-    options: { retryable?: boolean; cause?: unknown; issues?: ReadableIssue[] } = {},
-  ) {
-    super(
-      message,
-      options.cause === undefined ? undefined : { cause: options.cause },
-    );
-    this.name = "CliContractError";
-    this.retryable = options.retryable ?? false;
-    this.issues = options.issues;
-  }
-}
+export { CliContractError };
 
 export class OperationTerminalError extends CliContractError {
   constructor(readonly operation: OperationLike) {

@@ -145,14 +145,18 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_BUDGET_EXCEEDED: error(429, "billing", "policy", "admission", "none", "confirmed_usage", "The compute spending limit has been reached."),
   COMPUTE_CAPACITY_EXCEEDED: error(429, "capacity", "policy", "admission", "request", "none", "The account has reached its container capacity limit.", true),
   COMPUTE_QUEUE_FULL: error(429, "capacity", "policy", "admission", "request", "none", "The container waiting queue is full.", true),
-  COMPUTE_NO_CAPACITY: error(503, "capacity", "platform", "admission", "unstarted_preparation", "none", "No eligible compute host has capacity yet.", true),
+  COMPUTE_NO_CAPACITY: error(503, "capacity", "platform", "admission", "unstarted_preparation", "none", "Every available compute host is full right now. Retry shortly.", true),
+  COMPUTE_HOST_UNAVAILABLE: error(503, "capacity", "platform", "admission", "unstarted_preparation", "none", "No compute host is available right now: every host is down, unreachable or under maintenance. Retry later.", true),
   COMPUTE_INVALID_DEFINITION: error(422, "configuration", "app", "validation", "none", "none", "The container definition is invalid."),
   COMPUTE_UNSUPPORTED_IMAGE: error(422, "image", "app", "image", "none", "none", "The image is not supported by this runtime."),
   COMPUTE_IMAGE_TOO_LARGE: error(422, "image", "app", "image", "none", "none", "The image exceeds the supported size limit."),
   COMPUTE_REVISION_UNAVAILABLE: error(409, "authority", "policy", "admission", "none", "none", "The pinned container revision is no longer eligible."),
+  COMPUTE_RELEASE_REPLACED: error(409, "configuration", "policy", "admission", "none", "none", "Another release (a deploy, rollback or dev sync) replaced the one this job was accepted for, so the waiting job was cancelled. Start it again to run it on the current release."),
   COMPUTE_REVISION_CONFLICT: error(409, "configuration", "policy", "admission", "none", "none", "The workload changed. Refresh its control generation."),
   COMPUTE_IDEMPOTENCY_CONFLICT: error(409, "configuration", "app", "admission", "none", "none", "The idempotency key was already used for a different request."),
   COMPUTE_AUTHORITY_REVOKED: error(403, "authority", "policy", "running", "none", "confirmed_usage", "The workload's execution authority was revoked."),
+  COMPUTE_CAPABILITY_INVALID: error(401, "authority", "app", "running", "request", "none", "The container capability is missing, malformed or no longer current. Read OPENCLOUD_CONTAINER_CAPABILITY_FILE again for every call."),
+  COMPUTE_NOT_LIVE: error(503, "authority", "policy", "startup", "request", "none", "This copy isn't serving yet: its release goes live when the deploy or sync switches to it. Retry shortly.", true),
   COMPUTE_NOT_FOUND: error(404, "authority", "policy", "admission", "none", "none", "The container resource was not found."),
   COMPUTE_PROTOCOL_UNSUPPORTED: error(422, "configuration", "app", "validation", "none", "none", "This protocol is not supported."),
   COMPUTE_IMAGE_NOT_FOUND: error(422, "image", "app", "image", "none", "none", "The requested container image was not found."),
@@ -235,6 +239,15 @@ export function isExpectedComputeError(code: string): boolean {
 }
 
 export const computeExecutionStateSchema = z.enum(["queued", "preparing", "starting", "running", "retry_wait", "collecting", "cancelling", "succeeded", "failed", "timed_out", "cancelled", "outcome_unknown"]);
+/**
+ * Why a waiting job has not started yet, as job dispatch last found it: hosts
+ * full, no host available, the account's container limit or spending limit, the
+ * workload's concurrency, a pause, its previous attempt still stopping, the app
+ * held by another platform operation (a deploy, say), or a temporary platform
+ * problem. Null when there is no reason yet, or the job is not waiting.
+ */
+export const computeExecutionWaitReasonSchema = z.enum(["no_capacity", "host_unavailable", "capacity_limit", "budget", "concurrency", "paused", "previous_attempt", "app_busy", "platform_error"]);
+export type ComputeExecutionWaitReason = z.infer<typeof computeExecutionWaitReasonSchema>;
 export const computeWorkloadStateSchema = z.enum(["idle", "queued", "starting", "running", "ready", "unready", "draining", "paused", "blocked", "failed", "crash_loop"]);
 export const computeDecimalSchema = z.string().max(39).regex(/^(0|[1-9][0-9]{0,25})(\.[0-9]{1,12})?$/, "Expected a nonnegative decimal with at most 26 integer and 12 fractional digits");
 export const computeRateSchema = z.string().max(31).regex(/^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$/, "Expected a rate with at most 18 integer and 12 fractional digits");
@@ -289,6 +302,7 @@ export const computeCompletionDeliverySchema = z.object({
 export const computeExecutionSchema = z.object({
   executionId: computeIdSchema, workloadName: containerNameSchema, revisionId: computeIdSchema,
   ...environmentFields, state: computeExecutionStateSchema,
+  waitReason: computeExecutionWaitReasonSchema.nullable(),
   acceptedAt: computeTimestampSchema, queueDeadline: computeTimestampSchema,
   statusUrl: z.string().min(1).max(2_048),
   attempt: z.number().int().min(0).max(5),
@@ -357,11 +371,15 @@ export const containerRuntimeGetRequestSchema = z.object({ executionId: computeI
 export const containerRuntimeCancelRequestSchema = containerRuntimeGetRequestSchema.extend({ idempotencyKey: computeIdempotencyKeySchema });
 const httpHeadersSchema = z.record(z.string().min(1).max(128).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/), z.string().max(8_192).refine(value => !/[\r\n\0]/.test(value)))
   .refine(value => Object.keys(value).length <= 64 && new TextEncoder().encode(JSON.stringify(value)).length <= 32_768, "Headers exceed their bound");
-const maximumServiceBodyBytes = 32 * 1024 * 1024;
+/** A Function's request body to a service crosses the shared API process, so
+ * it is capped well below a container route's 32 MiB. Responses keep 32 MiB. */
+export const containerServiceRequestBodyBytes = 4 * 1024 * 1024;
+export const containerServiceResponseBodyBytes = 32 * 1024 * 1024;
+const maximumServiceBodyBytes = containerServiceRequestBodyBytes;
 const maximumServiceBodyBase64Length = Math.ceil(maximumServiceBodyBytes / 3) * 4;
 const serviceBodyBase64Schema = z.string().max(maximumServiceBodyBase64Length).superRefine((value, context) => {
   // The encoded-size check already rejects larger inputs. Avoid decoding or
-  // repeated regex groups: a valid 32 MiB body can exhaust a regex backtracking stack.
+  // repeated regex groups: a large valid body can exhaust a regex backtracking stack.
   if (value.length > maximumServiceBodyBase64Length) return;
   const invalid = () => context.addIssue({ code: "custom", message: "Expected canonical padded Base64" });
   if (value.length % 4 !== 0) { invalid(); return; }
@@ -376,7 +394,7 @@ const serviceBodyBase64Schema = z.string().max(maximumServiceBodyBase64Length).s
     if ((last & ((1 << (padding * 2)) - 1)) !== 0) { invalid(); return; }
   }
   if (value.length / 4 * 3 - padding > maximumServiceBodyBytes) {
-    context.addIssue({ code: "too_big", origin: "string", maximum: maximumServiceBodyBytes, inclusive: true, message: "Decoded body exceeds 32 MiB" });
+    context.addIssue({ code: "too_big", origin: "string", maximum: maximumServiceBodyBytes, inclusive: true, message: "Decoded body exceeds 4 MiB" });
   }
 });
 export const containerRuntimeServiceRequestSchema = z.object({
@@ -386,7 +404,7 @@ export const containerRuntimeServiceRequestSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(3_600).optional(),
   bodyBase64: serviceBodyBase64Schema.optional(),
 }).strict();
-export const containerRuntimeServiceResponseSchema = z.object({ status: z.number().int().min(100).max(599), headers: httpHeadersSchema, bodyBase64: z.string().max(44_739_244) }).strict();
+export const containerRuntimeServiceResponseSchema = z.object({ status: z.number().int().min(100).max(599), headers: httpHeadersSchema, bodyBase64: z.string().max(Math.ceil(containerServiceResponseBodyBytes / 3) * 4) }).strict();
 export const containerRuntimeOperations = {
   run: { path: "/_opencloud/containers/run", input: containerRuntimeRunRequestSchema, output: computeExecutionSchema },
   get: { path: "/_opencloud/containers/get", input: containerRuntimeGetRequestSchema, output: computeExecutionSchema },

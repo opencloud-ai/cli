@@ -4,7 +4,8 @@ import { appRoutesSchema, compileAppRoutes, matchAppRoute, parseAppRouteRequest 
 import {
   classifyComputeError, isExpectedComputeError, computeErrorCatalog, computeErrorSchema, computeJobSubmitRequestSchema,
   computePriceDefinitionSchema, containerDefinitionSchema, normalizeComputeResources,
-  unsupportedComputeCapabilities, containerRuntimeServiceRequestSchema,
+  unsupportedComputeCapabilities, containerRuntimeServiceRequestSchema, containerRuntimeServiceResponseSchema,
+  containerServiceRequestBodyBytes, computeExecutionSchema,
 } from "./containers.js";
 import { installationCapabilitiesSchema } from "./installation.js";
 import { resolvePlatformFeatureFlag } from "./feature-flags.js";
@@ -96,7 +97,9 @@ describe("container manifest contracts", () => {
 
 describe("compute API errors and money", () => {
   it("validates full-size service bodies without a regex stack and bounds decoded bytes", () => {
-    const maximumBytes = 32 * 1024 * 1024;
+    const maximumBytes = 4 * 1024 * 1024;
+    expect(containerServiceRequestBodyBytes).toBe(maximumBytes);
+    expect(containerRuntimeServiceResponseSchema.shape.bodyBase64.maxLength).toBe(44_739_244);
     const bytes = Buffer.alloc(maximumBytes + 1, 255);
     const bodyBase64 = bytes.subarray(0, maximumBytes).toString("base64");
     expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64 }).success).toBe(true);
@@ -104,7 +107,7 @@ describe("compute API errors and money", () => {
     expect(oversized.length).toBe(bodyBase64.length);
     const result = containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64: oversized });
     expect(result.success).toBe(false);
-    if (!result.success) expect(result.error.issues).toEqual([expect.objectContaining({ code: "too_big", path: ["bodyBase64"], maximum: maximumBytes, message: "Decoded body exceeds 32 MiB" })]);
+    if (!result.success) expect(result.error.issues).toEqual([expect.objectContaining({ code: "too_big", path: ["bodyBase64"], maximum: maximumBytes, message: "Decoded body exceeds 4 MiB" })]);
     const malformed = containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64: `${bodyBase64.slice(0, -1)}?` });
     expect(malformed.success).toBe(false);
     if (!malformed.success) expect(malformed.error.issues).toEqual([expect.objectContaining({ code: "custom", path: ["bodyBase64"] })]);
@@ -127,6 +130,61 @@ describe("compute API errors and money", () => {
     expect(failure.details).toMatchObject({ retryable: false, retryScope: "observer_reconciliation", billingDisposition: "pending_evidence" });
     expect(computeErrorSchema.safeParse({ ...failure, details: { ...failure.details, hostPath: "/secret" } }).success).toBe(false);
     expect(computeErrorSchema.safeParse({ ...failure, statusCode: 500 }).success).toBe(false);
+  });
+  it("tells a container its credential is wrong apart from revoked authority", () => {
+    // Missing, malformed or stale: the caller's to fix, by reading the file again.
+    expect(classifyComputeError("COMPUTE_CAPABILITY_INVALID")).toMatchObject({
+      statusCode: 401,
+      details: { category: "authority", origin: "app", retryScope: "request", retryable: false, billingDisposition: "none" },
+    });
+    expect(isExpectedComputeError("COMPUTE_CAPABILITY_INVALID")).toBe(true);
+    expect(classifyComputeError("COMPUTE_AUTHORITY_REVOKED").statusCode).toBe(403);
+  });
+  it("says why a waiting job has not started, from a small fixed set", () => {
+    const usage = {
+      quantities: { vcpuSeconds: "0", memoryGiBSeconds: "0", scratchGiBSeconds: "0" }, currency: null, grossEstimatedCostMinor: null,
+      appliedCreditMinor: null, netEstimatedCostMinor: null, priceVersionIds: [], pendingEvidenceCount: 0, lastSettledAt: null,
+      observedAt: "2026-11-19T12:00:00.000Z",
+    };
+    const execution = {
+      executionId: "11111111-1111-4111-8111-111111111111", workloadName: "thumbnailer", revisionId: "22222222-2222-4222-8222-222222222222",
+      environment: "production", developmentSessionId: null, state: "queued", waitReason: "host_unavailable",
+      acceptedAt: "2026-11-19T12:00:00.000Z", queueDeadline: "2026-11-19T12:30:00.000Z", statusUrl: "/v1/apps/x/container-executions/y",
+      attempt: 0, startedAt: null, finishedAt: null, executionDeadline: null, phaseDeadline: "2026-11-19T12:30:00.000Z", error: null,
+      outputFileIds: [], completionDelivery: { state: "not_configured", attempts: 0, lastAttemptAt: null, nextAttemptAt: null, error: null }, usage,
+    };
+    expect(computeExecutionSchema.parse(execution).waitReason).toBe("host_unavailable");
+    expect(computeExecutionSchema.parse({ ...execution, state: "running", waitReason: null }).waitReason).toBeNull();
+    expect(computeExecutionSchema.safeParse({ ...execution, waitReason: "COMPUTE_NO_CAPACITY" }).success).toBe(false);
+    const { waitReason: _omitted, ...withoutReason } = execution;
+    expect(computeExecutionSchema.safeParse(withoutReason).success).toBe(false);
+  });
+  it("says a waiting job was cancelled because another release replaced its own, before it started", () => {
+    expect(classifyComputeError("COMPUTE_RELEASE_REPLACED")).toMatchObject({
+      statusCode: 409,
+      details: { category: "configuration", origin: "policy", phase: "admission", retryable: false, billingDisposition: "none" },
+    });
+    expect(classifyComputeError("COMPUTE_RELEASE_REPLACED").message).toMatch(/replaced the one this job was accepted for/);
+    // The customer's own release change: never a platform fault.
+    expect(isExpectedComputeError("COMPUTE_RELEASE_REPLACED")).toBe(true);
+  });
+  it("tells a host that is down apart from hosts that are full, both worth a retry", () => {
+    for (const code of ["COMPUTE_HOST_UNAVAILABLE", "COMPUTE_NO_CAPACITY"] as const)
+      expect(classifyComputeError(code)).toMatchObject({
+        statusCode: 503,
+        details: { category: "capacity", origin: "platform", phase: "admission", retryable: true, billingDisposition: "none" },
+      });
+    expect(classifyComputeError("COMPUTE_HOST_UNAVAILABLE").message).toMatch(/No compute host is available/);
+    expect(classifyComputeError("COMPUTE_NO_CAPACITY").message).toMatch(/full/);
+  });
+  it("tells a new release's copy to retry until it goes live, unlike revoked authority", () => {
+    // Decision 19: refused before the deploy or sync switches, but retryable.
+    expect(classifyComputeError("COMPUTE_NOT_LIVE")).toMatchObject({
+      statusCode: 503,
+      details: { category: "authority", origin: "policy", phase: "startup", retryScope: "request", retryable: true, billingDisposition: "none" },
+    });
+    expect(isExpectedComputeError("COMPUTE_NOT_LIVE")).toBe(true);
+    expect(classifyComputeError("COMPUTE_AUTHORITY_REVOKED").details.retryable).toBe(false);
   });
   it("rejects runtime overrides and oversized inputs, normalizing file selection", () => {
     expect(computeJobSubmitRequestSchema.parse({})).toEqual({ input: {}, inputFileIds: [] });

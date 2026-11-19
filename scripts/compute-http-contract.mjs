@@ -12,6 +12,7 @@ const temporary = await mkdtemp(path.join(os.tmpdir(), "compute-contracts-cli-")
 const appId = "10000000-0000-4000-8000-000000000001";
 const sessionId = "10000000-0000-4000-8000-000000000002";
 const executionId = "10000000-0000-4000-8000-000000000003";
+const failedExecutionId = "10000000-0000-4000-8000-000000000005";
 const revisionId = "10000000-0000-4000-8000-000000000004";
 const now = "2026-11-14T00:00:00Z";
 const requests = [];
@@ -23,10 +24,14 @@ const usage = { quantities: { vcpuSeconds: "9007199254740993", memoryGiBSeconds:
   priceVersionIds: [revisionId], pendingEvidenceCount: 1, lastSettledAt: null, observedAt: now };
 const freshness = { status: "partial", observedAt: now, lagSeconds: 16, truncated: false };
 const environment = isDev => ({ environment: isDev ? "development" : "production", developmentSessionId: isDev ? sessionId : null });
-const execution = isDev => ({ executionId, workloadName: "job", revisionId, ...environment(isDev), state: "queued",
+const execution = isDev => ({ executionId, workloadName: "job", revisionId, ...environment(isDev), state: "queued", waitReason: "no_capacity",
   acceptedAt: now, queueDeadline: "2026-11-15T00:00:00Z", statusUrl: `/v1/apps/${appId}/container-executions/${executionId}`,
   attempt: 0, startedAt: null, finishedAt: null, executionDeadline: null, phaseDeadline: null, error: null, outputFileIds: [],
   completionDelivery: { state: "not_configured", attempts: 0, lastAttemptAt: null, nextAttemptAt: null, error: null }, usage });
+// A job whose process exited 3: the error names its exit code.
+const failedExecution = isDev => ({ ...execution(isDev), executionId: failedExecutionId, state: "failed", waitReason: null, attempt: 1,
+  startedAt: now, finishedAt: now, error: { statusCode: 422, code: "COMPUTE_EXIT_NONZERO", message: "The container process exited unsuccessfully.",
+    details: { category: "execution", origin: "app", phase: "running", retryScope: "known_failed_attempt", retryable: false, billingDisposition: "confirmed_usage", exitCode: 3 } } });
 const workload = isDev => ({ name: "worker", kind: "worker", revisionId, ...environment(isDev), imageDigest: `registry.test/image@sha256:${"a".repeat(64)}`,
   resources: { cpu: 1, memoryGiB: 2, scratchGiB: 1 }, limits: { kind: "worker", startupTimeoutSeconds: 120, worker: { replicas: 1, maxReplicas: 3, restart: "always" } },
   hourlyEstimate: null, state: "running", generation: 3, paused: false, pauseReason: null, replicaOverride: null,
@@ -84,6 +89,7 @@ const server = createServer(async (request, response) => {
     if (dropNext) { dropNext = false; response.destroy(); return; }
   } else if (url.pathname.endsWith("/containers")) value = { workloads: [workload(isDev)], nextCursor: "opaque+/=", observedAt: now };
   else if (url.pathname.endsWith("/container-executions")) value = { executions: [execution(isDev)], nextCursor: null, observedAt: now };
+  else if (url.pathname.endsWith(`/container-executions/${failedExecutionId}`)) value = failedExecution(isDev);
   else if (url.pathname.includes("/container-executions/")) value = execution(isDev);
   else if (url.pathname.endsWith("/events")) value = { events: [], nextCursor: null, observedAt: now };
   else value = workload(isDev);
@@ -146,7 +152,11 @@ try {
     const changed = args.map(value => value === '{"private":"input-payload"}' ? '{"private":"changed"}' : value);
     await run(changed, 1);
     assert.equal(business(conflictBefore).length, 0, "changed input replay reached the API");
-    assert.equal((await run([...prefix, "execution", scope, executionId])).completionDelivery.state, "not_configured");
+    const waiting = await run([...prefix, "execution", scope, executionId]);
+    assert.equal(waiting.completionDelivery.state, "not_configured");
+    assert.equal(waiting.waitReason, "no_capacity", "a queued job's wait reason is printed");
+    const failed = await run([...prefix, "execution", scope, failedExecutionId]);
+    assert.deepEqual([failed.waitReason, failed.error.code, failed.error.details.exitCode], [null, "COMPUTE_EXIT_NONZERO", 3]);
     await run([...prefix, "executions", scope, "--workload", "job", "--cursor", "opaque+/="]);
     assert.equal(requests.at(-1).query.cursor, "opaque+/=");
     await run([...prefix, "cancel", scope, executionId, "--idempotency-key", `cancel-${isDev}`]);

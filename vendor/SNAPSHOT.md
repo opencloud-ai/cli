@@ -32,6 +32,14 @@ readable. This internal transport refinement adds no public CLI authority.
 The same two files are refreshed verbatim from `b21f1d1e` to distinguish proven
 never-started allowances with explicit `unused` accounting. Lost counters still
 require forfeiture; neither receipt is a diagnostic byte measurement.
+`contracts/src/containers.ts` and its tests are then refreshed verbatim from
+platform `8c99de9df` (`feat/container-runtime-exploration`, after the
+container usability fixes): executions carry a required, nullable
+`waitReason`; the catalog adds `COMPUTE_HOST_UNAVAILABLE`, `COMPUTE_NOT_LIVE`,
+`COMPUTE_RELEASE_REPLACED` and `COMPUTE_CAPABILITY_INVALID`; and a Function's
+request body to a service is capped at 4 MiB while responses keep 32 MiB.
+Failed jobs' `details.exitCode` and `details.signal` were already optional
+fields of the error details.
 
 Validation waiting takes `contracts/src/control-plane.test.ts` and
 `control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`
