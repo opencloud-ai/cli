@@ -17,6 +17,7 @@ import { ApiError, OpenCloudClient } from "./api-client.js";
 import { computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
+import { isZodError, issueSummary, readableIssues, type ReadableIssue } from "./readable-issues.js";
 
 export interface OperationOptions {
   idempotencyKey?: string;
@@ -34,11 +35,13 @@ export interface OperationLike {
 
 export class CliContractError extends Error {
   readonly retryable: boolean;
+  /** One readable line per problem, as `path: what is expected`. */
+  readonly issues: ReadableIssue[] | undefined;
 
   constructor(
     readonly code: string,
     message: string,
-    options: { retryable?: boolean; cause?: unknown } = {},
+    options: { retryable?: boolean; cause?: unknown; issues?: ReadableIssue[] } = {},
   ) {
     super(
       message,
@@ -46,6 +49,7 @@ export class CliContractError extends Error {
     );
     this.name = "CliContractError";
     this.retryable = options.retryable ?? false;
+    this.issues = options.issues;
   }
 }
 
@@ -630,14 +634,21 @@ export function structuredCliError(error: unknown): {
       : {};
   const cause = errorCause(error);
   const requestId = requestIdForError(error);
+  // A Zod error's message is its whole issue tree as JSON; list each problem instead.
+  const issues = error instanceof CliContractError ? error.issues
+    : isZodError(error) ? readableIssues(error.issues) : undefined;
+  const message = isZodError(error) && issues?.length
+    ? issueSummary("The input", issues)
+    : error instanceof Error ? error.message : (candidate.message ?? error);
   return {
     ok: false,
     error: {
       code: safeCode(candidate.code, "CLI_ERROR"),
-      message: redactMessage(
-        error instanceof Error ? error.message : (candidate.message ?? error),
-      ),
+      message: redactMessage(message),
       retryable: candidate.retryable === true,
+      ...(issues?.length
+        ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }
+        : {}),
       ...(cause
         ? {
             cause: {

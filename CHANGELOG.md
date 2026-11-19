@@ -35,6 +35,11 @@
   person or any agent, instead of naming Codex.
 - The local `validate` summary lists the containers (name, kind and image) and
   routes it read, next to the counts of migrations, Functions, queues and cron.
+- An invalid manifest fails with `INVALID_MANIFEST` and one short line per
+  problem, naming where it is and what is expected there (`opencloud.yaml has
+  2 problems: containers[0].resources.cpu: must be one of 1, 2, 4, 8; …`),
+  plus an `issues` list, instead of Zod's issue tree as JSON inside
+  `CLI_ERROR`. Other invalid command input is listed the same way.
 
 ## 3.20.0
 

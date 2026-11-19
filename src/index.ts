@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -155,6 +155,7 @@ import {
   type OperationOptions,
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
+import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
@@ -846,11 +847,29 @@ async function removeDevStateIfMatching(
 function localBundle(sourceRoot: string) {
   return buildBundle(sourceRoot, { platformFrontend: true }).catch(
     (error: unknown) => {
+      if (isZodError(error)) {
+        // One line per problem in the author's manifest, not Zod's issue tree.
+        const problems = readableIssues(error.issues);
+        if (problems.length) {
+          throw callerFailure(new CliContractError(
+            "INVALID_MANIFEST",
+            issueSummary(authorManifestName(sourceRoot), problems),
+            { issues: problems },
+          ));
+        }
+      }
       // An invalid manifest or source tree is the caller's to fix, and its
       // details describe their files; a bundler or system fault is reported.
       throw isSourceValidationError(error) ? callerFailure(error) : error;
     },
   );
+}
+
+/** The manifest the bundler reads, in its order; the YAML name when none exists. */
+function authorManifestName(sourceRoot: string): string {
+  return ["opencloud.yaml", "opencloud.yml", "opencloud.json"].find((name) =>
+    existsSync(path.join(sourceRoot, name)),
+  ) ?? "opencloud.yaml";
 }
 
 function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {

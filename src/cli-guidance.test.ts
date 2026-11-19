@@ -179,6 +179,42 @@ describe("validate", () => {
     ]);
   });
 
+  it("prints one readable line per manifest problem instead of Zod's issue tree", async () => {
+    const context = await workspace("validate-invalid");
+    const directory = await app(context, [
+      "containers:",
+      "  - name: renderer",
+      "    kind: service",
+      `    image: ${image}`,
+      "    resources: { cpu: 3 }",
+      "    service:",
+      "      startupProbe: { path: /ready }",
+      "      readinessProbe: { path: /ready }",
+      "  - name: thumbnails",
+      "    kind: job",
+      `    image: ${image}`,
+      "    resources: { scratchGiB: 5 }",
+      "    job:",
+      "      outputs: { directory: /work/output, maxFiles: 2, maxTotalGiB: 0.5 }",
+      "",
+    ].join("\n"));
+    const validated = await run(["validate", directory], context);
+    expect(validated.status).toBe(1);
+    expect(validated.stderr).not.toContain("invalid_union");
+    expect(JSON.parse(validated.stderr)).toEqual({
+      ok: false,
+      error: {
+        code: "INVALID_MANIFEST",
+        message: "opencloud.yaml has 2 problems: containers[0].resources.cpu: must be one of 1, 2, 4, 8; containers[1].job.outputs.maxTotalGiB: must be a whole number",
+        retryable: false,
+        issues: [
+          { path: "containers[0].resources.cpu", message: "must be one of 1, 2, 4, 8" },
+          { path: "containers[1].job.outputs.maxTotalGiB", message: "must be a whole number" },
+        ],
+      },
+    });
+  });
+
   it("reports none for an app without containers or routes", async () => {
     const context = await workspace("validate-empty");
     const validated = await run(["validate", await app(context)], context);
