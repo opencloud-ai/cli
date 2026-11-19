@@ -64,6 +64,24 @@ export function assertAppOwnerMutationJournalDirectory(
   return APP_OWNER_MUTATION_JOURNAL_DIRECTORY;
 }
 
+/**
+ * The unresolved mutation an error is about, so a person can resume or check
+ * it: only the retained, non-secret coordinates, never request content.
+ */
+export interface PendingMutation {
+  command: MutationCommandId;
+  idempotencyKey: string;
+  /** Whether the CLI chose the key because none was given. */
+  generatedKey: boolean;
+  state: "prepared" | "attempted" | "unknown" | "completed";
+  unknownCode?: string;
+  appId: string;
+  operationId?: string;
+  draftId?: string;
+  revision?: number;
+  sessionId?: string;
+}
+
 export class MutationJournalError extends Error {
   readonly retryable: boolean;
 
@@ -71,11 +89,33 @@ export class MutationJournalError extends Error {
     readonly code: string,
     message: string,
     retryable = false,
+    readonly pending?: PendingMutation,
   ) {
     super(message);
     this.name = "MutationJournalError";
     this.retryable = retryable;
   }
+}
+
+const GENERATED_KEY = /^ocj1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function pendingMutation(entry: MutationJournalEntry, appId: string): PendingMutation {
+  const checkpoint = entry.checkpoint;
+  const operationId = entry.operationId ?? checkpoint?.deploymentOperationId ?? checkpoint?.operationId;
+  const draftId = checkpoint?.draftId ?? checkpoint?.validation?.draftId;
+  const revision = checkpoint?.revision ?? checkpoint?.validation?.revision;
+  return {
+    command: entry.commandId,
+    idempotencyKey: entry.idempotencyKey,
+    generatedKey: GENERATED_KEY.test(entry.idempotencyKey),
+    state: entry.state,
+    ...(entry.unknownCode ? { unknownCode: entry.unknownCode } : {}),
+    appId,
+    ...(operationId ? { operationId } : {}),
+    ...(draftId ? { draftId } : {}),
+    ...(revision ? { revision } : {}),
+    ...(checkpoint?.sessionId ? { sessionId: checkpoint.sessionId } : {}),
+  };
 }
 
 export interface MutationJournalDirectoryInput {
@@ -1262,6 +1302,8 @@ export class MutationRun {
     throw new MutationJournalError(
       code,
       "The previous request may have taken effect, but this endpoint has no safe replay coordinate. Inspect current app state, then retry with a new explicit --idempotency-key only when a new mutation is intended.",
+      false,
+      pendingMutation(this.entry, this.journal.appId),
     );
   }
 
@@ -1271,6 +1313,8 @@ export class MutationRun {
       throw new MutationJournalError(
         this.entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN",
         "The previous request may have taken effect, and the CLI will not retry it blindly. Inspect current app state, then use a new explicit --idempotency-key only when a new mutation is intended.",
+        false,
+        pendingMutation(this.entry, this.journal.appId),
       );
     }
   }
@@ -1294,7 +1338,8 @@ export class MutationRun {
     const validation = this.checkpoint?.validation;
     if (validation?.state === "dispatched") {
       throw new MutationJournalError("DRAFT_VALIDATION_OUTCOME_UNKNOWN",
-        `Validation for draft ${validation.draftId}, revision ${validation.revision} was dispatched without a durably acknowledged reply. No validation was repeated.`);
+        `Validation for draft ${validation.draftId}, revision ${validation.revision} was dispatched without a durably acknowledged reply. No validation was repeated.`,
+        false, pendingMutation(this.entry, this.journal.appId));
     }
   }
 }
@@ -1779,6 +1824,11 @@ export class MutationJournal {
     return this.now().toISOString();
   }
 
+  /** The exact app this journal is bound to. */
+  get appId(): string {
+    return this.binding.appId;
+  }
+
   async run<T>(
     spec: MutationIntentSpec,
     callback: (run: MutationRun) => Promise<T>,
@@ -1806,13 +1856,28 @@ export class MutationJournal {
         true,
       );
     }
-    const slot = createHash("sha256")
-      .update(
-        explicitKey === null
-          ? `generated\0${spec.commandId}\0${scopeDigest}`
-          : `explicit\0${explicitKey}`,
-      )
-      .digest("hex");
+    const slotOf = (identity: string) => createHash("sha256").update(identity).digest("hex");
+    const generatedSlot = slotOf(`generated\0${spec.commandId}\0${scopeDigest}`);
+    let slot = explicitKey === null ? generatedSlot : slotOf(`explicit\0${explicitKey}`);
+    if (explicitKey !== null && GENERATED_KEY.test(explicitKey)) {
+      // A key the journal generated, given back, names its own retained entry.
+      // Resume that entry rather than start a second one that would send the
+      // same server keys again, and repeat a request with no replay key, such
+      // as a development apply. Its identity is checked again under the lock;
+      // a file that changes while being peeked at leaves the key explicit.
+      const entryPath = (candidate: string) => path.join(this.entriesDirectory, `${candidate}.json`);
+      // Anything but a definite absence keeps the explicit slot, whose own
+      // processing reports an unreadable entry as before.
+      const explicitAbsent = (await readOptional(entryPath(slot)).catch(() => "")) === null;
+      const generated = explicitAbsent ? await readOptional(entryPath(generatedSlot)).catch(() => null) : null;
+      let generatedKey: string | null = null;
+      try {
+        generatedKey = generated === null ? null : parseEntry(generated, entryPath(generatedSlot)).idempotencyKey;
+      } catch {
+        generatedKey = null;
+      }
+      if (generatedKey === explicitKey) slot = generatedSlot;
+    }
     const lockTarget = path.join(this.locksDirectory, slot);
     const entryFile = path.join(this.entriesDirectory, `${slot}.json`);
     await ensureLockTarget(lockTarget);
@@ -1892,10 +1957,18 @@ export class MutationJournal {
           retainedIdentityChanged ||
           (!mayInspectRetainedDevWorkflow && retainedDescriptorChanged)
         ) {
+          // Name the request that holds this target, so it can be resumed with
+          // its own key or checked; the CLI adds the exact commands.
+          const holder = `\`${entry.commandId}\` request with idempotency key ${entry.idempotencyKey}`;
           throw new MutationJournalError(
             "MUTATION_IN_PROGRESS",
-            "A different unresolved mutation already owns this exact target. Recover it before starting another request.",
+            entry.state === "completed"
+              ? `Idempotency key ${entry.idempotencyKey} was already used for a different \`${entry.commandId}\` request, which finished. No request was started.`
+              : entry.state === "unknown"
+                ? `An earlier ${holder} may have taken effect (${entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN"}), and this request differs from it. No request was started.`
+                : `An earlier ${holder} has not finished (state ${entry.state}), and this request differs from it. No request was started.`,
             true,
+            pendingMutation(entry, this.binding.appId),
           );
         }
       } else {

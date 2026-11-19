@@ -41,6 +41,25 @@
   `containers execution`, `executions` and `run` print them as received. An
   answer this CLI's contract cannot read fails with `API_CONTRACT_MISMATCH`,
   naming the field, instead of a bare schema error.
+- Make the mutation journal's stops actionable. `MUTATION_IN_PROGRESS` names
+  the unresolved request in `pending` (command, idempotency key, state and
+  server coordinates), and its `hint` gives the exact command to resume it
+  with that key, one to check it, and how to send a separate request. A key
+  the journal generated, passed back, resumes that entry instead of starting
+  a second one under the same key. Unknown outcomes carry `pending` too and
+  say what to check, such as `app dev status` for a development apply.
+- A development apply OpenCloud refuses (a coded 4xx answer or a compute
+  error such as `COMPUTE_NO_CAPACITY`) is recorded as refused, so running the
+  command again sends a new apply instead of waiting out the old one's
+  15-minute deadline. A start that ends refused or unconfirmed keeps its
+  session in `.opencloud/dev.json`, so retries reuse that session and draft
+  and `app dev status`, `containers`, `logs` and `stop` reach it.
+- A session production has overtaken, or that stopped or expired, now fails
+  before any apply with `ACTIVE_DEPLOYMENT_CHANGED` (with both release IDs),
+  `DEV_SESSION_STALE`, `DEV_SESSION_STOPPED` or `DEV_SESSION_EXPIRED` and the
+  commands to run, instead of `MUTATION_REPLAY_MISMATCH`. OpenCloud's own
+  `details.suggestedFix` is printed as the error's `hint`, and its
+  development-session refusals keep their session and release IDs.
 - `app connect` says what the connected folder can do, in words that fit a
   person or any agent, instead of naming Codex.
 - An app command run in a folder that is not connected fails with

@@ -35,6 +35,8 @@ const state = {
   /** Adds a file to OpenCloud's artifact that the CLI never bundled. */
   extraArtifactFile: false,
   dropApplyReply: false,
+  /** Refuses the next apply as a full compute host would, applying nothing. */
+  refuseApply: false,
   interruptValidation: null,
   busyBeforeInterruption: false,
   busyValidation: false,
@@ -66,7 +68,7 @@ function sessionRecord(session) {
   return {
     id: session.id, appId, draftId: session.draftId, status: session.status,
     previewUrl: "https://preview.example.test", browserPreviewUrl: "https://review.example.test",
-    baseDeploymentId: null,
+    baseDeploymentId: session.baseDeploymentId ?? null,
     activeRevision: session.applied ?? null,
     verification: null,
     capabilities: {
@@ -252,7 +254,10 @@ const server = createServer(async (request, response) => {
     }
     if (parts[5] === "dev-sessions" && request.method === "POST") {
       assert.equal(JSON.parse(body).apply, false, "Create and retain the session before applying a revision");
-      const session = { id: randomUUID(), draftId: draft.id, status: "active", revisionId: randomUUID() };
+      // OpenCloud returns the draft's live session; a new one starts from the live release.
+      const live = [...state.sessions.values()].find((value) => value.draftId === draft.id && value.status === "active");
+      if (live) return send(response, 201, sessionRecord(live));
+      const session = { id: randomUUID(), draftId: draft.id, status: "active", revisionId: randomUUID(), baseDeploymentId: state.activeDeploymentId };
       state.sessions.set(session.id, session);
       return send(response, 201, sessionRecord(session));
     }
@@ -272,8 +277,14 @@ const server = createServer(async (request, response) => {
       return send(response, 200, sessionRecord(session));
     }
     if (parts[5] === "apply") {
-      if (!session.applied) {
+      if (!session.applied && !session.refused) {
         await assert.rejects(readFile(path.join(app, ".opencloud", "dev.json")), { code: "ENOENT" });
+      }
+      if (state.refuseApply) {
+        state.refuseApply = false;
+        session.refused = true;
+        return send(response, 503, { statusCode: 503, code: "COMPUTE_NO_CAPACITY", message: "Every available compute host is full right now. Retry shortly.",
+          details: { category: "capacity", origin: "platform", phase: "admission", retryScope: "unstarted_preparation", retryable: true, billingDisposition: "none" } });
       }
       session.revisionId = randomUUID();
       const draft = state.drafts.get(session.draftId);
@@ -552,8 +563,73 @@ try {
   assert.match(error.message, /Only OpenCloud's artifact has: frontend\/extra\.js\./);
   state.extraArtifactFile = false;
 
+  // 7. A development start whose apply OpenCloud refused (S1: no capacity)
+  //    keeps its session, and running it again with edited files retries
+  //    that session and draft instead of leaving them behind.
+  const errorOf = (result) => JSON.parse(result.stderr.trim().split("\n").at(-1)).error;
+  const appliesIn = (from) => state.requests.slice(from).filter((request) => request.path.endsWith("/apply")).length;
+  await write("frontend/index.html", "<!doctype html><title>Counter v7</title>\n");
+  const draftsBefore = state.drafts.size;
+  const sessionsBefore = state.sessions.size;
+  state.refuseApply = true;
+  const refusal = errorOf(await runCli(["app", "dev", "start", app], { status: 1 }));
+  assert.equal(refusal.code, "COMPUTE_NO_CAPACITY");
+  assert.equal(refusal.details.retryScope, "unstarted_preparation");
+  assert.equal(refusal.hint, `Nothing was applied, and the development session is kept: run \`opencloud app dev start ${app}\` again to retry with it, or \`opencloud app dev stop ${app}\` to end it.`);
+  const kept = await devState();
+  assert.equal(state.sessions.get(kept.sessionId).applied, undefined, "The refused session has no applied revision");
+  assert.equal(JSON.parse((await runCli(["app", "dev", "status", app])).stdout).id, kept.sessionId);
+  const verifyEarly = errorOf(await runCli(["app", "dev", "verify", app], { status: 1 }));
+  assert.equal(verifyEarly.code, "DEV_REVISION_NOT_APPLIED");
+  await write("frontend/index.html", "<!doctype html><title>Counter v8</title>\n");
+  const retryAt = state.requests.length;
+  const devRetry = JSON.parse((await runCli(["app", "dev", "start", app])).stdout);
+  assert.equal(devRetry.session.id, kept.sessionId, "The retry reuses the refused session");
+  assert.equal(state.drafts.size, draftsBefore + 1, "The retry reuses the refused draft");
+  assert.equal(state.sessions.size, sessionsBefore + 1);
+  assert.equal(appliesIn(retryAt), 1, "The retry sends one new apply instead of waiting out the refused one");
+  assert.equal((await devState()).draftId, kept.draftId);
+
+  // 8. An interrupted start holds its target: a changed request names its
+  //    key and the exact resume command, and that key resumes it, alone.
+  const interruptedAt = state.requests.length;
+  await runCli(["app", "dev", "start", app], { status: null, interruptValidation: true });
+  await ageInterruptedLocks(temporary);
+  await write("frontend/index.html", "<!doctype html><title>Counter v9</title>\n");
+  const held = errorOf(await runCli(["app", "dev", "start", app], { status: 1 }));
+  assert.equal(held.code, "MUTATION_IN_PROGRESS");
+  assert.equal(held.pending.command, "opencloud app dev start");
+  assert.equal(held.pending.state, "attempted");
+  assert.match(held.pending.idempotencyKey, /^ocj1:/);
+  assert.ok(held.hint.includes(`\`opencloud app dev start ${app} --idempotency-key ${held.pending.idempotencyKey}\``), held.hint);
+  assert.ok(held.hint.includes(`\`opencloud app dev status ${app}\``), held.hint);
+  await write("frontend/index.html", "<!doctype html><title>Counter v8</title>\n");
+  const entriesBefore = (await readdir(path.join(temporary, "journal", "entries"))).length;
+  const heldResumeAt = state.requests.length;
+  const resumed = errorOf(await runCli(["app", "dev", "start", app, "--idempotency-key", held.pending.idempotencyKey], { status: 1 }));
+  assert.equal(resumed.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN", "Its own key resumes the interrupted entry");
+  assert.equal(resumed.pending.idempotencyKey, held.pending.idempotencyKey);
+  assert.match(resumed.hint, /^The validation may still be running and was not repeated\. Check with `opencloud draft get /);
+  assert.equal((await readdir(path.join(temporary, "journal", "entries"))).length, entriesBefore, "No second entry under that key");
+  assert.ok(state.requests.slice(heldResumeAt).every((request) => request.method === "GET"), "Resuming repeats no request");
+  assert.equal(state.requests.slice(interruptedAt).filter((request) => request.path.endsWith("/validate")).length, 1);
+
+  // 9. A sync after a direct production deploy (J2, J3) says production
+  //    changed, names both releases and the commands, and sends no apply.
+  await write("frontend/index.html", "<!doctype html><title>Counter v10</title>\n");
+  // Section 6's refused deploy still holds the unkeyed deploy target.
+  await runCli(["deploy", app, "--idempotency-key", "overtaking-production-deploy"]);
+  const syncAt = state.requests.length;
+  const overtaken = errorOf(await runCli(["app", "dev", "sync", app], { status: 1 }));
+  assert.equal(overtaken.code, "ACTIVE_DEPLOYMENT_CHANGED");
+  assert.equal(overtaken.expectedActiveDeploymentId, state.sessions.get(kept.sessionId).baseDeploymentId);
+  assert.equal(overtaken.actualActiveDeploymentId, state.activeDeploymentId);
+  assert.notEqual(overtaken.expectedActiveDeploymentId, overtaken.actualActiveDeploymentId);
+  assert.equal(overtaken.hint, `Run \`opencloud app dev stop ${app}\`, then \`opencloud app dev start ${app}\`.`);
+  assert.equal(appliesIn(syncAt), 0, "No apply is sent to a session production overtook");
+
   process.stdout.write(
-    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures with no replay, resumed canonical manifest normalization, initial drift refusal, and real mismatch refusal.\n",
+    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures with no replay, resumed canonical manifest normalization, initial drift refusal, real mismatch refusal, a refused development apply retried with its kept session, an interrupted start resumed by its own key, and a sync production overtook refused before any apply.\n",
   );
 } finally {
   server.close();

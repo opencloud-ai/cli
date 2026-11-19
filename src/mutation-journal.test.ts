@@ -957,6 +957,71 @@ describe("mutation journal", () => {
     ).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
   });
 
+  it("names the unresolved request that holds a target, with its key, state and coordinates", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { artifactSha256: "a".repeat(64) } };
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    let pendingKey = "";
+    await expect(journal.run(intent, async (run) => {
+      pendingKey = run.idempotencyKey;
+      await run.checkpointStage({ stage: "dev_session_created", draftId: OTHER_APP_ID, sessionId, revision: 3 });
+      await run.markAttempted();
+      throw new Error("interrupted");
+    })).rejects.toThrow("interrupted");
+    expect(pendingKey).toMatch(/^ocj1:/);
+    const edited = { ...intent, safeRequest: { artifactSha256: "b".repeat(64) } };
+    const conflict = await journal.run(edited, async () => undefined).catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(MutationJournalError);
+    expect(conflict).toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      retryable: true,
+      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} has not finished (state attempted), and this request differs from it. No request was started.`,
+      pending: {
+        command: "opencloud app dev start", idempotencyKey: pendingKey, generatedKey: true, state: "attempted",
+        appId: APP_ID, draftId: OTHER_APP_ID, revision: 3, sessionId,
+      },
+    });
+    // Its own key, given back, resumes that entry instead of starting another.
+    await journal.run({ ...intent, explicitIdempotencyKey: pendingKey }, async (run) => {
+      expect(run.recovered).toBe(true);
+      expect(run.idempotencyKey).toBe(pendingKey);
+      expect(run.checkpoint).toMatchObject({ stage: "dev_session_created", sessionId });
+      await run.complete();
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(1);
+    // A different request under that key is still refused, naming the entry.
+    await journal.run(intent, async (run) => {
+      await run.markAttempted();
+      pendingKey = run.idempotencyKey;
+      return run.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
+    }).catch((error: unknown) => expect(error).toMatchObject({
+      code: "DEV_APPLY_OUTCOME_UNKNOWN", pending: { idempotencyKey: pendingKey, state: "unknown", unknownCode: "DEV_APPLY_OUTCOME_UNKNOWN" },
+    }));
+    await expect(journal.run({ ...edited, explicitIdempotencyKey: pendingKey }, async () => undefined)).rejects.toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN), and this request differs from it. No request was started.`,
+      pending: { state: "unknown" },
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(1);
+  });
+
+  it("keeps an explicit key that is not the pending entry's own on its own entry", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "start" } };
+    await expect(journal.run(intent, async (run) => {
+      await run.markAttempted();
+      throw new Error("interrupted");
+    })).rejects.toThrow("interrupted");
+    const unrelated = "ocj1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    await journal.run({ ...intent, explicitIdempotencyKey: unrelated }, async (run) => {
+      expect(run.recovered).toBe(false);
+      expect(run.idempotencyKey).toBe(unrelated);
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(2);
+  });
+
   it("does not reuse an explicit key for a changed completed descriptor", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const journal = await MutationJournal.open({
@@ -991,7 +1056,11 @@ describe("mutation journal", () => {
         },
         async () => undefined,
       ),
-    ).rejects.toMatchObject({ code: "MUTATION_IN_PROGRESS" });
+    ).rejects.toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      message: "Idempotency key explicit-stable-key-1 was already used for a different `opencloud app configure` request, which finished. No request was started.",
+      pending: { idempotencyKey: explicitIdempotencyKey, generatedKey: false, state: "completed", operationId: "44444444-4444-4444-8444-444444444444" },
+    });
     const [entry] = await readdir(path.join(directory, "entries"));
     expect(
       JSON.parse(

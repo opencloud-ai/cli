@@ -133,6 +133,7 @@ import { planPull, readReleaseArchive, type ReleaseKind } from "./pull.js";
 import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
+  MutationJournalError,
   assertAppOwnerMutationJournalDirectory,
   mutationDigest,
   resolveMutationJournalDirectory,
@@ -156,7 +157,8 @@ import {
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
-import { notConnectedMessage } from "./guidance.js";
+import { commandLine, journalHint, notConnectedMessage } from "./guidance.js";
+import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
@@ -2529,7 +2531,27 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
-        const recovered = await resumeDevApply(context.control, run, { appId, artifactSha256: bundle.sha256 });
+        const hints = { directory: String(directory), command: "start" } as const;
+        /**
+         * After a refused or unconfirmed apply, the session this start made
+         * stays usable. Keep it in the folder, which named none, so the next
+         * start retries with it instead of leaving it behind, and status,
+         * containers, logs and stop reach it. Never while an apply may still
+         * be running: only once the journal settled it or its time ran out.
+         */
+        const keepSession = async (error: unknown) => {
+          const sessionId = run.checkpoint?.sessionId;
+          const settled = run.completed || (error instanceof MutationJournalError && error.code === "DEV_APPLY_OUTCOME_UNKNOWN");
+          if (previous || !sessionId || !settled) return;
+          try {
+            const kept = (await context.control.call("getDevSession", { appId, sessionId })) as DevSessionWire;
+            if (kept.appId === appId && kept.id === sessionId) await storeDevSession(sourceRoot, bundle.sha256, kept);
+          } catch {
+            // Best effort: the failure being reported matters more.
+          }
+        };
+        try {
+        const recovered = await resumeDevApply(context.control, run, { appId, artifactSha256: bundle.sha256, ...hints });
         if (recovered) {
           await storeDevSession(sourceRoot, bundle.sha256, recovered);
           await outputAsync({ session: recovered, validation: null, reconciled: true, localState: devStatePath(sourceRoot), ...sourceOnlyFields(upload) });
@@ -2623,7 +2645,7 @@ dev
         const session = await applyDevRevisionOnce(context.control, run, {
           appId, draftId: synchronized.draftId, sessionId: created.id, revision: synchronized.revision,
           artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: created.baseDeploymentId,
-        }, childIdempotencyKey(run, "dev-apply"));
+        }, childIdempotencyKey(run, "dev-apply"), hints);
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,
@@ -2639,6 +2661,10 @@ dev
           ...sourceOnlyFields(upload),
         });
         await run.complete();
+        } catch (error) {
+          await keepSession(error);
+          throw error;
+        }
       },
     );
     });
@@ -2675,8 +2701,9 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
+        const hints = { directory: String(directory), command: "sync" } as const;
         const recovered = await resumeDevApply(context.control, run, { appId: state.appId, artifactSha256: bundle.sha256,
-          sessionId: state.sessionId, draftId: state.draftId });
+          sessionId: state.sessionId, draftId: state.draftId, ...hints });
         if (recovered) {
           await storeDevSession(sourceRoot, bundle.sha256, recovered);
           await outputAsync({ session: recovered, validation: null, reconciled: true, ...sourceOnlyFields(upload) });
@@ -2696,7 +2723,7 @@ dev
         const session = await applyDevRevisionOnce(context.control, run, {
           appId: state.appId, draftId: state.draftId, sessionId: state.sessionId, revision: synchronized.revision,
           artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: current.baseDeploymentId,
-        }, childIdempotencyKey(run, "dev-apply"));
+        }, childIdempotencyKey(run, "dev-apply"), hints);
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,
@@ -3284,6 +3311,15 @@ dev
           sessionId: state.sessionId,
         })) as DevSessionWire;
         const checkpoint = run.checkpoint;
+        if (!checkpoint && !session.activeRevision) {
+          // A start whose apply was refused keeps its session for the retry.
+          await run.complete();
+          throw callerFailure(new CliContractError(
+            "DEV_REVISION_NOT_APPLIED",
+            "The development session has no applied revision yet, so there is nothing to verify. No verification was started.",
+            { hint: `Run \`${commandLine(["app", "dev", "sync"], [String(directory)])}\` to apply your files, then verify.` },
+          ));
+        }
         const activeRevisionId =
           checkpoint?.activeRevisionId ?? session.activeRevision?.id;
         const artifactSha256 =
@@ -6807,6 +6843,10 @@ if (asksForVersion(process.argv.slice(2))) {
       return;
     }
     if (error instanceof WorkspaceNotConnectedError) await error.describe();
+    if (error instanceof MutationJournalError && error.pending && !hintOf(error)) {
+      const hint = journalHint(error.code, error.pending, runningCommand);
+      if (hint) withHint(error, hint);
+    }
     // Only the message and hint follow the brand; the report keeps the original.
     process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
     process.exitCode = 1;

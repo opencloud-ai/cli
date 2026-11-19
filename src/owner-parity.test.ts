@@ -17,6 +17,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api-client.js";
 import { apiErrorFromResponse } from "../vendor/control-plane-client/src/errors.js";
 import { withCliHeaders } from "./cli-http.js";
+import { withHint } from "./cli-contract-error.js";
+import { MutationJournalError } from "./mutation-journal.js";
 import {
   CliContractError,
   OperationTerminalError,
@@ -327,6 +329,64 @@ describe("owner-parity CLI helpers", () => {
       operationErrorCode: "FUNCTION_FAILED",
     });
     expect(failed).not.toHaveProperty("error.operation.error.secret");
+  });
+
+  it("shows OpenCloud's next step and the session or releases a development refusal names", () => {
+    const stale = structuredCliError(new ApiError(409, {
+      code: "DEV_SESSION_STALE",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      details: { sessionId: "11111111-1111-4111-8111-111111111111", status: "stale", baseDeploymentId: null,
+        suggestedFix: "Run opencloud app dev stop, then opencloud app dev start." },
+      requestId: "request-1",
+    }));
+    expect(stale.error).toEqual({
+      code: "DEV_SESSION_STALE",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      status: 409,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      sessionStatus: "stale",
+      baseDeploymentId: null,
+      hint: "Run opencloud app dev stop, then opencloud app dev start.",
+      retryable: false,
+      requestId: "request-1",
+    });
+    const overtaken = structuredCliError(new ApiError(409, {
+      code: "ACTIVE_DEPLOYMENT_CHANGED",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      details: { expectedActiveDeploymentId: "22222222-2222-4222-8222-222222222222", actualActiveDeploymentId: "33333333-3333-4333-8333-333333333333",
+        suggestedFix: "Run opencloud app dev stop, then opencloud app dev start." },
+    }));
+    expect(overtaken.error).toMatchObject({
+      code: "ACTIVE_DEPLOYMENT_CHANGED",
+      expectedActiveDeploymentId: "22222222-2222-4222-8222-222222222222",
+      actualActiveDeploymentId: "33333333-3333-4333-8333-333333333333",
+      hint: "Run opencloud app dev stop, then opencloud app dev start.",
+    });
+    // A stale copy, which names no next step, keeps pull or --force.
+    expect(structuredCliError(new ApiError(409, { code: "ACTIVE_DEPLOYMENT_CHANGED", details: { latestDeploymentId: null } })).error.hint)
+      .toMatch(/^Run opencloud pull <directory> /);
+    expect(structuredCliError(new ApiError(409, {
+      code: "DEV_MIGRATION_FAILED", message: "Migration 0002 failed", details: { suggestedFix: "Correct the migration source, validate the new draft revision, then apply it again." },
+    })).error.hint).toBe("Correct the migration source, validate the new draft revision, then apply it again.");
+  });
+
+  it("names the unresolved journal entry and a hint added for the failure", () => {
+    const pending = {
+      command: "opencloud app dev start" as const, idempotencyKey: "ocj1:f96d3c45-0000-4000-8000-000000000001", generatedKey: true,
+      state: "attempted" as const, appId: "11111111-1111-4111-8111-111111111111", draftId: "22222222-2222-4222-8222-222222222222", revision: 3,
+    };
+    const failure = withHint(new MutationJournalError("MUTATION_IN_PROGRESS", "An earlier request has not finished.", true, pending), "Run it again.");
+    expect(structuredCliError(failure).error).toEqual({
+      code: "MUTATION_IN_PROGRESS", message: "An earlier request has not finished.", retryable: true, pending, hint: "Run it again.",
+    });
+    // A hint added for this failure replaces OpenCloud's generic one in place.
+    const refused = withHint(new ApiError(409, { code: "ACTIVE_DEPLOYMENT_CHANGED", details: {} }), "Run `opencloud app dev stop .` first.");
+    const error = structuredCliError(refused).error;
+    expect(error.hint).toBe("Run `opencloud app dev stop .` first.");
+    expect(Object.keys(error)).toEqual(["code", "message", "status", "hint", "retryable"]);
+    // Malformed journal coordinates are dropped rather than printed.
+    expect(structuredCliError(new MutationJournalError("MUTATION_IN_PROGRESS", "x", true, { ...pending, idempotencyKey: "has spaces" })).error)
+      .not.toHaveProperty("pending");
   });
 
   it("quotes the answer's x-request-id when the error body has none", () => {

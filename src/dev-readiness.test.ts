@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { developmentReadinessTimeoutMs } from "@opencloud/contracts/control-plane";
+import { classifyComputeError } from "@opencloud/contracts/containers";
 import { ApiError, type OpenCloudClient } from "./api-client.js";
+import { hintOf } from "./cli-contract-error.js";
 import type { SafeMutationCheckpoint } from "./mutation-journal.js";
-import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
+import { applyDevRevisionOnce, refusedApply, resumeDevApply } from "./dev-readiness.js";
 
 const appId = "11111111-1111-4111-8111-111111111111";
 const draftId = "22222222-2222-4222-8222-222222222222";
@@ -25,6 +27,7 @@ function journal(initial: SafeMutationCheckpoint | null = null) {
     checkpointStage: vi.fn(async (value: SafeMutationCheckpoint) => { retained = structuredClone(value); }),
     markAttempted: vi.fn(async () => {}),
     markUnknown: vi.fn(async (code: string): Promise<never> => { throw new Error(code); }),
+    complete: vi.fn(async () => {}),
   };
 }
 function control(responder?: (operation: string, input: unknown, options: unknown) => unknown) {
@@ -122,20 +125,50 @@ describe("development readiness without apply replay", () => {
   it.each([
     ["different session", { ...session(), id: draftId }, undefined, undefined],
     ["different draft", { ...session(), draftId: appId }, undefined, undefined],
-    ["stopped", { ...session(), status: "stopped" }, undefined, undefined],
-    ["stale", { ...session(), status: "stale" }, undefined, undefined],
     ["different session base", { ...session(), baseDeploymentId: appId }, undefined, undefined],
     ["different active revision", { ...session(), activeRevision: { ...active, draftRevision: 4 } }, undefined, undefined],
     ["different server artifact", { ...session(), activeRevision: { ...active, artifactSha256: "c".repeat(64) } }, undefined, undefined],
     ["edited draft", undefined, { ...draft(), revision: 4 }, undefined],
-    ["different app base", undefined, undefined, { ...app(), activeDeploymentId: appId }],
-    ["new release preparing", undefined, undefined, { ...app(), desiredDeploymentId: appId }],
   ])("refuses %s as success and never reapplies", async (_label, observedSession, observedDraft, observedApp) => {
     const run = journal(checkpoint());
     const c = control(operation => ({ getDevSession: observedSession, getDraft: observedDraft, getApp: observedApp })[operation]);
     await expect(resumeDevApply(c.client, run, resumeInput)).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
     expect(c.call.mock.calls.every(([name]) => name.startsWith("get"))).toBe(true);
     expect(run.checkpointStage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a stopped", { ...session(), status: "stopped" }, undefined, "DEV_SESSION_STOPPED", "Run `opencloud app dev start ./app`."],
+    ["an expired", { ...session(), status: "expired" }, undefined, "DEV_SESSION_EXPIRED", "Run `opencloud app dev start ./app`."],
+    ["a stale", { ...session(), status: "stale" }, undefined, "DEV_SESSION_STALE", "Run `opencloud app dev stop ./app`, then `opencloud app dev start ./app`."],
+    ["an overtaken", undefined, { ...app(), activeDeploymentId: appId, desiredDeploymentId: appId }, "ACTIVE_DEPLOYMENT_CHANGED",
+      "Run `opencloud app dev stop ./app`, then `opencloud app dev start ./app`."],
+    ["a soon overtaken", undefined, { ...app(), desiredDeploymentId: appId }, "ACTIVE_DEPLOYMENT_CHANGED",
+      "Run `opencloud app dev stop ./app`, then `opencloud app dev start ./app`."],
+  ])("says %s session can never take the apply, settles it and never reapplies", async (_label, observedSession, observedApp, code, hint) => {
+    const run = journal(checkpoint());
+    const c = control(operation => ({ getDevSession: observedSession, getApp: observedApp })[operation]);
+    const failure = await resumeDevApply(c.client, run, { ...resumeInput, directory: "./app" }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code, message: expect.stringContaining("No apply was repeated") });
+    expect(hintOf(failure)).toBe(hint);
+    expect(c.call.mock.calls.every(([name]) => name.startsWith("get"))).toBe(true);
+    expect(run.checkpoint?.stage).toBe("dev_session_unusable");
+    expect(run.complete).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a sync after a production deploy before sending anything, with both release IDs", async () => {
+    const run = journal({ stage: "validated", artifactSha256: target.artifactSha256, draftId, revision: 3 });
+    const c = control(operation => operation === "getApp" ? { ...app(), activeDeploymentId: activeRevisionId, desiredDeploymentId: activeRevisionId } : undefined);
+    const failure = await applyDevRevisionOnce(c.client, run, target, "key", { directory: ".", command: "sync" }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "ACTIVE_DEPLOYMENT_CHANGED",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote. No apply was sent; your source is kept.",
+      fields: { expectedActiveDeploymentId: null, actualActiveDeploymentId: activeRevisionId },
+    });
+    expect(hintOf(failure)).toBe("Run `opencloud app dev stop .`, then `opencloud app dev start .`.");
+    expect(c.call.mock.calls.some(([name]) => name === "applyDevRevision")).toBe(false);
+    expect(run.markAttempted).not.toHaveBeenCalled();
+    expect(run.complete).toHaveBeenCalledOnce();
   });
 
   it.each([new ApiError(403, { code: "forbidden" }), new ApiError(409, { code: "ACTIVE_DEPLOYMENT_CHANGED" })])(
@@ -146,15 +179,45 @@ describe("development readiness without apply replay", () => {
       expect(run.checkpointStage).not.toHaveBeenCalled();
     });
 
-  it("retains explicit apply diagnostics but subsequent recovery remains read-only", async () => {
+  it.each([
+    ["a gateway's 504", new ApiError(504, "<html>Gateway Timeout</html>")],
+    ["an uncoded 500", new ApiError(500, { message: "failed" })],
+    ["a coded 5xx outside the compute catalog", new ApiError(503, { code: "service_unavailable" })],
+  ])("keeps %s from the apply uncertain, so recovery stays read-only", async (_label, error) => {
+    expect(refusedApply(error)).toBe(false);
     const run = journal();
-    const error = new ApiError(409, { code: "DEV_REVISION_FAILED", details: { phase: "readiness" } });
     const c = control(operation => { if (operation === "applyDevRevision") throw error; });
     await expect(applyDevRevisionOnce(c.client, run, target, "key")).rejects.toBe(error);
     expect(run.checkpoint?.stage).toBe("dev_apply_dispatched");
+    expect(run.complete).not.toHaveBeenCalled();
     const recovered = control();
     await expect(resumeDevApply(recovered.client, run, resumeInput)).resolves.toEqual(session());
     expect(recovered.call.mock.calls.every(([name]) => name.startsWith("get"))).toBe(true);
+  });
+
+  it("records a definite refusal, so running the command again sends a new apply instead of waiting out the deadline", async () => {
+    const full = classifyComputeError("COMPUTE_NO_CAPACITY");
+    const refusal = new ApiError(full.statusCode, full);
+    expect(refusedApply(refusal)).toBe(true);
+    expect(refusedApply(new ApiError(409, { code: "DEV_MIGRATION_FAILED", details: { suggestedFix: "Correct the migration source." } }))).toBe(true);
+    const run = journal();
+    const c = control(operation => { if (operation === "applyDevRevision") throw refusal; });
+    await expect(applyDevRevisionOnce(c.client, run, target, "key", { directory: ".", command: "start" })).rejects.toBe(refusal);
+    expect(run.checkpoint?.stage).toBe("dev_apply_refused");
+    expect(run.complete).toHaveBeenCalledOnce();
+    expect(hintOf(refusal)).toBe(
+      "Nothing was applied, and the development session is kept: run `opencloud app dev start .` again to retry with it, or `opencloud app dev stop .` to end it.",
+    );
+    // A resume reads nothing for a refused apply and dispatches it again.
+    expect(await resumeDevApply(control().client, run, resumeInput)).toBeNull();
+    const retried = control();
+    await expect(applyDevRevisionOnce(retried.client, run, target, "key")).resolves.toEqual(session());
+    expect(retried.call.mock.calls.filter(([name]) => name === "applyDevRevision")).toHaveLength(1);
+    // OpenCloud's own next step is kept rather than replaced.
+    const migration = new ApiError(409, { code: "DEV_MIGRATION_FAILED", details: { suggestedFix: "Correct the migration source." } });
+    const failing = control(operation => { if (operation === "applyDevRevision") throw migration; });
+    await expect(applyDevRevisionOnce(failing.client, journal(), target, "key", { directory: ".", command: "sync" })).rejects.toBe(migration);
+    expect(hintOf(migration)).toBeUndefined();
   });
 
   it("rejects changed local identity and missing or forged recovery coordinates before any request", async () => {

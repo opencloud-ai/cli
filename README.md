@@ -210,6 +210,17 @@ passwordless legacy onboarding, app creation, and app connection are separately
 audited authority/bootstrap boundaries with the recovery limits described
 above.
 
+While a journaled request is unresolved, a different request for the same
+target fails with `MUTATION_IN_PROGRESS`. Its `pending` field names the
+unresolved request (command, idempotency key, state and server coordinates),
+and its `hint` gives the exact command that resumes it with that same key, a
+command that shows what it did, and how to send a separate request instead.
+A key the journal generated, passed back with `--idempotency-key`, resumes
+that same entry; it never starts a second one under the same key. Unknown
+outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `DRAFT_VALIDATION_OUTCOME_UNKNOWN`,
+`MUTATION_OUTCOME_UNKNOWN`) carry the same `pending` field and say what to
+check before deciding on a new key.
+
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every
 linked app, function, and cron schedule while preserving data and releases.
@@ -278,16 +289,32 @@ Mobile, and Reload controls. Keep the raw `previewUrl` for CLI and agent
 inspection; opening it directly in a normal browser may return
 `AUTH_REQUIRED`.
 
-`app dev start` saves the session identity before applying the validated draft.
-Development preparation can take up to 15 minutes. Start and sync send one
-apply request with that allowance; an interrupted reply is reconciled only
-by reading the exact session, draft revision, artifact and production base.
-Rerunning the same command resumes those reads within the original deadline
-and never repeats the apply. If no matching active revision can be confirmed,
-the CLI reports `DEV_APPLY_OUTCOME_UNKNOWN`; the server may still be working.
-Inspect the retained session before deliberately starting another mutation.
-The session read exposes the active revision, not a pending or failed
-preparation result.
+`app dev start` saves the session identity in its recovery journal before
+applying the validated draft. Development preparation can take up to 15
+minutes. Start and sync send one apply request with that allowance; an
+interrupted reply is reconciled only by reading the exact session, draft
+revision, artifact and production base. Rerunning the same command resumes
+those reads within the original deadline and never repeats an apply whose
+outcome is unknown. If no matching active revision can be confirmed, the CLI
+reports `DEV_APPLY_OUTCOME_UNKNOWN`: check with `app dev status`, whose
+`activeRevision.draftRevision` shows whether the apply took effect, and run
+the command again with a new `--idempotency-key` only if it did not.
+
+When OpenCloud refuses the apply itself, with a coded 4xx answer or a compute
+error such as `COMPUTE_NO_CAPACITY`, nothing was applied: the journal records
+the refusal, and running the command again sends a new apply. A gateway error
+or a lost reply stays uncertain as above. A start that ends refused, or with
+an unknown outcome, keeps its development session in `.opencloud/dev.json`, so
+`app dev status`, `containers`, `logs` and `stop` reach it and the next start
+retries with that session and draft instead of creating new ones; `app dev
+verify` says when the session has no applied revision yet.
+
+A session that production has overtaken, or that stopped or expired, fails
+before any apply is sent with `ACTIVE_DEPLOYMENT_CHANGED` (naming the
+session's release and the live one), `DEV_SESSION_STALE`,
+`DEV_SESSION_STOPPED` or `DEV_SESSION_EXPIRED`, as OpenCloud itself answers;
+run `app dev stop`, then `app dev start`, as the error's `hint` says. Any
+error whose OpenCloud answer has `details.suggestedFix` prints it as `hint`.
 
 Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-

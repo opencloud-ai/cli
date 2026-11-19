@@ -17,7 +17,7 @@ import { ApiError, OpenCloudClient } from "./api-client.js";
 import { computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
-import { CliContractError } from "./cli-contract-error.js";
+import { CliContractError, hintOf } from "./cli-contract-error.js";
 import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 
 export interface OperationOptions {
@@ -481,23 +481,41 @@ function safeCode(value: unknown, fallback: string): string {
   return /^[A-Z][A-Z0-9_]{1,99}$/.test(code) ? code : fallback;
 }
 
-/** Names the newer release and the two ways forward for a stale copy. */
-function staleReleaseFields(details: unknown): Record<string, unknown> {
-  const value =
-    details && typeof details === "object"
-      ? (details as Record<string, unknown>)
-      : {};
-  const identifier = (field: string) =>
-    typeof value[field] === "string" || value[field] === null
-      ? { [field]: value[field] }
-      : {};
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** The listed identifiers of an error's details that are strings or null. */
+function identifiers(details: Record<string, unknown>, names: string[]): Record<string, unknown> {
+  return Object.fromEntries(names.flatMap((name) =>
+    (typeof details[name] === "string" && String(details[name]).length <= 200) || details[name] === null
+      ? [[name, details[name]]]
+      : []));
+}
+
+/** The next step OpenCloud names for an error, in `details.suggestedFix`. */
+function suggestedFix(details: Record<string, unknown>): string | null {
+  const value = details.suggestedFix;
+  return typeof value === "string" && value.trim() ? redactMessage(value.trim()).slice(0, 500) : null;
+}
+
+/**
+ * Names the releases involved and the way forward: the server's own next step
+ * when it gives one (a development session production overtook is stopped
+ * and started again), otherwise pull or --force for a stale copy.
+ */
+function staleReleaseFields(details: Record<string, unknown>): Record<string, unknown> {
   return {
-    ...identifier("latestDeploymentId"),
-    ...identifier("latestVersion"),
-    ...identifier("expectedActiveDeploymentId"),
-    hint: "Run opencloud pull <directory> to update this copy and reapply your change, or pass --force to replace the latest release.",
+    ...identifiers(details, ["latestDeploymentId", "latestVersion", "expectedActiveDeploymentId", "actualActiveDeploymentId"]),
+    hint: suggestedFix(details) ??
+      "Run opencloud pull <directory> to update this copy and reapply your change, or pass --force to replace the latest release.",
   };
 }
+
+/** Development sessions OpenCloud refuses because they were overtaken, stopped or expired. */
+const DEV_SESSION_REFUSALS = new Set(["DEV_SESSION_STALE", "DEV_SESSION_STOPPED", "DEV_SESSION_EXPIRED"]);
 
 function apiErrorFields(error: ApiError): Record<string, unknown> {
   const body =
@@ -512,11 +530,19 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
   const compute = computeErrorSchema.safeParse({
     statusCode: error.status, code, message: body.message ?? error.message, details: error.details,
   });
+  const details = Object.keys(record(body.details)).length ? record(body.details) : record(nested.details);
+  const fix = code === "ACTIVE_DEPLOYMENT_CHANGED" ? null : suggestedFix(details);
   return {
     code,
     message: redactMessage(body.message ?? nested.message ?? error.message),
     status: error.status,
-    ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(body.details) : {}),
+    ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(details) : {}),
+    // details.status names the session's state; `status` is already the HTTP status.
+    ...(DEV_SESSION_REFUSALS.has(code)
+      ? { ...identifiers(details, ["sessionId"]), ...(typeof details.status === "string" ? { sessionStatus: details.status } : {}),
+          ...identifiers(details, ["baseDeploymentId"]) }
+      : {}),
+    ...(fix ? { hint: fix } : {}),
     ...(compute.success ? { details: compute.data.details } : {}),
     retryable:
       compute.success ? compute.data.details.retryable : typeof body.retryable === "boolean"
@@ -572,43 +598,92 @@ export function errorCause(
   return null;
 }
 
+const PENDING_STATES = new Set(["prepared", "attempted", "unknown", "completed"]);
+const PENDING_IDENTIFIER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The unresolved journal entry an error is about, as the journal retained it:
+ * its command, key, state and server coordinates, checked field by field.
+ */
+function pendingFields(error: unknown): Record<string, unknown> | null {
+  const value = record((error as { pending?: unknown } | null)?.pending);
+  if (typeof value.command !== "string" || !/^opencloud [a-z][a-z -]{0,80}$/.test(value.command) ||
+      typeof value.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{8,200}$/.test(value.idempotencyKey) ||
+      typeof value.state !== "string" || !PENDING_STATES.has(value.state)) return null;
+  return {
+    command: value.command,
+    idempotencyKey: value.idempotencyKey,
+    generatedKey: value.generatedKey === true,
+    state: value.state,
+    ...(typeof value.unknownCode === "string" && /^[A-Z][A-Z0-9_]{1,99}$/.test(value.unknownCode) ? { unknownCode: value.unknownCode } : {}),
+    ...Object.fromEntries(["appId", "operationId", "draftId", "sessionId"].flatMap((name) =>
+      typeof value[name] === "string" && PENDING_IDENTIFIER.test(String(value[name])) ? [[name, value[name]]] : [])),
+    ...(Number.isSafeInteger(value.revision) && Number(value.revision) > 0 ? { revision: value.revision } : {}),
+  };
+}
+
+/** The keys every structured error owns; extra fields never replace them. */
+const RESERVED_FIELDS = new Set(["code", "message", "status", "retryable", "details", "issues", "cause", "requestId", "pending", "hint"]);
+
+/** Extra identifiers a CLI error names, such as the releases involved. */
+function contractFields(error: unknown): Record<string, unknown> {
+  if (!(error instanceof CliContractError) || !error.fields) return {};
+  return Object.fromEntries(Object.entries(error.fields).flatMap(([name, value]) =>
+    /^[a-z][A-Za-z0-9]{0,63}$/.test(name) && !RESERVED_FIELDS.has(name) && (value === null || typeof value === "number" ||
+      typeof value === "boolean" || (typeof value === "string" && value.length <= 200)) ? [[name, value]] : []));
+}
+
+/**
+ * A failure as the CLI prints it, with what to run next: the unresolved
+ * mutation it concerns and a hint added for this failure, which replaces a
+ * generic one in place.
+ */
 export function structuredCliError(error: unknown): {
   ok: false;
   error: Record<string, unknown>;
 } {
+  const fields = structuredFields(error);
+  const pending = pendingFields(error);
+  const hint = hintOf(error);
+  return {
+    ok: false,
+    error: {
+      ...fields,
+      ...contractFields(error),
+      ...(pending ? { pending } : {}),
+      ...(hint ? { hint: redactMessage(hint) } : {}),
+    },
+  };
+}
+
+function structuredFields(error: unknown): Record<string, unknown> {
   if (error instanceof ApiError) {
-    return { ok: false, error: apiErrorFields(error) };
+    return apiErrorFields(error);
   }
   if (error instanceof OperationTerminalError) {
     return {
-      ok: false,
-      error: {
-        code: error.code,
-        message: redactMessage(error.message),
-        retryable: false,
-        operationId: error.operation.id,
-        operationState: error.operation.state,
-        ...(error.operation.error && typeof error.operation.error === "object"
-          ? {
-              operationErrorCode: safeCode(
-                (error.operation.error as Record<string, unknown>).code,
-                "OPERATION_ERROR",
-              ),
-            }
-          : {}),
-      },
+      code: error.code,
+      message: redactMessage(error.message),
+      retryable: false,
+      operationId: error.operation.id,
+      operationState: error.operation.state,
+      ...(error.operation.error && typeof error.operation.error === "object"
+        ? {
+            operationErrorCode: safeCode(
+              (error.operation.error as Record<string, unknown>).code,
+              "OPERATION_ERROR",
+            ),
+          }
+        : {}),
     };
   }
   if (error instanceof OperationWaitTimeoutError) {
     return {
-      ok: false,
-      error: {
-        code: error.code,
-        message: redactMessage(error.message),
-        retryable: true,
-        operationId: error.operation.id,
-        operationState: error.operation.state,
-      },
+      code: error.code,
+      message: redactMessage(error.message),
+      retryable: true,
+      operationId: error.operation.id,
+      operationState: error.operation.state,
     };
   }
   const candidate =
@@ -624,25 +699,22 @@ export function structuredCliError(error: unknown): {
     ? issueSummary("The input", issues)
     : error instanceof Error ? error.message : (candidate.message ?? error);
   return {
-    ok: false,
-    error: {
-      code: safeCode(candidate.code, "CLI_ERROR"),
-      message: redactMessage(message),
-      retryable: candidate.retryable === true,
-      ...(issues?.length
-        ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }
-        : {}),
-      ...(cause
-        ? {
-            cause: {
-              code: cause.code,
-              ...(cause.message
-                ? { message: redactMessage(cause.message).slice(0, 500) }
-                : {}),
-            },
-          }
-        : {}),
-      ...(requestId ? { requestId } : {}),
-    },
+    code: safeCode(candidate.code, "CLI_ERROR"),
+    message: redactMessage(message),
+    retryable: candidate.retryable === true,
+    ...(issues?.length
+      ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }
+      : {}),
+    ...(cause
+      ? {
+          cause: {
+            code: cause.code,
+            ...(cause.message
+              ? { message: redactMessage(cause.message).slice(0, 500) }
+              : {}),
+          },
+        }
+      : {}),
+    ...(requestId ? { requestId } : {}),
   };
 }
