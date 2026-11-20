@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.21.0
+
+- Accept SDK 2.8.0 pins. Server SDK 2.8.0 lets an AI text, stream, or object
+  call name its `model`, which runs on the same provider as the app's
+  automatic tasks. Deploying a 2.8.0 pin needs a platform release that
+  installs it. SDK 2.3.0 remains the default for new and unpinned apps, and the
+  command surface is unchanged.
+
 ## 3.20.0
 
 - Add full app export and import: source, database and managed files in one
