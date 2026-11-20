@@ -199,7 +199,12 @@ recover an interrupted or timed-out wait without repeating the mutation:
 Every app-owner Agent mutation requires one explicit `--idempotency-key`.
 Reuse it only for retries of the same intended effect; use a new key for
 materially different input. The CLI rejects a missing key before creating a
-journal entry or starting a request. Every success emits one compact JSON
+journal entry or starting a request. A key is 8 through 200 letters, numbers,
+dots, colons, underscores, or dashes. Keys are kept in the journal and sent
+with each request, so the CLI refuses one that looks like a credential (an
+`sk-…` API key, an OpenCloud, Stripe or GitHub token, or a JSON Web Token, by
+its real prefix and length) and names the kind without repeating the key.
+Every success emits one compact JSON
 document; failures emit redacted structured JSON and exit non-zero. `secret set` reads only standard input. `app
 credential-create` requires `--token-file`, refuses overwrite, writes the
 one-time token with mode `0600`, and never includes it in command output.

@@ -1212,6 +1212,44 @@ describe("mutation journal", () => {
     });
   });
 
+  it("takes ordinary keys that only contain a credential prefix's letters, and says why it refuses one that looks like a credential", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = (explicitIdempotencyKey: string) => ({
+      commandId: "opencloud app configure" as const,
+      safeScope: { appId: APP_ID },
+      safeRequest: { action: "configure", key: explicitIdempotencyKey },
+      explicitIdempotencyKey,
+    });
+    // S5: "desk-deploy-001" and "task-abcdefghij" hold "sk-" and ten more
+    // characters, which is not an API key's shape.
+    for (const key of ["s5-otherdesk-deploy-001", "s5-task-abcdefghij", "OC_FOO-deploy-0001", "release-sk-2026-11-20-final"]) {
+      await expect(journal.run(intent(key), async () => "sent"), key).resolves.toBe("sent");
+    }
+    // Built from parts, so no complete synthetic secret sits in the source.
+    const synthetic = "Synthetic0123456789".repeat(3);
+    for (const [key, kind] of [
+      [`s${"k-"}proj-${synthetic}`, "an API secret key (sk-…)"],
+      [`deploy:s${"k-"}${synthetic}`, "an API secret key (sk-…)"],
+      [`oc_${"owner_"}synthetic-key`, "an OpenCloud app-owner credential (oc_owner_…)"],
+      [`oc_${"app_"}${synthetic}`, "an OpenCloud access token (oc_app_… or oc_agent_…)"],
+      [`s${"k_"}live_${synthetic}`, "a Stripe secret key"],
+      [`gh${"p_"}${"A1".repeat(18)}`, "a GitHub token"],
+      [`ey${"J"}hbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl`, "a JSON Web Token"],
+    ] as const) {
+      const refused = journal.run(intent(key), async () => "sent");
+      await expect(refused, key).rejects.toMatchObject({
+        code: "INVALID_IDEMPOTENCY_KEY",
+        message: `This idempotency key looks like ${kind}; don't put credentials in idempotency keys. Choose a key that names the change, such as deploy-2026-11-20-1.`,
+      });
+      expect(String((await refused.catch((error: unknown) => error) as Error).message)).not.toContain(key);
+    }
+    await expect(journal.run(intent("short"), async () => "sent")).rejects.toMatchObject({
+      code: "INVALID_IDEMPOTENCY_KEY",
+      message: "Idempotency keys must be 8 through 200 letters, numbers, dots, colons, underscores, or dashes",
+    });
+  });
+
   it("rejects a foreign runtime root before replaying an unresolved mutation", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const rootA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

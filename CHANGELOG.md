@@ -2,6 +2,12 @@
 
 ## 3.21.0
 
+- An idempotency key is taken for a credential only when it has a real
+  credential's prefix and length, the prefix starting the key or following a
+  character that is not a letter or digit: `s5-otherdesk-deploy-001` and
+  `s5-task-abcdefghij` held `sk-` and ten more characters and were refused.
+  The refusal now names the kind of credential the key looks like, without
+  repeating it, and says not to put credentials in idempotency keys.
 - Validation waits on the in-progress answer OpenCloud actually sends: its
   error filter drops the body's `retryable` flag, which the contract requires,
   so the first "still running" answer used to end the wait with

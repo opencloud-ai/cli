@@ -30,8 +30,27 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,200}$/;
-const CREDENTIAL_LIKE =
-  /(?:\bBearer\b|(?:oc_(?:owner|agent|app)|sk|gh[pousr])[-_][A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/i;
+/**
+ * Credentials by their real prefixes and lengths, each with the kind a refusal
+ * names instead of repeating the value. Apart from the app-owner credential,
+ * which OpenCloud itself refuses anywhere but Authorization, a prefix counts
+ * only at the start or after a character that is not a letter or digit, so
+ * words that merely contain one ("s5-task-abcdefghij", "otherdesk-deploy",
+ * a variable named OC_FOO) are not taken for a key.
+ */
+const CREDENTIAL_SHAPES: ReadonlyArray<readonly [kind: string, shape: RegExp]> = [
+  ["an OpenCloud app-owner credential (oc_owner_…)", /oc_owner_[A-Za-z0-9_-]{8,}/],
+  ["an OpenCloud access token (oc_app_… or oc_agent_…)", /(?<![A-Za-z0-9])oc_(?:app|agent)_[A-Za-z0-9_-]{16,}/],
+  ["an API secret key (sk-…)", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}/],
+  ["a Stripe secret key", /(?<![A-Za-z0-9])[rs]k_(?:live|test)_[A-Za-z0-9]{24,}/],
+  ["a GitHub token", /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{70,})/],
+  ["a JSON Web Token", /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/],
+];
+
+/** The kind of credential a value contains, if it looks like it holds one. */
+export function credentialShape(value: string): string | undefined {
+  return CREDENTIAL_SHAPES.find(([, shape]) => shape.test(value))?.[0];
+}
 const LOCK_STALE_MS = 30_000;
 const LOCK_UPDATE_MS = 5_000;
 const JOURNAL_ROOT_ENTRIES = new Set([
@@ -436,10 +455,19 @@ export function mutationDigest(value: unknown): string {
 
 function validateIdempotencyKey(value: string): string {
   const key = value.trim();
-  if (!SAFE_IDEMPOTENCY_KEY.test(key) || CREDENTIAL_LIKE.test(key)) {
+  if (!SAFE_IDEMPOTENCY_KEY.test(key)) {
     throw new MutationJournalError(
       "INVALID_IDEMPOTENCY_KEY",
-      "Idempotency keys must be 8 through 200 credential-safe letters, numbers, dots, colons, underscores, or dashes",
+      "Idempotency keys must be 8 through 200 letters, numbers, dots, colons, underscores, or dashes",
+    );
+  }
+  // Keys are kept in the journal and sent with each request, so one that
+  // looks like a pasted credential is refused, and never repeated.
+  const credential = credentialShape(key);
+  if (credential) {
+    throw new MutationJournalError(
+      "INVALID_IDEMPOTENCY_KEY",
+      `This idempotency key looks like ${credential}; don't put credentials in idempotency keys. Choose a key that names the change, such as deploy-2026-11-20-1.`,
     );
   }
   return key;
