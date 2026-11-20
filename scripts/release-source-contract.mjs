@@ -48,7 +48,7 @@ function deploymentRecord(release) {
     artifactSha256: release.artifactSha256,
     sdkVersion: "2.3.0",
     manifest: {},
-    state: state.activeDeploymentId === release.id ? "active" : "superseded",
+    state: release.rolledBack ? "rolled_back" : state.activeDeploymentId === release.id ? "active" : "superseded",
     rollbackOfDeploymentId: null,
     error: null,
     createdAt: now,
@@ -354,12 +354,28 @@ try {
   const error = JSON.parse(refused.stderr.trim().split("\n").at(-1)).error;
   assert.equal(error.code, "ACTIVE_DEPLOYMENT_CHANGED");
   assert.equal(error.latestDeploymentId, newer);
-  assert.match(error.hint, /opencloud pull/);
+  const newerVersion = state.deployments.get(newer).version;
+  assert.equal(error.hint, `Release ${newerVersion} (${newer}) replaced the one this copy is based on. Run \`opencloud pull ${app}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${app} --deployment ${newer} --merged\`), then deploy again; or deploy with --force to replace it.`);
   assert.equal(state.activeDeploymentId, newer);
 
   // 4. --force replaces the newer release deliberately.
   await runCli(["deploy", app, "--force"]);
   assert.equal(deployRequest().query, "");
+  assert.notEqual(state.activeDeploymentId, newer);
+
+  // 4b. After a rollback, the release this copy is based on is rolled_back:
+  //     the hint names the exact command that records the live one as its
+  //     base, and following it lets the copy deploy again.
+  const forced = state.activeDeploymentId;
+  state.deployments.get(forced).rolledBack = true;
+  state.activeDeploymentId = newer;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3b');\n");
+  const afterRollback = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.equal(afterRollback.code, "ACTIVE_DEPLOYMENT_CHANGED");
+  assert.equal(afterRollback.hint, `The release this copy is based on was rolled back, and release ${newerVersion} (${newer}) is live. To deploy this copy over it, run \`opencloud pull ${app} --deployment ${newer} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`);
+  await runCli(["pull", app, "--deployment", newer, "--merged"]);
+  await runCli(["deploy", app]);
+  assert.equal(deployRequest().query, `?expectedActiveDeploymentId=${newer}`);
   assert.notEqual(state.activeDeploymentId, newer);
 
   // 5. When the server resolves the author manifest differently, the CLI keeps

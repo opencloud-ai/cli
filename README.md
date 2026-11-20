@@ -400,9 +400,12 @@ JSON results add `sourceOnlyFiles` (up to 100 paths, in the same order) and
 After a successful `deploy`, `app dev promote`, or `pull`, the CLI records the
 release a working copy is based on in `.opencloud/base.json`. The next
 `deploy` or `app dev start` sends it. If someone has released since, OpenCloud
-refuses with `ACTIVE_DEPLOYMENT_CHANGED` and names the latest release. Update
-the copy and reapply your change, or pass `--force` to replace that release
-deliberately:
+refuses with `ACTIVE_DEPLOYMENT_CHANGED` and names the latest release, and the
+error's `hint` gives the exact command for this copy. After a rollback (the
+copy's base was rolled back), `pull <dir> --deployment <live-release> --merged`
+records the live release as the base without changing files. After someone
+else's newer release, update the copy and reapply your change. Either way you
+can pass `--force` to replace that release deliberately:
 
 ```bash
 "$OPENCLOUD_CLI" pull "$APP_DIR"

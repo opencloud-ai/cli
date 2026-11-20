@@ -161,7 +161,7 @@ import {
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
 import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
-import { commandLine, journalHint, notConnectedMessage } from "./guidance.js";
+import { commandLine, journalHint, notConnectedMessage, shellArgument } from "./guidance.js";
 import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
@@ -1159,6 +1159,38 @@ async function settleStaleReleaseRefusal<T>(
       (error.body as { code?: unknown } | null)?.code === "ACTIVE_DEPLOYMENT_CHANGED"
     ) {
       await run.complete();
+    }
+    throw error;
+  }
+}
+
+/**
+ * The way forward from a deploy OpenCloud refused with ACTIVE_DEPLOYMENT_CHANGED,
+ * with this copy's directory and the release to base it on. After a
+ * rollback (this copy's base is now rolled_back), recording the live release
+ * as the base is enough: it is older, so this copy already has it. After
+ * someone else's newer release, pull that release first.
+ */
+async function withStaleReleaseHint<T>(control: OpenCloudClient, appId: string, directory: string, request: Promise<T>): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "ACTIVE_DEPLOYMENT_CHANGED") {
+      const details = (error.details && typeof error.details === "object" ? error.details : {}) as Record<string, unknown>;
+      const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+      const latest = uuid(details.latestDeploymentId) ?? uuid(details.actualActiveDeploymentId);
+      const base = uuid(details.expectedActiveDeploymentId);
+      if (latest) {
+        const release = typeof details.latestVersion === "string" ? `release ${details.latestVersion} (${latest})` : `release ${latest}`;
+        const baseState = base
+          ? await control.get(`/v1/apps/${encoded(appId)}/deployments/${encoded(base)}`)
+            .then((value) => (value as { state?: unknown }).state, () => null)
+          : null;
+        const dir = shellArgument(directory);
+        withHint(error, baseState === "rolled_back"
+          ? `The release this copy is based on was rolled back, and ${release} is live. To deploy this copy over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`
+          : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then deploy again; or deploy with --force to replace it.`);
+      }
     }
     throw error;
   }
@@ -5053,7 +5085,7 @@ addOperationOptions(
               "The deployment checkpoint is missing its source draft",
             );
           }
-          started = await settleStaleReleaseRefusal(
+          started = await withStaleReleaseHint(context.control, appId, String(directory), settleStaleReleaseRefusal(
             run,
             context.control.call(
               "deployDraft",
@@ -5063,7 +5095,7 @@ addOperationOptions(
                 timeoutMs: 120_000,
               },
             ),
-          );
+          ));
           if (operationFrom(started)?.id !== run.operationId) {
             throw new CliContractError(
               "MUTATION_REPLAY_MISMATCH",
@@ -5082,7 +5114,7 @@ addOperationOptions(
           );
           draftId = synchronized.draftId;
           await run.markAttempted();
-          started = await settleStaleReleaseRefusal(
+          started = await withStaleReleaseHint(context.control, appId, String(directory), settleStaleReleaseRefusal(
             run,
             context.control.call(
               "deployDraft",
@@ -5092,7 +5124,7 @@ addOperationOptions(
                 timeoutMs: 120_000,
               },
             ),
-          );
+          ));
           const operation = operationFrom(started);
           if (!operation) {
             throw new CliContractError(

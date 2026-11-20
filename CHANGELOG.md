@@ -74,6 +74,12 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- A deploy refused with `ACTIVE_DEPLOYMENT_CHANGED` gives the exact recovery
+  in its hint, with this copy's directory and the release to base it on: after
+  a rollback (the copy's base was rolled back),
+  `opencloud pull <dir> --deployment <live> --merged`; after someone else's
+  newer release, `opencloud pull <dir>` (or `--merged` once merged by hand);
+  either way, or `--force`.
 - `deployment list`, `deployment get`, `operation get` and `operation list`
   work from the app ID alone with the account login when the folder isn't
   connected (or is connected to another app). Container, log and metric reads
