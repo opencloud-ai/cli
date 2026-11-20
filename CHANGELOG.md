@@ -68,6 +68,12 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- A manifest with containers, or a container frontend, fails with
+  `COMPUTE_NOT_OFFERED` ("This installation doesn't run containers") before
+  `deploy`, `app dev start` or `sync` upload anything when the installation's
+  public `/v1/installation` says it doesn't run them, instead of with the
+  server's SDK-version and unknown-key diagnostics. A server without that
+  answer is left to its own validation.
 - `/version` markers count only when they are exactly 1; any other value reads
   as absent (the earlier flow), not as `API_CONTRACT_MISMATCH` on every
   journaled command.

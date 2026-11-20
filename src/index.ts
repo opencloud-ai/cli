@@ -24,9 +24,11 @@ import {
   appDomainAddSchema,
   appImportReviewSchema,
   installAppPackageRequestSchema,
+  installationViewSchema,
   portabilityLimits,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
+import { unsupportedComputeCapabilities } from "@opencloud/contracts/containers";
 import { ApiError, OpenCloudClient } from "./api-client.js";
 import { validateDraftWithProgress } from "./draft-validation.js";
 import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
@@ -991,12 +993,44 @@ function sourceOnlyFields(upload: DraftUpload): Partial<ReturnType<typeof source
   return upload.mode === "source" ? sourceOnlyResult(upload.sourceOnlyFiles) : {};
 }
 
+const COMPUTE_CAPABILITY_NAMES: Readonly<Record<string, string>> = {
+  jobs: "container jobs", services: "container services", workers: "container workers", containerFrontend: "a container frontend",
+};
+
+/**
+ * A manifest with containers, sent to an installation that doesn't run them,
+ * fails its validation with generic SDK-version and unknown-key diagnostics
+ * (2.35.x). The public /v1/installation names what an installation runs, so
+ * say it plainly first. An installation without that answer, or one this CLI
+ * can't read, is left to its own validation.
+ */
+async function assertContainersOffered(control: OpenCloudClient, bundle: Awaited<ReturnType<typeof buildBundle>>): Promise<void> {
+  const manifest = bundle.manifest;
+  if (manifest.schemaVersion !== 3 || (!manifest.containers?.length && !("container" in manifest.frontend))) return;
+  let installation: unknown;
+  try {
+    installation = await control.get("/v1/installation", { cacheControl: "no-cache" });
+  } catch {
+    return;
+  }
+  const view = installationViewSchema.safeParse(installation);
+  if (!view.success) return;
+  const compute = view.data.capabilities.compute;
+  const unsupported = unsupportedComputeCapabilities({ containers: manifest.containers ?? [], frontend: manifest.frontend }, compute);
+  if (!unsupported.length) return;
+  const missing = unsupported.map((name) => COMPUTE_CAPABILITY_NAMES[name] ?? name);
+  throw callerFailure(new CliContractError("COMPUTE_NOT_OFFERED", Object.values(compute).some(Boolean)
+    ? `This installation doesn't run ${missing.join(" or ")}. Remove them from ${bundle.sourceManifest} to use this app here.`
+    : `This installation doesn't run containers. Remove the containers, and a container frontend, from ${bundle.sourceManifest} to use this app here.`));
+}
+
 /** Chooses how a draft is uploaded, from what this API supports. */
 async function planDraftUpload(
   control: OpenCloudClient,
   sourceRoot: string,
   bundle: Awaited<ReturnType<typeof buildBundle>>,
 ): Promise<DraftUpload> {
+  await assertContainersOffered(control, bundle);
   const bundleOnly = async (): Promise<DraftUpload> => ({
     mode: "bundle",
     files: await bundleDraftFiles(sourceRoot, bundle),

@@ -31,6 +31,8 @@ const state = {
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
+  /** What GET /v1/installation answers; null answers 404, as servers before it did. */
+  installation: null,
   /** A 2.35.x server: how long it holds the next frontend-build validation. */
   legacyHoldMs: 0,
   /** A 2.35.x server: frontend-build validations to answer FRONTEND_BUILD_BUSY first. */
@@ -149,6 +151,9 @@ const server = createServer(async (request, response) => {
   const parts = url.pathname.split("/").filter(Boolean);
   if (url.pathname === "/version") {
     return send(response, 200, { version: "9.9.9", commit: "contract", builtAt: now, releaseId: "platform-v9.9.9", contracts: state.contracts });
+  }
+  if (url.pathname === "/v1/installation") {
+    return state.installation ? send(response, 200, state.installation) : send(response, 404, { code: "NOT_FOUND", message: "not found" });
   }
   if (parts[0] === "v1" && parts[1] === "operations") {
     const release = [...state.deployments.values()].find((value) => value.operationId === parts[2]);
@@ -484,7 +489,35 @@ try {
   assert.match(legacy.stderr, /OpenCloud is still building this app's frontend .*validating the same revision again/);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "e".repeat(64));
 
-  // 15. An API that cannot build frontends refuses before creating a draft.
+  // 15. A manifest with containers, on an installation that doesn't run them,
+  //     is refused plainly before any draft; one that runs them, or a server
+  //     too old to say, gets the manifest as before.
+  const containerApp = path.join(temporary, "container-app");
+  await writeTree(containerApp, {
+    "opencloud.yaml": `schemaVersion: 3\nappId: ${appId}\nfrontend:\n  container: web\ncontainers:\n  - name: web\n    kind: service\n    image: registry.example/web:1\n    service:\n      startupProbe: { path: /ready }\n      readinessProbe: { path: /ready }\n`,
+  });
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 };
+  const draftsBeforeContainers = state.drafts.size;
+  for (const installation of [
+    { schemaVersion: 1, capabilities: { organisations: true } },
+    { schemaVersion: 1, capabilities: { compute: { jobs: true, services: false, workers: true, containerFrontend: false } } },
+  ]) {
+    state.installation = installation;
+    const refusedContainers = JSON.parse((await runCli(["deploy", containerApp], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+    assert.equal(refusedContainers.code, "COMPUTE_NOT_OFFERED");
+    assert.equal(refusedContainers.message, installation.capabilities.compute
+      ? "This installation doesn't run container services or a container frontend. Remove them from opencloud.yaml to use this app here."
+      : "This installation doesn't run containers. Remove the containers, and a container frontend, from opencloud.yaml to use this app here.");
+  }
+  assert.equal(state.drafts.size, draftsBeforeContainers, "a draft was created for a manifest the installation can't run");
+  state.installation = { schemaVersion: 1, capabilities: { compute: { jobs: true, services: true, workers: true, containerFrontend: true } } };
+  state.localDigest = JSON.parse((await runCli(["validate", containerApp])).stdout).artifactSha256;
+  state.validationDigests = [];
+  await runCli(["deploy", containerApp]);
+  assert.equal(state.drafts.size, draftsBeforeContainers + 1);
+  state.installation = null;
+
+  // 16. An API that cannot build frontends refuses before creating a draft.
   state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 };
   const drafts = state.drafts.size;
   const unsupported = await runCli(["deploy", built], { status: 1 });
