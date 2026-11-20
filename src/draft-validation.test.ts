@@ -112,6 +112,20 @@ describe("CLI authoritative validation", () => {
     expect(request.journal.checkpoint?.validation).toMatchObject({ state: "result", validationId: result.id, passed: true, artifactSha256: result.artifactSha256 });
   });
 
+  it("waits on the in-progress answer OpenCloud sends, whose body lacks the retryable flag", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    // OpenCloud's error filter drops retryable from the body the contract describes.
+    const served = new ApiError(429, { statusCode: 429, code: "DRAFT_VALIDATION_IN_PROGRESS",
+      message: "Validation is pending; wait and validate this exact revision again to obtain its result",
+      details: { appId, draftId, revision: 3, retryAfterSeconds: 2 } });
+    const request = input(plain), call = vi.fn().mockRejectedValueOnce(served).mockRejectedValueOnce(served).mockResolvedValue(result);
+    const pending = validateDraftWithProgress({ call } as unknown as OpenCloudClient, request);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await expect(pending).resolves.toEqual(result);
+    expect(states(request)).toEqual(["dispatched", "progress", "dispatched", "progress", "dispatched", "result"]);
+  });
+
   it("writes dispatch before transport, and sends a request whose reply never came again on the next run", async () => {
     const request = input();
     const call = vi.fn(async () => {

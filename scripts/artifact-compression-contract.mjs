@@ -220,14 +220,14 @@ const server = createServer(async (request, response) => {
       if (state.busyValidation) {
         state.busyValidation = false;
         response.setHeader("Retry-After", "2");
-        return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+        return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS",
           details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
       }
       if (state.interruptValidation && (!state.interruptCanonicalOnly || draft.files.has("opencloud.json"))) {
         if (state.busyBeforeInterruption) {
           state.busyBeforeInterruption = false;
           response.setHeader("Retry-After", "1");
-          return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+          return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS",
             details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 1 } });
         }
         const interrupt = state.interruptValidation;

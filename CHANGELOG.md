@@ -2,6 +2,12 @@
 
 ## 3.21.0
 
+- Validation waits on the in-progress answer OpenCloud actually sends: its
+  error filter drops the body's `retryable` flag, which the contract requires,
+  so the first "still running" answer used to end the wait with
+  `DRAFT_VALIDATION_IN_PROGRESS` and `retryable: false`. An error without a
+  retryable flag of its own now prints `retryable` as the client read it:
+  `details.retryable`, else true for 408, 425, 429 and 5xx.
 - Allow up to 15 minutes for development container readiness. Save the session
   before applying, and reconcile lost start/sync apply replies through exact
   reads without automatically repeating the request. The reads back off from

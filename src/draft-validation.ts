@@ -52,6 +52,21 @@ function interruptOnSigint(): { signal: AbortSignal; release: () => void } {
   return { signal: controller.signal, release: () => { process.off("SIGINT", onSigint); } };
 }
 
+/**
+ * OpenCloud builds DRAFT_VALIDATION_IN_PROGRESS with retryable: true, but its
+ * error filter drops that flag from the body, which the contract (and the
+ * vendored wait loop) require. The status, code and details identify the
+ * answer, so the flag is restored before either reads it; without this the
+ * first "still running" answer ended every wait.
+ */
+function inProgressAnswer(error: ApiError): ApiError {
+  const body = error.body;
+  if (error.status !== 429 || error.code !== "DRAFT_VALIDATION_IN_PROGRESS" || !body || typeof body !== "object" || "retryable" in body) {
+    return error;
+  }
+  return new ApiError(error.status, { ...body, retryable: true }, { requestId: error.requestId });
+}
+
 /** 503 APP_LOCK_BUSY: OpenCloud says this request did not start validation. */
 function admissionBusy(error: ApiError): boolean {
   return error.status === 503 && error.code === "APP_LOCK_BUSY";
@@ -124,8 +139,9 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
         await input.journal.checkpointValidation({ ...coordinates, state: "result", validationId: validation.id,
           passed: validation.passed, artifactSha256: validation.artifactSha256 });
         return result;
-      } catch (error) {
-        if (!(error instanceof ApiError)) throw error;
+      } catch (caught) {
+        if (!(caught instanceof ApiError)) throw caught;
+        const error = inProgressAnswer(caught);
         const parsed = error.status === 429 && error.retryable ? draftValidationInProgressSchema.safeParse(error.body) : null;
         if (parsed?.success && parsed.data.details.appId === input.appId && parsed.data.details.draftId === input.draftId &&
             parsed.data.details.revision === input.revision) {

@@ -657,7 +657,8 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
         ? body.retryable
         : typeof nested.retryable === "boolean"
           ? nested.retryable
-          : error.status >= 500,
+          // As the client read it: details.retryable, else 408, 425, 429 and 5xx.
+          : error.retryable,
     ...(typeof body.requestId === "string"
       ? { requestId: body.requestId }
       : typeof nested.requestId === "string"

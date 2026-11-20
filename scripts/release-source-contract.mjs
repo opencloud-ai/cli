@@ -216,7 +216,8 @@ const server = createServer(async (request, response) => {
       if (state.validationBusy > 0) {
         state.validationBusy -= 1;
         response.setHeader("Retry-After", "2");
-        return send(response, 429, { statusCode: 429, code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
+        // As OpenCloud answers: its error filter drops the retryable flag.
+        return send(response, 429, { statusCode: 429, code: "DRAFT_VALIDATION_IN_PROGRESS",
           message: "Validation is pending; validate this exact revision again",
           details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
       }

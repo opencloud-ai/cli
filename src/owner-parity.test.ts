@@ -182,6 +182,14 @@ describe("owner-parity CLI helpers", () => {
     ).rejects.toBeInstanceOf(OperationWaitTimeoutError);
   });
 
+  it("prints retryable as the client read it when the answer has no flag of its own", () => {
+    expect(structuredCliError(new ApiError(429, { code: "RATE_LIMITED", message: "slow down" })).error.retryable).toBe(true);
+    expect(structuredCliError(new ApiError(404, { code: "NOT_FOUND", message: "missing" })).error.retryable).toBe(false);
+    expect(structuredCliError(new ApiError(503, { code: "busy", message: "busy" })).error.retryable).toBe(true);
+    expect(structuredCliError(new ApiError(503, { code: "gone", message: "gone", details: { retryable: false } })).error.retryable).toBe(false);
+    expect(structuredCliError(new ApiError(429, { code: "LIMITED", message: "no", retryable: false })).error.retryable).toBe(false);
+  });
+
   it("names why a compensated deploy failed: the release's own error, its exit code, and the logs that show it", async () => {
     const appId = "11111111-1111-4111-8111-111111111111", deploymentId = "22222222-2222-4222-8222-222222222222";
     const failed = { id: "33333333-3333-4333-8333-333333333333", appId, deploymentId, state: "failed", type: "deploy",
