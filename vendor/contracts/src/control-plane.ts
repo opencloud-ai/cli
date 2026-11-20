@@ -189,6 +189,10 @@ const platformVersionOutput = z.object({
     deployPreconditions: z.literal(1).optional(),
     /** Validation builds frontends that declare frontend.build. */
     platformBuilds: z.literal(1).optional(),
+    /** Validation honours expectedRevision: a request joins that revision's
+     * run and answers DRAFT_VALIDATION_IN_PROGRESS while it lasts. Without
+     * it, keep the earlier flow: a long wait, retrying FRONTEND_BUILD_BUSY. */
+    pinnedDraftValidation: z.literal(1).optional(),
   }),
 });
 
@@ -1433,6 +1437,27 @@ export const accountOperationsPageQuerySchema =
 
 export const appLogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 
+/**
+ * The raw log query's body: open, as it always was, plus two optional
+ * filters. Without a development session it reads production lines only.
+ * An installation without compute describes neither filter with containers.
+ */
+export function appLogsQueryBodySchema(compute: boolean) {
+  return z
+    .object({
+      surface: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(`Only lines from this surface: ${compute ? "function, container, http, ai or platform" : "function, http, ai or platform"}.`),
+      developmentSessionId: uuid
+        .optional()
+        .describe(`Read this development session's ${compute ? "Function and container" : "Function"} lines instead of production lines. The session must belong to the app.`),
+    })
+    .catchall(z.unknown());
+}
+
 const appLogsPageBaseFields = {
     contains: z.string().max(200).optional(),
     level: appLogLevelSchema.optional(),
@@ -1442,7 +1467,7 @@ const appLogsPageBaseFields = {
       .min(1)
       .max(200)
       .optional()
-      .describe("Where the lines came from: function, container, http, ai or platform. functions and runtime (the older name) also select function, and containers selects container. Any other value is refused."),
+      .describe("Where the lines came from: function, container, http, ai or platform. functions and runtime (the older name) also select function, containers selects container, and page, rest and storage select http. Any other value, realtime and cron included, is refused."),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
     cursor: z.string().max(2_048).optional(),
@@ -2989,7 +3014,7 @@ getAiConnectionModels: operation({
     path: "/version",
     summary: "Get platform version and compatibility contracts",
     description:
-      "Returns non-secret build metadata and explicitly activated client compatibility markers without caching the response. CLI mutation-journal support is safe only when contracts.cliMutationJournal is 1; absence means clients must fail before a journaled mutation. Clients should request revalidation before relying on the marker.",
+      "Returns non-secret build metadata and explicitly activated client compatibility markers without caching the response. CLI mutation-journal support is safe only when contracts.cliMutationJournal is 1; absence means clients must fail before a journaled mutation. contracts.pinnedDraftValidation is 1 when draft validation honours expectedRevision; without it, a client keeps the earlier validation flow. Clients should request revalidation before relying on the marker.",
     auth: "none",
     scopes: [],
     input: emptyBody,
@@ -5376,7 +5401,7 @@ getAiConnectionModels: operation({
     description: "Runs an app-scoped, bounded log query.",
     auth: "bearer",
     scopes: ["app:observe"],
-    input: appPath.extend({ body: jsonObject }),
+    input: appPath.extend({ body: appLogsQueryBodySchema(true) }),
     output: jsonObject,
     bodyKey: "body",
     idempotency: "none",
@@ -5663,7 +5688,10 @@ export interface ComputeOffOperationView {
  * Installations without compute keep these shared operations exactly as they
  * were before container compute, so agent-facing text and schemas match the
  * running installation. MCP builds its tool surface from them there; the
- * surface sits behind accepted connector submissions, so it must not change.
+ * surface sits behind accepted connector submissions, so it must not change
+ * without the user's decision. One has been made: `queryLogs` gained its
+ * surface and development-session filters on every installation, described
+ * here without containers.
  */
 export const computeOffOperationViews: { readonly [K in ControlPlaneOperationId]?: ComputeOffOperationView } = {
   validateDraft: {
@@ -5689,6 +5717,9 @@ export const computeOffOperationViews: { readonly [K in ControlPlaneOperationId]
   },
   queryLogsPage: {
     input: controlPlaneOperations.queryLogsPage.input.extend({ body: appLogsPageRequestV1Schema }),
+  },
+  queryLogs: {
+    input: controlPlaneOperations.queryLogs.input.extend({ body: appLogsQueryBodySchema(false) }),
   },
 };
 

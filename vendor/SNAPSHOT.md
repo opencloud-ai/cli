@@ -75,6 +75,15 @@ exports the `ComputeInstanceDiagnostics` type, and the protocol carries the
 platform's current internal transport. The symbols the vendored contracts
 import from it keep their shapes. The trimmed `package.json` stubs and the
 brand and installer snapshots keep their earlier provenance.
+`contracts/src/control-plane.ts` is refreshed verbatim from platform
+`9e3803b49`, the final platform head for this release: `/version` adds
+`contracts.pinnedDraftValidation`, which the CLI requires before it pins
+validation to a revision; the raw log query describes its optional `surface`
+and `developmentSessionId` filters (the CLI's plain `logs` still sends its
+body as before); and the log page's surface lists `page`, `rest` and
+`storage` as names for `http`. Every other vendored file is byte-identical to
+that commit, except the trimmed `package.json` stubs and the brand and
+installer snapshots noted above.
 
 Validation waiting takes `contracts/src/control-plane.test.ts` and
 `control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`
