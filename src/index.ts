@@ -138,6 +138,7 @@ import {
   MutationJournal,
   MutationJournalError,
   assertAppOwnerMutationJournalDirectory,
+  credentialShape,
   mutationDigest,
   resolveMutationJournalDirectory,
   type MutationIntentSpec,
@@ -4226,8 +4227,9 @@ app
     let accessToken: string | undefined;
     if (options.accessTokenEnv !== undefined) {
       const name = String(options.accessTokenEnv);
-      // A token given here by mistake is refused without being repeated.
-      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || /^oc_/i.test(name)) {
+      // A token given here by mistake is refused without being repeated. Only
+      // a value shaped like one is taken for it: OC_FOO is a variable's name.
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || credentialShape(name)) {
         throw new CliContractError("INVALID_OPTION", "--access-token-env takes the name of an environment variable, not the token");
       }
       accessToken = process.env[name]?.trim() || undefined;

@@ -341,7 +341,12 @@ describe("app request with an app access token", spawning, () => {
     const wrong = await run([...base, "--access-token-env", "ROUTE_TEST_TOKEN"], context, { ROUTE_TEST_TOKEN: foreign, OPENCLOUD_EDGE_URL: apiUrl });
     expect(JSON.parse(wrong.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_INVALID" });
     expect(wrong.stderr).not.toContain("synthetic-control-plane-credential");
-    for (const given of [token, "oc_app_Synthetic0123456789abcdefWithoutHyphens"]) {
+    // S5: a variable whose name starts with OC_ is a name, not a token.
+    const unset = await run([...base, "--access-token-env", "OC_FOO"], context, { OC_FOO: "", OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(unset.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_MISSING", message: expect.stringContaining("The environment variable OC_FOO is not set") });
+    const named = await run([...base, "--access-token-env", "OC_FOO"], context, { OC_FOO: foreign, OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(named.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_INVALID" });
+    for (const given of [token, "oc_app_Synthetic0123456789abcdefWithoutHyphens", `gh${"p_"}${"A1".repeat(18)}`]) {
       const valueGiven = await run([...base, "--access-token-env", given], context, { OPENCLOUD_EDGE_URL: apiUrl });
       expect(JSON.parse(valueGiven.stderr).error).toMatchObject({ code: "INVALID_OPTION" });
       expect(valueGiven.stderr).not.toContain(given);

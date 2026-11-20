@@ -2,6 +2,9 @@
 
 ## 3.21.0
 
+- `app request --access-token-env` takes any variable name, `OC_FOO`
+  included; it refuses only a name shaped like a token itself (`oc_app_…` at
+  a token's length, or another credential), still without repeating it.
 - An idempotency key is taken for a credential only when it has a real
   credential's prefix and length, the prefix starting the key or following a
   character that is not a letter or digit: `s5-otherdesk-deploy-001` and
