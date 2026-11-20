@@ -7012,6 +7012,15 @@ program
   .option("--to <iso>", "ISO time", new Date().toISOString())
   .option("--aggregation <name>", "none, sum, avg, max, min, or rate (per second: a counter's increments, a gauge's change between steps)", "none")
   .option("--step <seconds>", "query step", "60")
+  .addHelpText("after", `
+The answer is OpenCloud's, in Prometheus's matrix shape:
+  {"status":"success","data":{"resultType":"matrix","result":[
+    {"metric":{"<label>":"<value>"},             one series per label set
+     "values":[[<unix seconds>,"<value>"], ...]}  at most one point per step, at its start
+  ]}}
+A step is --step seconds, or longer when a long window would need too many points.
+A custom.<name> metric has one series per dimension set (a gauge's latest value,
+or a counter's sum, in each step); --aggregation combines the series into one.`)
   .action(async (appId, options) =>
     output(
       await client().post(`/v1/apps/${appId}/metrics/query`, {

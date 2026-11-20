@@ -724,6 +724,12 @@ one step to the next:
 "$OPENCLOUD_CLI" metrics "$APP_ID" --metric custom.backlog_depth --aggregation max
 ```
 
+The answer keeps Prometheus's matrix shape: `data.result` holds one series per
+label set, each with `metric` (its labels) and `values`, a list of
+`[unix seconds, "value"]` points, at most one per step at the step's start. A
+step is `--step` seconds, or longer when a long window would need too many
+points.
+
 On an installation without containers, OpenCloud refuses `custom.` names.
 
 ## Verification

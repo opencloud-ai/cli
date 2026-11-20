@@ -67,6 +67,10 @@
 - `app dev logs` accepts `--page`, as `logs` does, and both help texts say when
   they return a page: development logs always do, while `logs` without
   `--page` or a page filter keeps the raw answer earlier CLIs printed.
+- `metrics --help` explains the answer: Prometheus's matrix shape, one series
+  per label set with at most one `[unix seconds, "value"]` point per step, at
+  its start, that a long window lengthens the step, and how a `custom.<name>`
+  metric's dimension sets and `--aggregation` map onto series.
 - `logs` and `app dev logs` name the surfaces `--surface` accepts in their help
   (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
   `containers`, `page`, `rest` and `storage` for `http`, and `runtime`, the

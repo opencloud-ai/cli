@@ -383,6 +383,10 @@ describe("metrics names", spawning, () => {
     const text = help.stdout.replace(/\s+/g, " ");
     expect(text).toContain("--metric <name> a platform series, or custom.<name> for a metric the app records (a container's recordMetric or the browser SDK)");
     expect(text).toContain("rate (per second: a counter's increments, a gauge's change between steps)");
+    // How to read the answer: series labels and [timestamp, value] points.
+    expect(text).toContain(`"values":[[<unix seconds>,"<value>"], ...]} at most one point per step, at its start`);
+    expect(text).toContain("A step is --step seconds, or longer when a long window would need too many points.");
+    expect(text).toContain("A custom.<name> metric has one series per dimension set");
   });
 });
 
