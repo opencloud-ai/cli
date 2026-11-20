@@ -1,6 +1,7 @@
 /** Browser-safe control-plane schemas and operation registry. */
 export * from "./control-plane.js";
 export * from "./containers.js";
+export type { ComputeInstanceDiagnostics } from "./compute-observation.js";
 export * from "./agent-task-dashboard.js";
 export * from "./app-domains.js";
 export * from "./organisation-directory.js";

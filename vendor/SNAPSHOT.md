@@ -67,6 +67,14 @@ Upstream `compute-observation.test.ts` and `control-plane-client/src/compute.tes
 also changed in that range and are still not copied: they import the private
 administrator contracts and client. The CLI's own tests and
 `test:contract` read the new receipt instead.
+`contracts/src/control-plane-browser.ts` and
+`compute-protocol/src/{index.ts,index.test.ts,host-quiescence.test.ts}` are
+then refreshed verbatim from platform `3fcfd7251` (the same files as at
+`2858c4d11`), which the 3.21 candidate had drifted from: the browser entry
+exports the `ComputeInstanceDiagnostics` type, and the protocol carries the
+platform's current internal transport. The symbols the vendored contracts
+import from it keep their shapes. The trimmed `package.json` stubs and the
+brand and installer snapshots keep their earlier provenance.
 
 Validation waiting takes `contracts/src/control-plane.test.ts` and
 `control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`
