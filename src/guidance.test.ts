@@ -70,12 +70,12 @@ describe("commands in guidance", () => {
 describe("a folder without an app connection", () => {
   it("asks a signed-in person only to connect the folder", () => {
     expect(notConnectedMessage({ signedIn: true })).toBe(
-      "This folder is not connected to an app. You are signed in, so run opencloud app connect <app-id> here, or run this command in a folder connected to the app.",
+      "This folder is not connected to an app. You are signed in, so run opencloud app connect <app-id> here, or run this command in a folder connected to the app. Your login reads an app, its deployments and operations from anywhere, but this command needs the app's own connection.",
     );
     expect(notConnectedMessage({ signedIn: true, appId: appId.toUpperCase() })).toContain(`run opencloud app connect ${appId} here`);
     expect(notConnectedMessage({ signedIn: true, appId: "not-an-id" })).toContain("opencloud app connect <app-id>");
     expect(notConnectedMessage({ signedIn: true, directory: "../my app" })).toBe(
-      "The folder '../my app' is not connected to an app. You are signed in, so run opencloud app connect <app-id> in that folder.",
+      "The folder '../my app' is not connected to an app. You are signed in, so run opencloud app connect <app-id> in that folder. Your login reads an app, its deployments and operations from anywhere, but this command needs the app's own connection.",
     );
   });
 

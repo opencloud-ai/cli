@@ -408,6 +408,26 @@ function client(cwd?: string): OpenCloudClient {
 }
 
 /**
+ * For reads OpenCloud lets an account login make (scope app:read: an app's
+ * deployments and operations): the folder's own credential when it is
+ * connected to this app (or --token, or an Agent session), otherwise the
+ * person's account login, so the command works from the app ID anywhere.
+ * Container, log and metric reads need app:observe, and changes need the
+ * app's own credential: OpenCloud grants an account login neither, so those
+ * commands still need a connected folder.
+ */
+async function appReadClient(appId?: string): Promise<OpenCloudClient> {
+  const binding = availableWorkspace();
+  const session = availableSession();
+  if (program.opts<{ token?: string }>().token || session?.state === "ready" ||
+      (binding && (appId === undefined || binding.appId.toLowerCase() === String(appId).toLowerCase()))) {
+    return client();
+  }
+  const login = await ownerAccountLogin();
+  return login ? login.control : client();
+}
+
+/**
  * A connected directory's own credential, or otherwise the account login, so
  * a person can pull an app into a new directory before connecting it.
  */
@@ -5243,7 +5263,7 @@ operation
   .option("--interval <seconds>", "poll interval", "2")
   .option("--timeout <seconds>", "maximum follow time", "900")
   .action(async (operationId, options) => {
-    const control = client();
+    const control = await appReadClient();
     const started = await control.get(`/v1/operations/${encoded(operationId)}`);
     output(
       await followOperation({
@@ -5272,12 +5292,12 @@ operation
         limit: options.limit, cursor: options.cursor,
         type: options.type, state: options.state,
       });
-      output(await client().call("listAppOperationsPage", { appId, query }));
+      output(await (await appReadClient(appId)).call("listAppOperationsPage", { appId, query }));
       return;
     }
     const limit = parseBoundedNumber(options.limit, "--limit", 1, 100);
     output(
-      await client().get(
+      await (await appReadClient(appId)).get(
         `/v1/apps/${encoded(appId)}/operations?limit=${limit}`,
       ),
     );
@@ -5469,7 +5489,7 @@ deployment
   .command("list")
   .argument("<app-id>")
   .action(async (appId) =>
-    output(await client().get(`/v1/apps/${appId}/deployments`)),
+    output(await (await appReadClient(appId)).get(`/v1/apps/${encoded(appId)}/deployments`)),
   );
 
 deployment
@@ -5477,7 +5497,7 @@ deployment
   .argument("<app-id>")
   .argument("<deployment-id>")
   .action(async (appId, deploymentId) =>
-    output(await client().get(`/v1/apps/${appId}/deployments/${deploymentId}`)),
+    output(await (await appReadClient(appId)).get(`/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}`)),
   );
 
 addOperationOptions(

@@ -124,7 +124,7 @@ export function notConnectedMessage(context: NotConnectedContext): string {
   }
   const elsewhere = context.directory === undefined ? ", or run this command in a folder connected to the app" : "";
   if (context.signedIn === true) {
-    return `${Folder} is not connected to an app. You are signed in, so run ${connect} ${where}${elsewhere}.`;
+    return `${Folder} is not connected to an app. You are signed in, so run ${connect} ${where}${elsewhere}. Your login reads an app, its deployments and operations from anywhere, but this command needs the app's own connection.`;
   }
   return `${Folder} is not connected to an app. Run ${connect} ${where} (after opencloud login if you are not signed in)${elsewhere}.`;
 }

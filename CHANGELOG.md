@@ -74,6 +74,12 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- `deployment list`, `deployment get`, `operation get` and `operation list`
+  work from the app ID alone with the account login when the folder isn't
+  connected (or is connected to another app). Container, log and metric reads
+  and every change still need the app's connected folder, because OpenCloud
+  grants an account login only `app:read`; `WORKSPACE_NOT_CONNECTED` now says
+  so to a signed-in person.
 - `validate`, and `deploy` and `app dev start` or `sync` before uploading,
   warn with `CONTAINERS_NEED_SDK_2_8` when a manifest declares containers but
   pins an SDK older than 2.8.0, naming the fix (`runtime.sdk.version: 2.8.0`).

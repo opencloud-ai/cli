@@ -96,7 +96,12 @@ per-user credential file under the normal OpenCloud configuration directory.
 Never inspect, print, copy, upload, or commit either credential backend.
 
 The account credential can list, inspect, and create apps, but it cannot build
-or deploy them. `app connect` writes only a non-secret `.opencloud/app.json`
+or deploy them. From any folder, it also reads an app's deployments and
+operations (`deployment list`, `deployment get`, `operation get`, `operation
+list`) from the app ID alone. Container, log and metric reads and every change
+need the app's own connection, because OpenCloud grants an account login only
+the `app:read` scope; in a folder that isn't connected, those commands fail
+with `WORKSPACE_NOT_CONNECTED` and say so. `app connect` writes only a non-secret `.opencloud/app.json`
 binding and stores a separate renewable 24-hour app credential in the protected
 backend. This lets later terminal sessions reuse the account login and lets one
 user work safely across multiple app directories.

@@ -237,25 +237,38 @@ describe("validate", spawning, () => {
 describe("an app command in a folder that is not connected", spawning, () => {
   const operationId = "40000000-0000-4000-8000-0000000000aa";
 
-  it("tells a signed-in person to connect the folder, not to sign in", async () => {
+  it("tells a signed-in person to connect the folder, not to sign in, for a command that needs it", async () => {
     const context = await workspace("unconnected-signed-in", { signedIn: true });
-    const followed = await run(["operation", "get", operationId, "--follow"], context);
-    expect(followed.status).toBe(1);
-    expect(JSON.parse(followed.stderr)).toEqual({
+    // Container, log and metric reads need the app's own connection.
+    const named = await run(["containers", "get", appId, "renderer"], context);
+    expect(named.status).toBe(1);
+    expect(JSON.parse(named.stderr)).toEqual({
       ok: false,
       error: {
         code: "WORKSPACE_NOT_CONNECTED",
-        message: "This folder is not connected to an app. You are signed in, so run opencloud app connect <app-id> here, or run this command in a folder connected to the app.",
+        message: `This folder is not connected to an app. You are signed in, so run opencloud app connect ${appId} here, or run this command in a folder connected to the app. Your login reads an app, its deployments and operations from anywhere, but this command needs the app's own connection.`,
         retryable: false,
       },
     });
-    const named = await run(["containers", "get", appId, "renderer"], context);
-    expect(JSON.parse(named.stderr).error.message).toContain(`run opencloud app connect ${appId} here`);
     const branded = await run(["containers", "get", appId, "renderer"], context, {
       OPENCLOUD_CLI_PRODUCT_NAME: "Sprout", OPENCLOUD_CLI_COMMAND: "sprout",
     });
     expect(JSON.parse(branded.stderr).error.message).toContain(`run sprout app connect ${appId} here`);
     expect(requests).toEqual([]);
+  });
+
+  it("reads an app's deployments and operations with the account login from any folder", async () => {
+    const context = await workspace("unconnected-reads", { signedIn: true });
+    const operation = { id: operationId, appId, deploymentId: null, type: "deploy", state: "succeeded", actorType: "user", actorId: appId,
+      idempotencyKey: "server-redacted", error: null, createdAt: "2026-11-20T05:00:00.000Z", updatedAt: "2026-11-20T05:01:00.000Z" };
+    responder = (request) => request.path === `/v1/apps/${appId}/deployments` ? { status: 200, body: [] }
+      : request.path === `/v1/operations/${operationId}` ? { status: 200, body: operation } : undefined;
+    const listed = await run(["deployment", "list", appId], context);
+    expect(listed.status, listed.stderr).toBe(0);
+    const followed = await run(["operation", "get", operationId, "--follow"], context);
+    expect(followed.status, followed.stderr).toBe(0);
+    expect(JSON.parse(followed.stdout)).toMatchObject({ id: operationId, state: "succeeded" });
+    expect(requests.map((request) => request.headers.authorization)).toEqual(requests.map(() => "Bearer synthetic-guidance-access"));
   });
 
   it("names a directory argument that is not connected", async () => {
@@ -265,7 +278,7 @@ describe("an app command in a folder that is not connected", spawning, () => {
     expect(started.status).toBe(1);
     expect(JSON.parse(started.stderr).error).toMatchObject({
       code: "WORKSPACE_NOT_CONNECTED",
-      message: "The folder app is not connected to an app. You are signed in, so run opencloud app connect <app-id> in that folder.",
+      message: "The folder app is not connected to an app. You are signed in, so run opencloud app connect <app-id> in that folder. Your login reads an app, its deployments and operations from anywhere, but this command needs the app's own connection.",
     });
   });
 
