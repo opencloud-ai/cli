@@ -710,8 +710,8 @@ On an installation without containers, OpenCloud refuses `custom.` names.
 the edge and prints its status, type, size and digest; it never retries. It is
 signed out unless it is given an app access token, and the response body is
 printed only with `--show-body`: its first 64 KiB, cut at a whole character.
-The response is read as it arrives, so its size and digest cover all of it
-without holding it in memory. Any method a route accepts can
+The response is read as it arrives, so its size and digest cover all of its
+raw bytes without holding it in memory. Any method a route accepts can
 be sent, with `--body` or `--body-file` and `--content-type` (application/json
 when the body is JSON, otherwise text/plain).
 

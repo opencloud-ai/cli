@@ -152,7 +152,9 @@
   route method, a body (`--body`, `--body-file`, `--content-type`), a
   `--timeout`, and `--show-body` to print the first 64 KiB of the response
   (cut at a whole character; the response is streamed, so its size and
-  digest cover all of it without holding it in memory). With
+  digest cover all of it without holding it in memory). `bodyBytes` and
+  `bodySha256` cover the raw bytes; 3.20 measured the body decoded as text,
+  so a binary body reports different values. With
   `--access-token-env NAME` it sends the app access token held in that
   environment variable, which the owner revealed in the browser, so the
   request acts as the owner. The token is read only from the variable, sent
