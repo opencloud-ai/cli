@@ -4,7 +4,10 @@
 
 - Allow up to 15 minutes for development container readiness. Save the session
   before applying, and reconcile lost start/sync apply replies through exact
-  reads without automatically repeating the request.
+  reads without automatically repeating the request. The reads back off from
+  every 2 seconds to every 15, and one last read after the deadline confirms
+  an apply that became ready at the very end instead of calling it unknown;
+  running the command again takes that last look too.
 - Wait for slow draft validation using short requests pinned to the exact
   revision. Persist each dispatch and acknowledged response before continuing.
   Deployment, development and direct draft validation share this behavior.

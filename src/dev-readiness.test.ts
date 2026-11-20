@@ -94,11 +94,41 @@ describe("development readiness without apply replay", () => {
     const rejected = expect(pending).rejects.toThrow("DEV_APPLY_OUTCOME_UNKNOWN");
     await vi.advanceTimersByTimeAsync(1_000);
     await rejected;
-    expect(c.call.mock.calls.map(([name]) => name)).toEqual(["getDevSession", "getDraft", "getApp"]);
+    // One read in the time left, and one last look once the deadline passed.
+    const round = ["getDevSession", "getDraft", "getApp"];
+    expect(c.call.mock.calls.map(([name]) => name)).toEqual([...round, ...round]);
     expect(run.checkpoint).toEqual(saved);
     expect(run.checkpointStage).not.toHaveBeenCalled();
+    // Run again later: only a last look, never another apply or a new deadline.
     await expect(resumeDevApply(c.client, run, resumeInput)).rejects.toThrow("DEV_APPLY_OUTCOME_UNKNOWN");
-    expect(c.call).toHaveBeenCalledTimes(3);
+    expect(c.call.mock.calls.map(([name]) => name)).toEqual([...round, ...round, ...round]);
+    expect(run.checkpoint).toEqual(saved);
+  });
+
+  it("confirms an apply that became ready at the very end with a last look after the deadline", async () => {
+    vi.useFakeTimers();
+    const saved = checkpoint(), run = journal(saved);
+    vi.setSystemTime(Date.parse(saved.devApplyDeadline!) + 60_000);
+    const c = control();
+    await expect(resumeDevApply(c.client, run, resumeInput)).resolves.toEqual(session());
+    expect(c.call.mock.calls.map(([name]) => name)).toEqual(["getDevSession", "getDraft", "getApp"]);
+    // The last look has its own short window.
+    expect(c.call.mock.calls.every(([, , options]) => options.timeoutMs === 30_000)).toBe(true);
+    expect(run.checkpoint).toMatchObject({ stage: "dev_apply_ready", activeRevisionId });
+  });
+
+  it("backs its reads off from 2 to 15 seconds while a slow apply prepares", async () => {
+    vi.useFakeTimers();
+    const run = journal(checkpoint());
+    const c = control(operation => operation === "getDevSession" ? session(false) : undefined);
+    const pending = resumeDevApply(c.client, run, resumeInput).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const rounds = () => c.call.mock.calls.filter(([name]) => name === "getDevSession").length;
+    // 0, 2, 5, 9.5, 16.25, 26.4, 41.4, 56.4 … seconds: 12 rounds in two minutes, not 60.
+    expect(rounds()).toBe(12);
+    await vi.advanceTimersByTimeAsync(developmentReadinessTimeoutMs);
+    expect(await pending).toMatchObject({ message: "DEV_APPLY_OUTCOME_UNKNOWN" });
+    expect(rounds()).toBeLessThan(75);
   });
 
   it("stops without dispatch when the original budget expires while persisting the intent", async () => {

@@ -125,20 +125,30 @@ async function recordReady(journal: Journal, session: Session): Promise<Session>
   return session;
 }
 
+/** Reads back off from 2 to 15 seconds: three GETs every 2 s for 15 minutes was too many. */
+const FIRST_READ_DELAY_MS = 2_000;
+const MAX_READ_DELAY_MS = 15_000;
+/** The window of the one read taken after the deadline. */
+const LAST_LOOK_MS = 30_000;
+
 async function reconcile(control: OpenCloudClient, journal: Journal, target: Pending, context: DevApplyContext): Promise<Session> {
+  let delayMs = FIRST_READ_DELAY_MS;
   for (;;) {
-    if (Date.now() >= target.deadline) return journal.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
+    // Once the deadline has passed, one last read in its own short window: an
+    // apply that became ready at the very end is confirmed, not called unknown.
+    const lastLook = Date.now() >= target.deadline;
     let observed;
-    try { observed = await readExact(control, journal, target, context, true); }
+    try { observed = await readExact(control, journal, lastLook ? { ...target, deadline: Date.now() + LAST_LOOK_MS } : target, context, true); }
     catch (error) {
       // Explicit API refusals and identity changes stay visible. Only read
       // transport failures may be retried; this loop never issues a POST.
       if (error instanceof ApiError || error instanceof CliContractError) throw error;
     }
-    if (observed?.ready && Date.now() < target.deadline) return recordReady(journal, observed.session);
+    if (observed?.ready) return recordReady(journal, observed.session);
+    if (lastLook) return journal.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
     const remaining = target.deadline - Date.now();
-    if (remaining <= 0) return journal.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
-    await new Promise(resolve => setTimeout(resolve, Math.min(2_000, remaining)));
+    if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(delayMs, remaining)));
+    delayMs = Math.min(MAX_READ_DELAY_MS, Math.ceil(delayMs * 1.5));
   }
 }
 
