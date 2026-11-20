@@ -353,6 +353,15 @@ describe("app request with an app access token", spawning, () => {
 });
 
 describe("log surfaces", spawning, () => {
+  it("takes --page on both log commands and says when each returns a page", async () => {
+    const context = await workspace("log-pages");
+    const production = (await run(["logs", "--help"], context)).stdout.replace(/\s+/g, " ");
+    expect(production).toContain("a normalized page with --page or any page filter, otherwise the raw query answer earlier CLIs printed");
+    const development = (await run(["app", "dev", "logs", "--help"], context)).stdout.replace(/\s+/g, " ");
+    expect(development).toContain("always as a normalized page with cursor and source freshness");
+    expect(development).toContain("--page accepted, as logs takes it: this command always returns a page");
+  });
+
   it("names the surfaces --surface accepts in both log commands' help", async () => {
     const context = await workspace("log-surfaces");
     for (const args of [["logs", "--help"], ["app", "dev", "logs", "--help"]]) {

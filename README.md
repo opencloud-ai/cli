@@ -658,8 +658,9 @@ opencloud agent-feed "$APP_ID" --contract-version 2
 ```
 
 Log pages expose source freshness and explicit gaps. Continue a cursor with
-exactly the same filters, `--from`, `--to`, and limit. Logs without any page or
-compute filter retain their legacy response. Feed v1 stays the default.
+exactly the same filters, `--from`, `--to`, and limit. `logs` without
+`--page` or any compute filter retains its legacy response; `app dev logs`
+always returns a page and accepts `--page` for symmetry. Feed v1 stays the default.
 `--surface` selects where lines came from: `function` (the app's Functions),
 `container`, `http` (the edge), `ai` (the AI gateway) or `platform`;
 `functions` and `containers` work too, `page`, `rest` and `storage` select

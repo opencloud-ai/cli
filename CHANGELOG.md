@@ -64,6 +64,9 @@
 - `logs --page` and `app dev logs` keep the structured `fields` a Function
   passed to `log` on its log lines; they used to be dropped while the answer
   was parsed.
+- `app dev logs` accepts `--page`, as `logs` does, and both help texts say when
+  they return a page: development logs always do, while `logs` without
+  `--page` or a page filter keeps the raw answer earlier CLIs printed.
 - `logs` and `app dev logs` name the surfaces `--surface` accepts in their help
   (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
   `containers`, `page`, `rest` and `storage` for `http`, and `runtime`, the

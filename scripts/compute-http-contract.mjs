@@ -274,7 +274,8 @@ try {
   // The dashboard's old request kinds are sent as typed; OpenCloud reads them as http.
   await run(["logs", appId, "--surface", "page", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
   assert.equal(requests.at(-1).body.surface, "page");
-  const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--surface", "container", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  // --page is accepted here too; development logs are always a page.
+  const devPage = await run(["app", "dev", "logs", directory, "--page", "--kind", "job", "--surface", "container", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
   assert.equal(requests.at(-1).body.surface, "container");
   assert.deepEqual(devPage.entries[0].fields, loggedFields, "app dev logs keeps a Function's logged fields");
   assert.equal(requests.at(-1).path, `/v1/apps/${appId}/dev-sessions/${sessionId}/logs/page`);

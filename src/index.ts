@@ -6941,8 +6941,9 @@ const LOG_SURFACE_HELP =
 
 program
   .command("logs")
+  .description("Read the app's production logs: a normalized page with --page or any page filter, otherwise the raw query answer earlier CLIs printed")
   .argument("<app-id>")
-  .option("--page", "return a normalized page with cursor and source freshness")
+  .option("--page", "return a normalized page with cursor and source freshness, as app dev logs always does")
   .option("--surface <surface>", LOG_SURFACE_HELP)
   .option("--workload <name>", "container workload name")
   .option("--kind <kind>", "job, service, or worker")
@@ -6974,8 +6975,9 @@ program
   });
 
 dev.command("logs")
-  .description("Read logs only from the development session saved in this directory")
+  .description("Read logs only from the development session saved in this directory, always as a normalized page with cursor and source freshness")
   .argument("<directory>")
+  .option("--page", "accepted, as logs takes it: this command always returns a page")
   .option("--from <iso>", "ISO time", new Date(Date.now() - 60 * 60 * 1000).toISOString())
   .option("--to <iso>", "ISO time", new Date().toISOString())
   .option("--contains <text>")
