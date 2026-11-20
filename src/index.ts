@@ -93,7 +93,7 @@ import {
   integrationSlotName,
 } from "./integrations.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
-import { computeInput, computeJson, computeKey, computeLogBody, computeQuery } from "./compute.js";
+import { computeInput, computeJson, computeKey, computeLogBody, computeQuery, controlGeneration, workerReplicas } from "./compute.js";
 import { devNotificationCaptureLimit, notificationHistoryQuery } from "./notifications.js";
 import {
   deleteSession,
@@ -6352,7 +6352,7 @@ containers
   .action(async (appId, name, options) => {
     const scope = { appId: String(appId) };
     const input = computeInput("pauseContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers pause", appId: scope.appId,
@@ -6370,7 +6370,7 @@ containers
   .action(async (appId, name, options) => {
     const scope = { appId: String(appId) };
     const input = computeInput("resumeContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers resume", appId: scope.appId,
@@ -6388,7 +6388,7 @@ containers
   .action(async (appId, name, options) => {
     const scope = { appId: String(appId) };
     const input = computeInput("restartContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers restart", appId: scope.appId,
@@ -6407,7 +6407,7 @@ containers
   .action(async (appId, name, options) => {
     const scope = { appId: String(appId) };
     const input = computeInput("scaleContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation), replicas: Number(options.replicas) } });
+      body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers scale", appId: scope.appId,
@@ -6549,7 +6549,7 @@ devContainers
     const state = await requireDevState(sourceRoot);
     const scope = { appId: state.appId, sessionId: state.sessionId };
     const input = computeInput("pauseDevContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud app dev containers pause", appId: scope.appId,
@@ -6569,7 +6569,7 @@ devContainers
     const state = await requireDevState(sourceRoot);
     const scope = { appId: state.appId, sessionId: state.sessionId };
     const input = computeInput("resumeDevContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud app dev containers resume", appId: scope.appId,
@@ -6589,7 +6589,7 @@ devContainers
     const state = await requireDevState(sourceRoot);
     const scope = { appId: state.appId, sessionId: state.sessionId };
     const input = computeInput("restartDevContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation) } });
+      body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud app dev containers restart", appId: scope.appId,
@@ -6610,7 +6610,7 @@ devContainers
     const state = await requireDevState(sourceRoot);
     const scope = { appId: state.appId, sessionId: state.sessionId };
     const input = computeInput("scaleDevContainer", { ...scope, name: String(name),
-      body: { expectedGeneration: Number(options.generation), replicas: Number(options.replicas) } });
+      body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud app dev containers scale", appId: scope.appId,

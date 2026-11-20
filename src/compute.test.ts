@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyComputeError } from "@opencloud/contracts/containers";
 import { ApiError, OpenCloudClient } from "./api-client.js";
-import { computeInput, computeJson, computeKey, computeLogBody, computeQuery, logSurface } from "./compute.js";
+import { computeInput, computeJson, computeKey, computeLogBody, computeQuery, controlGeneration, logSurface, workerReplicas } from "./compute.js";
 import { isReportableFailure } from "./error-reports.js";
 import { structuredCliError } from "./owner-parity.js";
 import { computeInstanceDiagnosticsSchema } from "../vendor/contracts/src/compute-observation.js";
@@ -141,6 +141,19 @@ describe("compute command boundaries", () => {
     for (const code of ["COMPUTE_FUNCTION_FAILED", "COMPUTE_METRIC_INVALID", "COMPUTE_METRIC_LIMIT", "COMPUTE_NOT_OFFERED", "COMPUTE_OUTPUT_DIRECTORY_MISSING"] as const) {
       const value = classifyComputeError(code);
       expect(isReportableFailure(new ApiError(value.statusCode, value)), code).toBe(false);
+    }
+  });
+
+  it("reads --generation and --replicas as plain digits, so an unset variable never scales to zero", () => {
+    expect(workerReplicas("0")).toBe(0);
+    expect(workerReplicas("20")).toBe(20);
+    expect(workerReplicas(" 3 ")).toBe(3);
+    expect(controlGeneration("3")).toBe(3);
+    for (const typed of ["", " ", "0x2", "1e1", "2.0", "-1", "+2", "Infinity", "21"]) {
+      expect(() => workerReplicas(typed), typed).toThrowError(expect.objectContaining({ code: "INVALID_OPTION", message: "--replicas must be an integer from 0 through 20" }));
+    }
+    for (const typed of ["", " ", "0", "0x3", "3e0", "3.5", undefined]) {
+      expect(() => controlGeneration(typed), String(typed)).toThrowError(expect.objectContaining({ code: "INVALID_OPTION" }));
     }
   });
 

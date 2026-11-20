@@ -6,6 +6,7 @@ import {
 import { computeIdempotencyKeySchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { CliContractError } from "./cli-contract-error.js";
+import { parseBoundedNumber } from "./owner-parity.js";
 
 /** Validate before opening a journal or making any request. */
 export function computeInput<T extends ControlPlaneOperationId>(
@@ -26,6 +27,16 @@ export function computeKey(value: unknown): string | undefined {
   } catch (error) {
     throw callerFailure(error);
   }
+}
+
+/** `--generation`: the control generation `containers get` shows, in plain digits. */
+export function controlGeneration(value: unknown): number {
+  return parseBoundedNumber(value, "--generation", 1, Number.MAX_SAFE_INTEGER);
+}
+
+/** `--replicas`: an empty or unset value never means zero replicas. */
+export function workerReplicas(value: unknown): number {
+  return parseBoundedNumber(value, "--replicas", 0, 20);
 }
 
 export function computeJson(value: string): unknown {

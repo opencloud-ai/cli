@@ -220,13 +220,21 @@ try {
     ["containers", "executions", appId, "--state", "crash_loop"],
     ["containers", "run", appId, "job", "--idempotency-key", "bad key"],
     ["containers", "scale", appId, "worker", "--generation", "0", "--replicas", "1"],
+    // An unset variable is an empty option: never zero replicas or generation 0.
+    ["containers", "scale", appId, "worker", "--generation", "3", "--replicas", ""],
+    ["containers", "scale", appId, "worker", "--generation", "3", "--replicas", " "],
+    ["containers", "scale", appId, "worker", "--generation", "3", "--replicas", "0x2"],
+    ["app", "dev", "containers", "scale", directory, "worker", "--generation", "3", "--replicas", ""],
+    ["containers", "pause", appId, "worker", "--generation", ""],
+    ["app", "dev", "containers", "restart", directory, "worker", "--generation", "1e1"],
     ["containers", "get", appId, "../escape"],
     ["logs", appId, "--workload", ""],
     ["compute", "settings"], ["compute", "prices"], ["compute", "usage", "--from", now, "--to", "2026-11-14T01:00:00Z"],
   ]) {
     const before = requests.length;
-    await run(args, 1);
+    const refused = (await run(args, 1)).error;
     assert.equal(requests.length, before, "invalid input or app-token payer read reached the API");
+    if (args.includes("--replicas") && args.at(-1) !== "1") assert.equal(refused.code, "INVALID_OPTION", JSON.stringify(refused));
   }
   denied = true;
   const before = requests.length;

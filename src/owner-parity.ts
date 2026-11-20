@@ -67,6 +67,13 @@ export function addOperationOptions(command: Command): Command {
     .option("--timeout <seconds>", "maximum follow time", "900");
 }
 
+/**
+ * Plain decimal digits only. Number() reads "" and " " as 0 and accepts
+ * 0x2 or 1e1, so `--replicas "$UNSET"` would otherwise mean zero replicas.
+ */
+const DECIMAL_INTEGER = /^\d+$/;
+const DECIMAL_NUMBER = /^(?:\d+(?:\.\d+)?|\.\d+)$/;
+
 export function parseBoundedNumber(
   raw: unknown,
   name: string,
@@ -74,7 +81,8 @@ export function parseBoundedNumber(
   maximum: number,
   integer = true,
 ): number {
-  const value = Number(raw);
+  const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  const value = (integer ? DECIMAL_INTEGER : DECIMAL_NUMBER).test(text) ? Number(text) : Number.NaN;
   if (
     !Number.isFinite(value) ||
     (integer && !Number.isSafeInteger(value)) ||

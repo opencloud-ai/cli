@@ -59,6 +59,13 @@ describe("owner-parity CLI helpers", () => {
     expect(() => parseBoundedNumber("101", "--limit", 1, 100)).toThrow(
       /--limit/,
     );
+    // Number() would read these as 0, 16 or 10.
+    for (const typed of ["", "   ", "0x10", "1e1", "Infinity", "-0"]) {
+      expect(() => parseBoundedNumber(typed, "--limit", 0, 100), typed).toThrow(/--limit must be an integer/);
+    }
+    expect(() => parseBoundedNumber("1e-1", "--interval", 0.05, 60, false)).toThrow(/--interval/);
+    expect(parseBoundedNumber(".5", "--interval", 0.05, 60, false)).toBe(0.5);
+    expect(parseBoundedNumber(50, "--limit", 1, 100)).toBe(50);
   });
 
   it("loads exactly one JSON input source and checks its shape", async () => {
