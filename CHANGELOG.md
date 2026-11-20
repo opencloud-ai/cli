@@ -21,7 +21,9 @@
   operation to follow, so its effect shows in `get` and `events`.
 - Add app-bound registry management with passwords read from standard input,
   and account-only compute payer settings, prices, and usage reads. Consent
-  and budget changes remain in the browser.
+  and budget changes remain in the browser. The mutation journal records
+  only a digest of the registry's name, host and username, never of its
+  password, and error reports never include the password.
 - Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
   source freshness. Expected app and policy errors keep their structured
   diagnostics without becoming platform error reports.

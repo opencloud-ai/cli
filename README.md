@@ -628,6 +628,10 @@ opencloud containers registry list "$APP_ID"
 opencloud containers registry remove "$APP_ID" "$CONNECTION_ID"
 ```
 
+The password is read only from standard input. The local mutation journal
+keeps a digest of the registry's name, host and username but nothing derived
+from the password, and error reports never include it.
+
 `compute settings`, `compute prices`, and `compute usage --from <iso> --to <iso>`
 use your stored account login and current payer authority. App tokens and Agent
 runtime credentials cannot run these commands. Use the browser for payer

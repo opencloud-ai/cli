@@ -210,8 +210,15 @@ try {
   assert.equal(requests.at(-1).path, `/v1/apps/${appId}/dev-sessions/${sessionId}/logs/page`);
   assert.equal((await run(["agent-feed", appId])).contractVersion, "1");
   assert.equal((await run(["agent-feed", appId, "--contract-version", "2"])).computeSources.usage.status, "partial");
-  await run(["containers", "registry", "create", appId, "--name", "Registry", "--host", "registry.test", "--username", "reader", "--password-stdin", "--idempotency-key", "registry-key"], 0, "synthetic-registry-password\n");
+  const registryArgs = ["containers", "registry", "create", appId, "--name", "Registry", "--host", "registry.test", "--username", "reader", "--password-stdin", "--idempotency-key", "registry-key"];
+  await run(registryArgs, 0, "synthetic-registry-password\n");
   assert.equal(requests.at(-1).body.password, "synthetic-registry-password");
+  // K8: the journal digests the name, host and username, never the password,
+  // so the same key with another password reaches OpenCloud, which compares it.
+  const passwordBefore = requests.length;
+  await run(registryArgs, 0, "synthetic-other-password\n");
+  assert.equal(business(passwordBefore).length, 1, "the journal refused a request it could only tell apart by its password");
+  assert.equal(requests.at(-1).body.password, "synthetic-other-password");
   assert.equal((await run(["containers", "registry", "list", appId])).connections.length, 1);
   await run(["containers", "registry", "remove", appId, revisionId]);
   assert.equal((await run(["compute", "settings"], 0, "", true)).price.id, revisionId);
@@ -248,7 +255,7 @@ try {
   for (const file of await readdir(path.join(temporary, "journal"), { recursive: true })) {
     if (!file.endsWith(".json")) continue;
     const content = await readFile(path.join(temporary, "journal", file), "utf8");
-    for (const secret of ["synthetic-registry-password", "input-payload", "synthetic-compute-authority"]) assert.ok(!content.includes(secret), "journal retained private data");
+    for (const secret of ["synthetic-registry-password", "synthetic-other-password", "input-payload", "synthetic-compute-authority"]) assert.ok(!content.includes(secret), "journal retained private data");
   }
   console.log("Compute HTTP contract passed: production/development routes, durable replay, lost replies, validation, logs, Feed v2, registry privacy and payer authority.");
 } finally {

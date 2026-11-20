@@ -6652,13 +6652,20 @@ containerRegistry.command("create").argument("<app-id>")
   .option("--idempotency-key <key>")
   .action(async (appId, options) => {
     const password = await secretFromStdin();
+    // Kept out of an error report, whatever a message might quote.
+    invocation.privateValues = [...invocation.privateValues, password];
     const input = computeInput("createContainerRegistry", { appId: String(appId), body: {
       name: options.name, registryHost: options.host, username: options.username, password,
     } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers registry create", appId: input.appId,
-      safeScope: { appId: input.appId }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      // Each registry is its own target. The journal digests only what names
+      // the connection, never the password: an unsalted digest of a weak one
+      // could be guessed offline. OpenCloud compares the password itself when
+      // the same key is sent again.
+      safeScope: { appId: input.appId, name: input.body.name },
+      safeRequest: { action: "create-registry", registryHost: input.body.registryHost, username: input.body.username },
       explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("createContainerRegistry", input, { idempotencyKey }));
   });
