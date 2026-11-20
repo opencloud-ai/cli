@@ -654,7 +654,9 @@ consent and budget changes. The CLI does not change a budget when resuming work.
 ## Agent Feed and alert rules
 
 Read the stable app health, signal, alert, and recent-event contract without
-depending on internal Prometheus, Loki, or Grafana APIs:
+depending on internal Prometheus, Loki, or Grafana APIs. `agent-feed` prints
+OpenCloud's answer as received, so values a newer platform adds appear as they
+are; `--contract-version 2` adds container sources:
 
 ```bash
 "$OPENCLOUD_CLI" agent-feed "$APP_ID"

@@ -23,6 +23,8 @@ let denied = false;
 const refusals = [];
 /** An execution the next run and execution reads answer with. */
 let executionAnswer = null;
+/** The Agent Feed answers with a value this CLI's contract does not know yet. */
+let feedDrift = false;
 const refusal = (statusCode, code, message, details) => ({ statusCode, code, message, requestId: "compute-test", details });
 const REVISION_CONFLICT = refusal(409, "COMPUTE_REVISION_CONFLICT", "The workload changed. Refresh its control generation.",
   { category: "configuration", origin: "policy", phase: "admission", retryScope: "none", retryable: false, billingDisposition: "none" });
@@ -86,7 +88,7 @@ const server = createServer(async (request, response) => {
       fields: { checked: 5, up: 4, slowest: { url: "https://example.test", ms: 647 } } }], nextCursor: "logs+/=", computeObservation: { ...freshness, gaps: [{ instanceId: null, workloadName: "job", from: now, to: now, droppedLines: "3" }], retentionSeconds: 604800 } };
   } else if (url.pathname.endsWith("/agent-feed")) {
     value = { contractVersion: query.contractVersion ?? "1", app: { id: appId, name: "Compute", slug: "compute", state: "active", activeDeployment: null },
-      observedAt: now, telemetry: { status: "unavailable", latestIngestedAt: null, ingestionLagSeconds: null, stale: true },
+      observedAt: now, telemetry: { status: feedDrift ? "warming_up" : "unavailable", latestIngestedAt: null, ingestionLagSeconds: null, stale: true },
       signals: [], alerts: [], recentBreaches: [], breachesTruncated: false, events: [], eventsTruncated: false, nextSince: now,
       ...(query.contractVersion === "2" ? { computeSources: { control: freshness, logs: freshness, resources: freshness, usage: freshness } } : {}) };
   } else if (url.pathname.endsWith("/compute/registries")) {
@@ -273,6 +275,15 @@ try {
   assert.equal(requests.at(-1).path, `/v1/apps/${appId}/dev-sessions/${sessionId}/logs/page`);
   assert.equal((await run(["agent-feed", appId])).contractVersion, "1");
   assert.equal((await run(["agent-feed", appId, "--contract-version", "2"])).computeSources.usage.status, "partial");
+  assert.equal(requests.at(-1).query.contractVersion, "2");
+  // K10: a value a newer OpenCloud adds is printed as received, not refused.
+  feedDrift = true;
+  assert.equal((await run(["agent-feed", appId, "--since", now])).telemetry.status, "warming_up");
+  assert.deepEqual(requests.at(-1).query, { since: now });
+  feedDrift = false;
+  const feedBefore = requests.length;
+  await run(["agent-feed", appId, "--contract-version", "3"], 1);
+  assert.equal(requests.length, feedBefore, "an unknown contract version reached the API");
   const registryArgs = ["containers", "registry", "create", appId, "--name", "Registry", "--host", "registry.test", "--username", "reader", "--password-stdin", "--idempotency-key", "registry-key"];
   await run(registryArgs, 0, "synthetic-registry-password\n");
   assert.equal(requests.at(-1).body.password, "synthetic-registry-password");

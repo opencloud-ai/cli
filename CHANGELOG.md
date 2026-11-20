@@ -34,7 +34,10 @@
   password, and error reports never include the password.
 - Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
   source freshness. Expected app and policy errors keep their structured
-  diagnostics without becoming platform error reports.
+  diagnostics without becoming platform error reports. `agent-feed` checks
+  its options but prints OpenCloud's answer as received, as before, so a
+  value a newer platform adds (such as a new signal or alert state) never
+  fails the read with `API_CONTRACT_MISMATCH` and an error report.
 - `metrics --metric custom.<name>` reads a metric the app records (a
   container's `recordMetric` or the browser SDK), as the Agent Feed names it;
   a name without `custom.` is always a platform series. Its help says so, and

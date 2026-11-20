@@ -6830,7 +6830,11 @@ program
       ...(options.since ? { since: String(options.since) } : {}),
       ...(options.contractVersion ? { contractVersion: options.contractVersion } : {}),
     } });
-    output(await client().call("getAgentFeed", input));
+    // Printed as OpenCloud sends it, as before 3.21: a value this CLI does not
+    // know yet, such as a new signal or alert state, is no reason to fail the
+    // read (API_CONTRACT_MISMATCH and an error report). The input is checked.
+    const query = new URLSearchParams(Object.entries(input.query ?? {}).flatMap(([name, value]) => value === undefined ? [] : [[name, String(value)]]));
+    output(await client().get(`/v1/apps/${encodeURIComponent(input.appId)}/agent-feed${query.size ? `?${query}` : ""}`));
   });
 
 const alertRule = program
