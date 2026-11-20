@@ -129,7 +129,8 @@ try {
   );
   assert.equal(manifest.schemaVersion, 3);
   assert.equal("version" in manifest, false);
-  assert.equal(manifest.runtime.sdk.version, "2.8.0");
+  // CLI 3.20's default, which every supported OpenCloud installs.
+  assert.equal(manifest.runtime.sdk.version, "2.3.0");
 
   const containerApp = path.join(consumer, "container-app");
   await mkdir(containerApp);

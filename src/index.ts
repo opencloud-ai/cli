@@ -17,7 +17,6 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Argument, Command, Option } from "commander";
 import YAML from "yaml";
-import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import {
   OPEN_CLOUD_FAVICON_DATA_URI,
   OPEN_CLOUD_LOGO_DATA_URI,
@@ -51,6 +50,7 @@ import {
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
+import { DEFAULT_SDK_VERSION } from "./sdk-version.js";
 import {
   lastUsedApiUrl,
   setCliVersion,
@@ -4852,7 +4852,7 @@ program
         frontend: { directory: "frontend", spa: true },
         runtime: {
           sdk: {
-            version: OPEN_CLOUD_SDK_VERSION,
+            version: DEFAULT_SDK_VERSION,
           },
         },
         files: { access: "user", maxUploadBytes: 50 * 1024 * 1024 },

@@ -44,8 +44,11 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
-- Accept container frontends and routes, and default new unpinned app bundles
-  to SDK 2.8.0. Existing pinned SDK versions and static frontends stay readable.
+- Accept container frontends and routes. A manifest that pins no SDK keeps
+  CLI 3.20's default, 2.3.0, which every supported OpenCloud installs, so an
+  unpinned app never moves to another SDK on its next deploy; one that
+  declares containers gets 2.8.0, whose Functions can call them. `init`
+  still pins 2.3.0. Pinned SDK versions and static frontends are unchanged.
 - Refresh the shared compute schemas, preserving exact 413/431 request-size
   diagnostics and their no-replay policy, and container metric provenance in
   alert detail without changing Feed v1.

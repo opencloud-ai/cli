@@ -30,13 +30,8 @@ await build({
       "src",
       "index.ts",
     ),
-    "@opencloud/js": path.join(
-      root,
-      "vendor",
-      "browser-client",
-      "src",
-      "index.ts",
-    ),
+    // The vendored browser client, with the CLI's own SDK default.
+    "@opencloud/js": path.join(root, "src", "sdk-version.ts"),
     "@opencloud/bundler": path.join(
       root,
       "vendor",

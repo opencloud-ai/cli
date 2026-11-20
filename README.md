@@ -460,7 +460,7 @@ integrations:
       types: [contact.created]
 ```
 
-Consumer slots need runtime SDK 2.2.0 or later; the 2.8.0 default qualifies. A
+Consumer slots need runtime SDK 2.2.0 or later; the 2.3.0 default qualifies. A
 provider contract that declares `sync`, `webhook`, or `events` must pin SDK
 2.6.0. Local validation checks both shapes before development or deployment.
 Integration sharing is evaluated for a person, so `integration custom-list`
@@ -570,8 +570,10 @@ provide no cancel or redrive action.
 
 Container compute requires an installation with compute enabled and a configured
 payer. Declare jobs, services, and workers in `opencloud.yaml`; commands cannot
-override their image, resources, or permissions. SDK 2.8.0 is the default for
-new unpinned bundles. Existing explicit SDK pins remain unchanged.
+override their image, resources, or permissions. A manifest that declares
+containers and pins no SDK gets SDK 2.8.0, whose Functions can call the
+containers; other unpinned manifests keep 2.3.0, which every supported
+OpenCloud installs. Explicit SDK pins remain unchanged.
 
 ```bash
 opencloud containers list "$APP_ID"

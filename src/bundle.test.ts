@@ -82,6 +82,51 @@ containers:
     expect(bundle.manifest.runtime.sdk.version).toBe("2.8.0");
     expect(bundle.files).toEqual(["opencloud.json"]);
   });
+  it("gives a manifest that pins no SDK 3.20's default, or 2.8.0 when it declares containers, and keeps a pin", async () => {
+    const plain = await temporaryDirectory();
+    await mkdir(path.join(plain, "frontend"));
+    await writeFile(path.join(plain, "frontend", "index.html"), "hello");
+    await writeFile(path.join(plain, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  directory: frontend
+`);
+    const containers = await temporaryDirectory();
+    const containerManifest = (pin = "") => `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  container: web
+${pin}containers:
+  - name: web
+    kind: service
+    image: registry.example/web:latest
+    service:
+      startupProbe: { path: /ready }
+      readinessProbe: { path: /ready }
+`;
+    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest());
+    // Built together, each still gets its own default.
+    const [plainBundle, containerBundle] = await Promise.all([
+      buildBundle(plain), buildBundle(containers, { platformFrontend: true }),
+    ]);
+    expect(plainBundle.manifest.runtime.sdk.version).toBe("2.3.0");
+    expect(containerBundle.manifest.runtime.sdk.version).toBe("2.8.0");
+    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest("runtime:\n  sdk:\n    version: 2.7.0\n"));
+    expect((await buildBundle(containers, { platformFrontend: true })).manifest.runtime.sdk.version).toBe("2.7.0");
+    await writeFile(path.join(plain, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+runtime:
+  sdk:
+    version: 2.8.0
+frontend:
+  directory: frontend
+`);
+    expect((await buildBundle(plain)).manifest.runtime.sdk.version).toBe("2.8.0");
+  });
+
   it("omits empty directories so file-only draft reconstruction is byte-identical", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend", "evidence"), { recursive: true });
@@ -303,9 +348,10 @@ functions:
 
     const first = await buildBundle(root);
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    // CLI 3.20's default, which every supported OpenCloud installs.
     expect(first.manifest.runtime).toEqual({
       sdk: {
-        version: "2.8.0",
+        version: "2.3.0",
       },
     });
     expect(first.files).toEqual([
@@ -633,7 +679,7 @@ ${callingUserEvents}`;
 
     const bundle = await buildBundle(root);
     const archived = await readArchivedManifest(root, bundle.archive);
-    expect(bundle.manifest.runtime.sdk.version).toBe("2.8.0");
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.3.0");
     expect(bundle.manifest.integrations).toEqual({
       crm: {
         provider: "custom",

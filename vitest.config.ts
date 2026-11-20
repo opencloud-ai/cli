@@ -25,7 +25,7 @@ export default defineConfig({
       "@opencloud/contracts": path.resolve(
         "vendor/contracts/src/index.ts",
       ),
-      "@opencloud/js": path.resolve("vendor/browser-client/src/index.ts"),
+      "@opencloud/js": path.resolve("src/sdk-version.ts"),
       "@opencloud/bundler": path.resolve(
         "vendor/bundler/src/index.ts",
       ),

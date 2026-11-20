@@ -6,8 +6,13 @@ Public Contracts and control-plane client files needed by this release are
 verbatim snapshots from accepted platform commit `f7249b1c`; the compute price
 catalog, settings projection and installed SDK test are from `0f8cb1b0`.
 The bundler and compute-protocol files are from `78d17bf5`. Browser and Function
-SDK source/tests are from `68650784` (SDK 2.8.0). The local default for new
-unpinned bundles is now 2.8.0; immutable older SDK artifacts are untouched.
+SDK source/tests are from `68650784` (SDK 2.8.0); immutable older SDK artifacts
+are untouched. The CLI does not take its default SDK from this snapshot:
+`@opencloud/js` resolves to the CLI-owned `src/sdk-version.ts`, which
+re-exports the vendored browser client but sets `OPEN_CLOUD_SDK_VERSION`, the
+version the vendored bundler gives an unpinned manifest, per manifest: 2.3.0
+(CLI 3.20's default, which every supported OpenCloud installs, and what
+`init` pins), or 2.8.0 when the manifest declares containers.
 Unrelated brand and installer snapshots retain their previous provenance.
 
 The final candidate refresh takes `contracts/src/containers.ts` and its tests
