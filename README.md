@@ -692,7 +692,9 @@ On an installation without containers, OpenCloud refuses `custom.` names.
 `app request` sends one request to the live app's canonical address through
 the edge and prints its status, type, size and digest; it never retries. It is
 signed out unless it is given an app access token, and the response body is
-printed (up to 64 KiB) only with `--show-body`. Any method a route accepts can
+printed only with `--show-body`: its first 64 KiB, cut at a whole character.
+The response is read as it arrives, so its size and digest cover all of it
+without holding it in memory. Any method a route accepts can
 be sent, with `--body` or `--body-file` and `--content-type` (application/json
 when the body is JSON, otherwise text/plain).
 
@@ -712,7 +714,9 @@ opencloud app request "$APP_ID" /render --method POST \
 
 The CLI reads the token only from that variable, sends it only to the app's
 own HTTPS address, and never prints, stores or reports it; output says
-`"credential": "app_access_token"`. It accepts only `oc_app_` tokens, which
+`"credential": "app_access_token"`. With `OPENCLOUD_EDGE_URL` set, which sends
+requests to another host, a request with a token fails with
+`ACCESS_TOKEN_DESTINATION_REFUSED` before anything is sent. It accepts only `oc_app_` tokens, which
 work on deployed app hosts, not development previews, and never authorize
 control-plane commands. Revoke a token with `app access-token revoke`.
 

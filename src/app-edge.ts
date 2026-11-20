@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import { EdgeTransport } from "./edge-transport.js";
 import { callerFailure } from "./caller-failure.js";
+import { CliContractError } from "./cli-contract-error.js";
 
 const appEdgeRecordSchema = z.object({
   id: z.uuid(),
@@ -16,7 +16,7 @@ type AppEdgeRecord = z.infer<typeof appEdgeRecordSchema>;
 
 export const APP_REQUEST_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 export type AppRequestMethod = (typeof APP_REQUEST_METHODS)[number];
-/** The most of a response body `--show-body` prints. */
+/** The most of a response body `--show-body` prints, in bytes; the rest is only counted and hashed. */
 export const APP_REQUEST_BODY_SHOWN = 64 * 1024;
 
 export interface AppRequestSummary {
@@ -68,11 +68,49 @@ function appTarget(app: AppEdgeRecord, requestPath: string): URL {
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
+ * Where an app access token may go: only to the app's own address, over
+ * HTTPS (plain HTTP only when that address is this machine, as in a local
+ * test). OPENCLOUD_EDGE_URL sends the request to another host, so it is
+ * refused with a token. OPENCLOUD_PUBLIC_EDGE_HOST only changes the address
+ * the app's hostname resolves to; TLS still proves the app's own host.
+ */
+function assertTokenDestination(app: AppEdgeRecord, options: { edgeUrl?: string; publicEdgeHost?: string }): void {
+  const origin = new URL(app.appUrl);
+  const reason = options.edgeUrl !== undefined
+    ? "OPENCLOUD_EDGE_URL sends the request to another host"
+    : origin.protocol !== "https:" && (!LOOPBACK.has(origin.hostname) || options.publicEdgeHost !== undefined)
+      ? "the app's address does not use HTTPS"
+      : null;
+  if (reason) {
+    throw callerFailure(new CliContractError("ACCESS_TOKEN_DESTINATION_REFUSED",
+      `An app access token is sent only to the app's own address over HTTPS, and ${reason}; no request was sent.`));
+  }
+}
+
+/**
+ * The start of a body as text, cut at a whole UTF-8 character. With a token,
+ * every copy of it is redacted, and so is a start of it the cut left at the end.
+ */
+function shownText(head: Buffer, truncated: boolean, accessToken: string | undefined): string {
+  let text = new TextDecoder().decode(head, { stream: truncated });
+  if (!accessToken) return text;
+  text = text.split(accessToken).join("[REDACTED]");
+  if (truncated) {
+    for (let length = accessToken.length - 1; length >= 4; length -= 1) {
+      if (text.endsWith(accessToken.slice(0, length))) return `${text.slice(0, -length)}[REDACTED]`;
+    }
+  }
+  return text;
+}
+
+/**
  * One request to the app's canonical origin, sent once and never retried.
  * Without a credential it is signed out. With an app access token, the edge
  * acts as the app's owner on runtime routes, as for any program the owner
- * gave the token; the token goes only to that origin over HTTPS (or to a
- * loopback test edge) and appears in no output.
+ * gave the token; the token goes only to that origin over HTTPS (see
+ * assertTokenDestination) and appears in no output. The response is read as
+ * it arrives: counted and hashed, and only its first 64 KiB kept for
+ * `showBody`, so a large one never fills memory.
  */
 export async function requestApp(
   rawApp: unknown,
@@ -91,14 +129,9 @@ export async function requestApp(
   const app = appEdgeRecordSchema.parse(rawApp);
   const target = appTarget(app, requestPath);
   const method = options.method ?? "GET";
-  if (options.accessToken) {
-    const destination = new URL(options.edgeUrl ?? app.appUrl);
-    if (destination.protocol !== "https:" && !LOOPBACK.has(destination.hostname)) {
-      throw callerFailure(new Error("An app access token is sent only over HTTPS; no request was sent"));
-    }
-  }
+  if (options.accessToken) assertTokenDestination(app, options);
   const transport = options.transport ?? new EdgeTransport(options.edgeUrl, options.publicEdgeHost);
-  const response = await transport.request(
+  const response = await transport.streamRequest(
     app.appUrl,
     `${target.pathname}${target.search}`,
     {
@@ -109,10 +142,10 @@ export async function requestApp(
       },
       ...(options.body ? { body: options.body.content } : {}),
       ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+      keepBytes: options.showBody ? APP_REQUEST_BODY_SHOWN : 0,
     },
   );
-  // The edge never forwards the token; an app that echoed one still prints none.
-  const shown = (text: string) => (options.accessToken ? text.split(options.accessToken).join("[REDACTED]") : text);
+  const truncated = response.bodyBytes > APP_REQUEST_BODY_SHOWN;
   return {
     appId: app.id,
     url: target.href,
@@ -121,11 +154,10 @@ export async function requestApp(
     ok: response.ok,
     status: response.status,
     contentType: firstHeader(response.headers["content-type"]),
-    bodyBytes: Buffer.byteLength(response.body),
-    bodySha256: createHash("sha256").update(response.body).digest("hex"),
-    ...(options.showBody
-      ? { body: shown(response.body.slice(0, APP_REQUEST_BODY_SHOWN)), bodyTruncated: response.body.length > APP_REQUEST_BODY_SHOWN }
-      : {}),
+    bodyBytes: response.bodyBytes,
+    bodySha256: response.bodySha256,
+    // The edge never forwards the token; an app that echoed one still prints none.
+    ...(options.showBody ? { body: shownText(response.head, truncated, options.accessToken), bodyTruncated: truncated } : {}),
   };
 }
 

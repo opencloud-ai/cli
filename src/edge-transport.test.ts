@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { createServer as createHttpsServer, globalAgent } from "node:https";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -68,8 +69,10 @@ describe("edge transport", () => {
       const cert = await readFile(certPath);
       let receivedHost = "";
       let receivedServername = "";
+      let receivedAuthorization: string | undefined;
       const edge = createHttpsServer({ key: await readFile(keyPath), cert }, (request, response) => {
         receivedHost = request.headers.host ?? "";
+        receivedAuthorization = request.headers.authorization;
         receivedServername = (request.socket as import("node:tls").TLSSocket).servername ?? "";
         response.writeHead(302, { location: "https://auth.bridge.test/login" });
         response.end();
@@ -84,6 +87,11 @@ describe("edge transport", () => {
       expect(result).toMatchObject({ status: 302, method: "HEAD", bodyBytes: 0, url: `https://app.bridge.test:${port}/` });
       expect(receivedHost).toBe(`app.bridge.test:${port}`);
       expect(receivedServername).toBe("app.bridge.test");
+      expect(receivedAuthorization).toBeUndefined();
+      // Only resolution changes: TLS still proves the app's own host, so a token may go.
+      const token = "oc_app_synthetic-route-test-token-0123456789";
+      await requestApp(app, "/", { method: "HEAD", publicEdgeHost: "127.0.0.1", accessToken: token });
+      expect(receivedAuthorization).toBe(`Bearer ${token}`);
       await expect(requestApp(appRecord({ appUrl: `https://other.bridge.test:${port}` }), "/", {
         publicEdgeHost: "127.0.0.1",
       })).rejects.toThrow(/Hostname\/IP does not match|certificate.*altnames/i);
@@ -144,15 +152,16 @@ describe("edge transport", () => {
       // An app that echoed the credential: the CLI still prints none.
       response.end(`<h1>Hello</h1><!-- ${String(request.headers.authorization)} -->`);
     });
-    const app = appRecord({ visibility: "private" });
+    // A local test app's own address is this machine, so plain HTTP is allowed.
+    const app = appRecord({ visibility: "private", appUrl: edge.url });
     const quiet = await requestApp(app, "/render", {
-      edgeUrl: edge.url, method: "POST", accessToken: token,
+      method: "POST", accessToken: token,
       body: { content: Buffer.from("# Hello"), contentType: "text/markdown" },
     });
     expect(quiet).toMatchObject({ method: "POST", credential: "app_access_token", status: 200, ok: true });
     expect(quiet).not.toHaveProperty("body");
     const shown = await requestApp(app, "/render", {
-      edgeUrl: edge.url, method: "POST", accessToken: token, showBody: true,
+      method: "POST", accessToken: token, showBody: true,
       body: { content: Buffer.from("# Hello"), contentType: "text/markdown" },
     });
     expect(shown.body).toBe("<h1>Hello</h1><!-- Bearer [REDACTED] -->");
@@ -167,20 +176,58 @@ describe("edge transport", () => {
     expect(received.at(-1)?.authorization).toBeUndefined();
   });
 
-  it("sends an app access token only over HTTPS or to a loopback test edge", async () => {
+  it("sends an app access token only to the app's own HTTPS address, never through an edge adapter", async () => {
     let requests = 0;
     const edge = await adapter((_request, response) => {
       requests += 1;
       response.end();
     });
     const token = "oc_app_synthetic-route-test-token-0123456789";
+    const refused = { code: "ACCESS_TOKEN_DESTINATION_REFUSED" };
     await expect(requestApp(appRecord({ appUrl: "http://demo.opcl.test" }), "/", { accessToken: token }))
-      .rejects.toThrow("An app access token is sent only over HTTPS; no request was sent");
-    await expect(requestApp(appRecord(), "/", { accessToken: token, edgeUrl: "http://edge.example.test" }))
-      .rejects.toThrow("sent only over HTTPS");
+      .rejects.toMatchObject({ ...refused, message: "An app access token is sent only to the app's own address over HTTPS, and the app's address does not use HTTPS; no request was sent." });
+    // OPENCLOUD_EDGE_URL sends the request to another host, even a local one.
+    for (const edgeUrl of ["https://edge.example.test", edge.url]) {
+      await expect(requestApp(appRecord(), "/", { accessToken: token, edgeUrl }))
+        .rejects.toMatchObject({ ...refused, message: expect.stringContaining("OPENCLOUD_EDGE_URL sends the request to another host") });
+    }
+    // Plain HTTP to this machine, but not when its name could resolve elsewhere.
+    await expect(requestApp(appRecord({ appUrl: edge.url }), "/", { accessToken: token, publicEdgeHost: "example.test" }))
+      .rejects.toMatchObject(refused);
     expect(requests).toBe(0);
-    await requestApp(appRecord(), "/", { accessToken: token, edgeUrl: edge.url });
+    await requestApp(appRecord({ appUrl: edge.url }), "/", { accessToken: token });
     expect(requests).toBe(1);
+    // Signed out, an adapter still works as before.
+    await requestApp(appRecord(), "/", { edgeUrl: edge.url });
+    expect(requests).toBe(2);
+  });
+
+  it("reads a large response as it arrives, keeping only the first 64 KiB, cut at a whole character", async () => {
+    const token = "oc_app_synthetic-route-test-token-0123456789";
+    // 70,000 three-byte characters, with the token straddling the 64 KiB mark.
+    const body = Buffer.concat([Buffer.from("€".repeat(21_840)), Buffer.from(`ab${token}cd`), Buffer.from("€".repeat(48_000))]);
+    expect(65_520 + 2 < 65_536 && 65_520 + 2 + token.length > 65_536).toBe(true);
+    const edge = await adapter((_request, response) => {
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      // In chunks, as a slow app would send it.
+      for (let offset = 0; offset < body.length; offset += 10_000) response.write(body.subarray(offset, offset + 10_000));
+      response.end();
+    });
+    const app = appRecord({ appUrl: edge.url });
+    const quiet = await requestApp(app, "/large", { accessToken: token });
+    expect(quiet).toMatchObject({ bodyBytes: body.length, bodySha256: createHash("sha256").update(body).digest("hex") });
+    expect(quiet).not.toHaveProperty("body");
+    const shown = await requestApp(app, "/large", { accessToken: token, showBody: true });
+    expect(shown.bodyTruncated).toBe(true);
+    expect(shown.body!.startsWith("€".repeat(21_840))).toBe(true);
+    expect(shown.body).not.toContain("\uFFFD");
+    // The part of the token the cut left at the end is redacted too.
+    expect(shown.body!.endsWith("ab[REDACTED]")).toBe(true);
+    expect(JSON.stringify(shown)).not.toContain(token.slice(0, 8));
+    const small = await requestApp(app, "/large", { showBody: true, transport: { streamRequest: async () => ({
+      ok: true, status: 200, headers: {}, bodyBytes: 6, bodySha256: "x", head: Buffer.from("€€"),
+    }) } as unknown as EdgeTransport });
+    expect(small).toMatchObject({ body: "€€", bodyTruncated: false, bodyBytes: 6 });
   });
 
   it("rejects request paths that replace the canonical origin", async () => {

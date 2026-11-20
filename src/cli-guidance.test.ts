@@ -283,9 +283,11 @@ describe("app request with an app access token", spawning, () => {
 
   it("tests a private route as the owner with the token named by an environment variable, never printing it", async () => {
     const context = await workspace("request-token");
+    // A local test app: its own address is this machine, so plain HTTP is allowed.
+    const localApp = () => ({ ...appRecord(), appUrl: apiUrl });
     responder = (request) => {
-      if (request.method === "GET" && request.path === `/v1/apps/${appId}`) return { status: 200, body: appRecord() };
-      if (request.method === "POST" && request.path === "/render" && request.headers.host === "guidance.example.test") {
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}`) return { status: 200, body: localApp() };
+      if (request.method === "POST" && request.path === "/render" && request.headers.host === new URL(apiUrl).host) {
         return request.headers.authorization === `Bearer ${token}`
           ? { status: 200, body: { html: `<h1>${request.body.replace(/^# /, "")}</h1>` } }
           : { status: 401, body: { code: "unauthorized" } };
@@ -294,15 +296,20 @@ describe("app request with an app access token", spawning, () => {
     };
     const args = ["--token", "synthetic-control-plane", "app", "request", appId, "/render", "--method", "POST",
       "--body", "# Hello", "--content-type", "text/markdown", "--access-token-env", "ROUTE_TEST_TOKEN", "--show-body"];
-    const sent = await run(args, context, { ROUTE_TEST_TOKEN: token, OPENCLOUD_EDGE_URL: apiUrl });
+    const sent = await run(args, context, { ROUTE_TEST_TOKEN: token });
     expect(sent.status, sent.stderr).toBe(0);
     expect(JSON.parse(sent.stdout)).toMatchObject({
-      appId, url: "https://guidance.example.test/render", method: "POST", credential: "app_access_token",
+      appId, url: `${apiUrl}/render`, method: "POST", credential: "app_access_token",
       ok: true, status: 200, body: JSON.stringify({ html: "<h1>Hello</h1>" }), bodyTruncated: false,
     });
     expect(sent.stdout + sent.stderr).not.toContain(token);
     const route = requests.find((request) => request.path === "/render");
     expect(route?.headers["content-type"]).toBe("text/markdown");
+    expect(requests.filter((request) => request.path === "/render")).toHaveLength(1);
+    // K12: an edge adapter would carry the token to another host, so it is refused first.
+    const routed = await run(args, context, { ROUTE_TEST_TOKEN: token, OPENCLOUD_EDGE_URL: apiUrl });
+    expect(JSON.parse(routed.stderr).error).toMatchObject({ code: "ACCESS_TOKEN_DESTINATION_REFUSED" });
+    expect(routed.stdout + routed.stderr).not.toContain(token);
     expect(requests.filter((request) => request.path === "/render")).toHaveLength(1);
   });
 

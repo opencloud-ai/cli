@@ -125,12 +125,16 @@
   person or any agent, instead of naming Codex.
 - Test a private app's routes from a script. `app request` accepts every
   route method, a body (`--body`, `--body-file`, `--content-type`), a
-  `--timeout`, and `--show-body` to print up to 64 KiB of the response. With
+  `--timeout`, and `--show-body` to print the first 64 KiB of the response
+  (cut at a whole character; the response is streamed, so its size and
+  digest cover all of it without holding it in memory). With
   `--access-token-env NAME` it sends the app access token held in that
   environment variable, which the owner revealed in the browser, so the
   request acts as the owner. The token is read only from the variable, sent
-  only to the app's own HTTPS address, refused unless it is an `oc_app_`
-  token, and never printed, stored or reported; output names
+  only to the app's own HTTPS address (with `OPENCLOUD_EDGE_URL` set it fails
+  with `ACCESS_TOKEN_DESTINATION_REFUSED` before sending anything), refused
+  unless it is an `oc_app_` token, and never printed, stored or reported,
+  not even the part of it a 64 KiB cut leaves at the end; output names
   `"credential": "app_access_token"`. Without it the request stays signed
   out, and the body stays unprinted unless asked for.
 - An app command run in a folder that is not connected fails with

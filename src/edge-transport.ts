@@ -1,4 +1,5 @@
-import http, { type IncomingHttpHeaders } from "node:http";
+import { createHash } from "node:crypto";
+import http, { type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import https from "node:https";
 import { lookup } from "node:dns";
 import type { LookupFunction } from "node:net";
@@ -11,6 +12,17 @@ export interface EdgeResponse {
   headers: IncomingHttpHeaders;
   body: string;
   value: unknown;
+}
+
+/** A response read as it arrives: counted and hashed, with only its first bytes kept. */
+export interface EdgeStreamedResponse {
+  ok: boolean;
+  status: number;
+  headers: IncomingHttpHeaders;
+  bodyBytes: number;
+  bodySha256: string;
+  /** At most the requested number of bytes from the start of the body. */
+  head: Buffer;
 }
 
 export interface EdgeRequestOptions {
@@ -72,6 +84,54 @@ export class EdgeTransport {
     pathname: string,
     options: EdgeRequestOptions = {},
   ): Promise<EdgeResponse> {
+    return this.send(publicOrigin, pathname, options, (response, resolve) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const status = response.statusCode ?? 0;
+        resolve({ ok: status >= 200 && status < 300, status, headers: response.headers, body, value: parseBody(body) });
+      });
+    });
+  }
+
+  /**
+   * One request whose body is never held in memory: it is counted and hashed
+   * as it arrives, and only its first `keepBytes` bytes are kept.
+   */
+  streamRequest(
+    publicOrigin: string,
+    pathname: string,
+    options: EdgeRequestOptions & { keepBytes: number },
+  ): Promise<EdgeStreamedResponse> {
+    return this.send(publicOrigin, pathname, options, (response, resolve) => {
+      const hash = createHash("sha256");
+      const kept: Buffer[] = [];
+      let bodyBytes = 0;
+      let keptBytes = 0;
+      response.on("data", (chunk: Buffer) => {
+        hash.update(chunk);
+        bodyBytes += chunk.length;
+        if (keptBytes < options.keepBytes) {
+          const part = chunk.subarray(0, options.keepBytes - keptBytes);
+          kept.push(part);
+          keptBytes += part.length;
+        }
+      });
+      response.on("end", () => {
+        const status = response.statusCode ?? 0;
+        resolve({ ok: status >= 200 && status < 300, status, headers: response.headers, bodyBytes,
+          bodySha256: hash.digest("hex"), head: Buffer.concat(kept) });
+      });
+    });
+  }
+
+  private send<T>(
+    publicOrigin: string,
+    pathname: string,
+    options: EdgeRequestOptions,
+    read: (response: IncomingMessage, resolve: (value: T) => void) => void,
+  ): Promise<T> {
     const resolved = publicTarget(publicOrigin, pathname);
     const target = this.adapterUrl
       ? new URL(
@@ -92,19 +152,8 @@ export class EdgeTransport {
           ...(this.lookup ? { lookup: this.lookup } : {}),
         },
         (response) => {
-          const chunks: Buffer[] = [];
-          response.on("data", (chunk: Buffer) => chunks.push(chunk));
-          response.on("end", () => {
-            const body = Buffer.concat(chunks).toString("utf8");
-            const status = response.statusCode ?? 0;
-            resolve({
-              ok: status >= 200 && status < 300,
-              status,
-              headers: response.headers,
-              body,
-              value: parseBody(body),
-            });
-          });
+          response.on("error", reject);
+          read(response, resolve);
         },
       );
       request.on("error", reject);
