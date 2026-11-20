@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -7,6 +7,7 @@ import {
   type Stats,
 } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -40,6 +41,7 @@ const JOURNAL_ROOT_ENTRIES = new Set([
   ".identity-lock-target.lock",
   ".identity.json",
   "binding.json",
+  "digest-key.json",
   "entries",
   "locks",
 ]);
@@ -47,6 +49,8 @@ const ORPHAN_BINDING_TEMP =
   /^\.binding\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 const ORPHAN_IDENTITY_TEMP =
   /^\.\.identity\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+const ORPHAN_DIGEST_KEY_TEMP =
+  /^\.digest-key\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 
 export const MUTATION_JOURNAL_ENV = "OPENCLOUD_MUTATION_JOURNAL_DIR";
 export const APP_OWNER_MUTATION_JOURNAL_DIRECTORY =
@@ -788,7 +792,8 @@ async function secureDirectory(
       (entry) =>
         !JOURNAL_ROOT_ENTRIES.has(entry) &&
         !ORPHAN_BINDING_TEMP.test(entry) &&
-        !ORPHAN_IDENTITY_TEMP.test(entry),
+        !ORPHAN_IDENTITY_TEMP.test(entry) &&
+        !ORPHAN_DIGEST_KEY_TEMP.test(entry),
     );
     if (unexpected.length > 0) {
       throw new MutationJournalError(
@@ -1365,8 +1370,12 @@ export class MutationRun {
   }
 }
 
+/** The journal's own random key for keyed digests; see MutationJournal.keyedDigest. */
+const DIGEST_KEY_FILE = "digest-key.json";
+
 export class MutationJournal {
   readonly directory: string;
+  private digestKey: Promise<Buffer> | null = null;
   private readonly rootHandle: number | null;
   private readonly entriesHandle: number | null;
   private readonly locksHandle: number | null;
@@ -1848,6 +1857,57 @@ export class MutationJournal {
   /** The exact app this journal is bound to. */
   get appId(): string {
     return this.binding.appId;
+  }
+
+  /**
+   * A keyed digest (HMAC-SHA256) of request content that may be private, such
+   * as a job's input, so the journal can tell requests apart without keeping
+   * anything a guess could be tested against offline. The key is random, made
+   * once per journal and kept beside its entries with the same protection.
+   */
+  async keyedDigest(value: unknown): Promise<string> {
+    this.digestKey ??= this.loadDigestKey().catch((error: unknown) => {
+      this.digestKey = null;
+      throw error;
+    });
+    return createHmac("sha256", await this.digestKey).update(canonicalJson(value)).digest("hex");
+  }
+
+  private async loadDigestKey(): Promise<Buffer> {
+    const file = path.join(this.anchoredDirectory, DIGEST_KEY_FILE);
+    const read = async (): Promise<Buffer | null> => {
+      const raw = await readOptional(file);
+      if (raw === null) return null;
+      const key = (JSON.parse(raw) as { key?: unknown }).key;
+      if (typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key)) {
+        throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key is invalid");
+      }
+      return Buffer.from(key, "hex");
+    };
+    const existing = await read();
+    if (existing) return existing;
+    // Written in full, then linked into place: it never exists half written,
+    // and when two commands make one at once, both use the first.
+    const temporary = path.join(this.anchoredDirectory, `.${DIGEST_KEY_FILE}.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, key: randomBytes(32).toString("hex") })}\n`, "utf8");
+        if (process.platform !== "win32") await handle.chmod(0o600);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await link(temporary, file).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+      await syncDirectory(this.anchoredDirectory);
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+    const created = await read();
+    if (!created) throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key could not be kept");
+    return created;
   }
 
   async run<T>(

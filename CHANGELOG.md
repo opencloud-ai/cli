@@ -77,6 +77,10 @@
 - `/version` markers count only when they are exactly 1; any other value reads
   as absent (the earlier flow), not as `API_CONTRACT_MISMATCH` on every
   journaled command.
+- The value `secret set` reads from standard input is kept out of error
+  reports, and `containers run` journals only a keyed digest of the job's
+  input (HMAC with a random key kept with the journal), never a plain digest
+  a guess could be tested against.
 - Accept container frontends and routes. A manifest that pins no SDK keeps
   CLI 3.20's default, 2.3.0, which every supported OpenCloud installs, so an
   unpinned app never moves to another SDK on its next deploy; one that

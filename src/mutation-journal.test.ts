@@ -728,6 +728,27 @@ describe("mutation journal", () => {
     );
   });
 
+  it("digests private request content with its own random key, kept beside its entries", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const first = await MutationJournal.open(binding);
+    const input = { input: { card: "4111 1111 1111 1111" } };
+    // Made once, even by two commands at the same moment.
+    const [one, two] = await Promise.all([first.keyedDigest(input), (await MutationJournal.open(binding)).keyedDigest(input)]);
+    expect(one).toBe(two);
+    expect(one).toMatch(/^[0-9a-f]{64}$/);
+    expect(await (await MutationJournal.open(binding)).keyedDigest(input)).toBe(one);
+    expect(await first.keyedDigest({ input: { card: "4111 1111 1111 1112" } })).not.toBe(one);
+    // Not the plain digest a guess could be tested against, and not another journal's.
+    const { createHash } = await import("node:crypto");
+    expect(one).not.toBe(createHash("sha256").update(JSON.stringify(input)).digest("hex"));
+    const other = await MutationJournal.open({ ...binding, directory: path.join(await temporaryDirectory(), "journal") });
+    expect(await other.keyedDigest(input)).not.toBe(one);
+    const keyFile = path.join(directory, "digest-key.json");
+    expect((await stat(keyFile)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(keyFile, "utf8")).key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("keeps a validation dispatch whose reply never came, and lets only the same request send it again", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const binding = { directory, apiUrl: API_URL, appId: APP_ID };

@@ -75,6 +75,10 @@ const server = createServer(async (request, response) => {
   if (request.url === `/v1/apps/${slowAppId}`) return setTimeout(() => send(200, { id: slowAppId }), 1_500);
   if (request.url === `/v1/apps/${appId}/usage`) return request.socket.destroy();
   if (request.method === "POST" && request.url === `/v1/apps/${appId}/restart`) return send(202, { id: operationId, state: "queued" });
+  // A fault whose message quotes the secret value it was sent.
+  if (request.method === "PUT" && request.url === `/v1/apps/${appId}/secrets/STRIPE_KEY`) {
+    return send(500, { code: "SECRET_STORE_FAILED", message: `Could not store ${JSON.parse(record.body).value}` });
+  }
   // A fault whose message quotes the registry password it was sent.
   if (request.method === "POST" && request.url === `/v1/apps/${appId}/compute/registries`) {
     return send(500, { code: "REGISTRY_CHECK_FAILED", message: `Registry check failed for ${JSON.parse(record.body).password}` });
@@ -256,6 +260,12 @@ try {
   assert.equal(registryReport.errorCode, "REGISTRY_CHECK_FAILED");
   assert.equal(registryReport.message, "Registry check failed for [VALUE]");
   assert.ok(!registry.sent[0].body.includes(registryPassword), "the registry password was reported");
+
+  const secretValue = "synthetic-secret-value-9c41";
+  const secretSet = await reported(["secret", "set", appId, "STRIPE_KEY", "--idempotency-key", "contract-secret-1"], { stdin: `${secretValue}\n` });
+  assert.equal(secretSet.status, 1, secretSet.stderr);
+  assert.equal(parsedReport(secretSet.sent[0]).message, "Could not store [VALUE]");
+  assert.ok(!secretSet.sent[0].body.includes(secretValue), "the secret value was reported");
 
   // A CLI failure before any request: paths in the home directory are
   // reported from ~, and parsers' excerpts of files never.

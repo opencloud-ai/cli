@@ -681,6 +681,12 @@ interface JournalMutationInput {
   ownerAccountLogin?: boolean | undefined;
   cwd?: string | undefined;
   /**
+   * Request content that may be private, such as a job's input: the journal
+   * keeps only its keyed digest (see MutationJournal.keyedDigest), never a
+   * plain one a guess could be tested against.
+   */
+  privateRequest?: unknown;
+  /**
    * Settle the entry when OpenCloud definitely refuses the request (see
    * isDefiniteRefusal), so a corrected request for the same target, such as
    * a control with the generation `get` now shows, is not held behind it.
@@ -711,7 +717,10 @@ async function outputReplayMutation<T>(
   const context = input.ownerAccountLogin === true
     ? await ownerMutationContext(input.appId, input.cwd)
     : await exactAppMutationContext(input.appId, input.cwd);
-  await context.journal.run(mutationIntent(input), async (run) => {
+  const intent = input.privateRequest === undefined
+    ? mutationIntent(input)
+    : mutationIntent({ ...input, safeRequest: { request: input.safeRequest, keyedSha256: await context.journal.keyedDigest(input.privateRequest) } });
+  await context.journal.run(intent, async (run) => {
     run.failIfUnknown();
     await run.markAttempted();
     let result: T;
@@ -5574,6 +5583,8 @@ secret
   .action(async (appId, name, options) => {
     const context = await exactAppMutationContext(appId);
     const value = await secretFromStdin();
+    // Kept out of an error report, whatever a message might quote.
+    invocation.privateValues = [...invocation.privateValues, value];
     await context.journal.run(
       mutationIntent({
         commandId: "opencloud secret set",
@@ -6379,7 +6390,7 @@ containers
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud containers run", appId: scope.appId, settleRefusals: true,
-      safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      safeScope: { ...scope, name: input.name }, safeRequest: { action: "run-job" }, privateRequest: input.body,
       explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("submitContainerJob", input, { idempotencyKey }));
   });
@@ -6572,7 +6583,7 @@ devContainers
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
       commandId: "opencloud app dev containers run", appId: scope.appId, settleRefusals: true,
-      safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
+      safeScope: { ...scope, name: input.name }, safeRequest: { action: "run-job" }, privateRequest: input.body,
       explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("submitDevContainerJob", input, { idempotencyKey }));
   });
