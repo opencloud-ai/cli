@@ -83,7 +83,7 @@ export function journalHint(code: string, pending: PendingView, running: Running
     const revision = pending.revision === undefined ? "" : `: it did if session.activeRevision.draftRevision is ${pending.revision}`;
     return `OpenCloud did not confirm the development apply in time, and it was not repeated. Check with ${check}${revision}. If it did not take effect, run ${again} to apply again.`;
   }
-  if (code === "DRAFT_VALIDATION_WAIT_TIMEOUT") {
+  if (code === "DRAFT_VALIDATION_WAIT_TIMEOUT" || code === "VALIDATION_INTERRUPTED") {
     // A generated key rejoins without being named; a given one must be given again.
     const again = same
       ? quoted(`${commandLine(running.route, [...running.args.values()])}${pending.generatedKey ? "" : ` --idempotency-key ${pending.idempotencyKey}`}`)

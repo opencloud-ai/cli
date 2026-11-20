@@ -39,6 +39,10 @@ const state = {
   refuseApply: false,
   interruptValidation: null,
   busyBeforeInterruption: false,
+  /** Interrupts only a validation of the canonical opencloud.json (the second one). */
+  interruptCanonicalOnly: false,
+  /** Leaves the interrupted validation unanswered, for a CLI that abandons it on Ctrl-C. */
+  holdInterruptedValidation: false,
   busyValidation: false,
   validationHttpFailure: null,
   canonicalReceiptKey: null,
@@ -219,7 +223,7 @@ const server = createServer(async (request, response) => {
         return send(response, 429, { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true,
           details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
       }
-      if (state.interruptValidation) {
+      if (state.interruptValidation && (!state.interruptCanonicalOnly || draft.files.has("opencloud.json"))) {
         if (state.busyBeforeInterruption) {
           state.busyBeforeInterruption = false;
           response.setHeader("Retry-After", "1");
@@ -228,7 +232,12 @@ const server = createServer(async (request, response) => {
         }
         const interrupt = state.interruptValidation;
         state.interruptValidation = null;
+        state.interruptCanonicalOnly = false;
         interrupt();
+        if (state.holdInterruptedValidation) {
+          state.holdInterruptedValidation = false;
+          return;
+        }
         request.socket.destroy();
         return;
       }
@@ -339,7 +348,7 @@ function release(draft, type) {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
 async function runCli(argumentsList, { status = 0, remote = true, interruptValidation = false, busyBeforeInterruption = false,
-  interruptAfterProgress = false } = {}) {
+  interruptAfterProgress = false, interruptCanonicalOnly = false, interruptWithSigint = false } = {}) {
   const environment = { ...process.env };
   for (const key of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TELEMETRY", "DO_NOT_TRACK"]) {
     delete environment[key];
@@ -354,8 +363,10 @@ async function runCli(argumentsList, { status = 0, remote = true, interruptValid
     env: environment, stdio: ["ignore", "pipe", "pipe"],
   });
   if (interruptValidation) {
-    state.interruptValidation = () => child.kill("SIGKILL");
+    state.interruptValidation = () => child.kill(interruptWithSigint ? "SIGINT" : "SIGKILL");
     state.busyBeforeInterruption = busyBeforeInterruption;
+    state.interruptCanonicalOnly = interruptCanonicalOnly;
+    state.holdInterruptedValidation = interruptWithSigint;
   }
   if (interruptAfterProgress) state.busyValidation = true;
   let stdout = "";
@@ -549,8 +560,28 @@ try {
   state.canonicalReceiptKey = null;
   state.resolveYamlDifferently = false;
 
-  // Initial revision and file drift still refuse every write before a resumed
-  // progress receipt has obtained its exact authoritative result.
+  // F2: a second validation, of the canonical opencloud.json, interrupted:
+  //     the same source run again rejoins it as the draft holds it, applying
+  //     no file again, instead of refusing every identical rerun.
+  state.resolveYamlDifferently = true;
+  await write("frontend/index.html", "<!doctype html><title>Counter v4b</title>\n");
+  const canonicalKey = "interrupt-canonical-validation";
+  await runCli(["deploy", app, "--idempotency-key", canonicalKey], { status: null, interruptValidation: true, interruptCanonicalOnly: true });
+  const canonicalReceipt = (await validationEntry(canonicalKey)).checkpoint.validation;
+  assert.equal(canonicalReceipt.state, "dispatched");
+  const canonicalDraft = state.drafts.get(canonicalReceipt.draftId);
+  assert.ok(canonicalDraft.files.has("opencloud.json") && !canonicalDraft.files.has("opencloud.yaml"), "The second validation was the canonical one");
+  await ageInterruptedLocks(temporary);
+  const rejoinAt = state.requests.length;
+  await runCli(["deploy", app, "--idempotency-key", canonicalKey]);
+  assert.deepEqual(state.requests.slice(rejoinAt).filter(request => request.method !== "GET")
+    .map(request => [request.method, request.path.split("/").at(-1)]), [["POST", "validate"], ["POST", "deploy"]]);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, canonicalDraft.validatedDigest);
+  state.resolveYamlDifferently = false;
+
+  // F2: a draft edited elsewhere after the wait ended drops the kept
+  //     validation: the next run applies this source again where needed,
+  //     validates the new revision and deploys.
   for (const drift of ["revision", "files"]) {
     const key = `resume-progress-${drift}-drift`;
     const pending = await interruptAcknowledgedProgress(["deploy", app], key);
@@ -561,11 +592,39 @@ try {
       draft.files.set("frontend/index.html", { content, sha256: sha256(content) });
     }
     const before = state.requests.length;
-    const refused = await runCli(["deploy", app, "--idempotency-key", key], { status: 1 });
-    assert.equal(JSON.parse(refused.stderr.trim().split("\n").at(-1)).error.code, "MUTATION_REPLAY_MISMATCH");
-    assert.ok(state.requests.slice(before).every(request => request.method === "GET"), "Initial progress drift must not be overwritten");
-    assert.deepEqual((await validationEntry(key)).checkpoint.validation, pending);
+    await runCli(["deploy", app, "--idempotency-key", key]);
+    assert.deepEqual(state.requests.slice(before).filter(request => request.method !== "GET")
+      .map(request => [request.method, request.path.split("/").at(-1)]),
+    drift === "revision" ? [["POST", "validate"], ["POST", "deploy"]] : [["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"]]);
+    assert.equal(draft.validatedRevision, draft.revision, "The new revision was validated");
+    assert.equal((await validationEntry(key)).state, "completed");
   }
+
+  // F2: the draft a stopped deploy kept was deployed elsewhere: the next run
+  //     says so, sends nothing and settles; the one after starts afresh.
+  await write("frontend/index.html", "<!doctype html><title>Counter v4c</title>\n");
+  await runCli(["deploy", app], { status: null, interruptAfterProgress: true });
+  await ageInterruptedLocks(temporary);
+  const closedDraft = lastDraft();
+  closedDraft.status = "deployed";
+  const closedAt = state.requests.length;
+  const closed = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.equal(closed.code, "DRAFT_NOT_OPEN");
+  assert.ok(closed.message.includes(`(${closedDraft.id}) is deployed now, so its validation can't be rejoined`), closed.message);
+  assert.ok(state.requests.slice(closedAt).every(request => request.method === "GET"), "Nothing is sent for a closed draft");
+  const draftsBeforeFresh = state.drafts.size;
+  await runCli(["deploy", app]);
+  assert.equal(state.drafts.size, draftsBeforeFresh + 1, "The next run starts from a new draft");
+
+  // Nit 12: Ctrl-C while waiting for a validation settles its entry: the
+  //     command exits 130, and a deploy of changed source is not held back.
+  await write("frontend/index.html", "<!doctype html><title>Counter v4d</title>\n");
+  const interrupted = JSON.parse((await runCli(["deploy", app], { status: 130, interruptValidation: true, interruptWithSigint: true }))
+    .stderr.trim().split("\n").at(-1)).error;
+  assert.deepEqual([interrupted.code, interrupted.pending.state], ["VALIDATION_INTERRUPTED", "completed"]);
+  assert.match(interrupted.hint, /^To keep waiting, run `opencloud deploy .*` again with the same input/);
+  await write("frontend/index.html", "<!doctype html><title>Counter v4e</title>\n");
+  await runCli(["deploy", app]);
 
   // 6. A real difference in OpenCloud's artifact still fails, and says which.
   state.extraArtifactFile = true;
@@ -646,7 +705,7 @@ try {
   assert.equal(appliesIn(syncAt), 0, "No apply is sent to a session production overtook");
 
   process.stdout.write(
-    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures, each settled and rejoined once by the next run, resumed canonical manifest normalization, initial drift refusal, real mismatch refusal, a refused development apply retried with its kept session, an interrupted start resumed by its own key, and a sync production overtook refused before any apply.\n",
+    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures, each settled and rejoined once by the next run, resumed canonical manifest normalization, an interrupted canonical validation rejoined, drift dropped and resumed, a closed draft refused, Ctrl-C settled, real mismatch refusal, a refused development apply retried with its kept session, an interrupted start resumed by its own key, and a sync production overtook refused before any apply.\n",
   );
 } finally {
   server.close();

@@ -51,7 +51,7 @@ describe("validation on an OpenCloud without pinned validation (2.35.x)", () => 
     await expect(pending).resolves.toEqual(result);
     expect(call).toHaveBeenCalledTimes(3);
     for (const args of call.mock.calls) expect(args).toEqual(["validateDraft", { appId, draftId, body: {} },
-      { timeoutMs: 540_000, idempotencyKey: "journal-key-1" }]);
+      { timeoutMs: 540_000, idempotencyKey: "journal-key-1", signal: expect.any(AbortSignal) }]);
     expect(stderr).toHaveBeenCalledTimes(2);
     expect(states(request)).toEqual(["dispatched", "refused", "dispatched", "refused", "dispatched", "result"]);
     expect(request.journal.settleValidation).not.toHaveBeenCalled();
@@ -61,7 +61,7 @@ describe("validation on an OpenCloud without pinned validation (2.35.x)", () => 
     const call = vi.fn().mockResolvedValue(result), request = { ...input(plain, false), version: "legacy-2" };
     await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).resolves.toEqual(result);
     expect(call).toHaveBeenCalledExactlyOnceWith("validateDraft", { appId, draftId, body: { version: "legacy-2" } },
-      { idempotencyKey: "journal-key-1" });
+      { idempotencyKey: "journal-key-1", signal: expect.any(AbortSignal) });
     // FRONTEND_BUILD_BUSY is retried only for a build, as 3.20 did.
     const busyPlain = input(plain, false), once = vi.fn().mockRejectedValue(buildBusy);
     await expect(validateDraftWithProgress({ call: once } as unknown as OpenCloudClient, busyPlain)).rejects.toBe(buildBusy);
@@ -102,7 +102,7 @@ describe("CLI authoritative validation", () => {
     await expect(pending).resolves.toEqual(result);
     expect(call).toHaveBeenCalledTimes(3);
     for (const args of call.mock.calls) expect(args).toEqual(["validateDraft", { appId, draftId, body: { expectedRevision: 3 } },
-      { idempotencyKey: "journal-key-1", timeoutMs: 30_000 }]);
+      { idempotencyKey: "journal-key-1", timeoutMs: 30_000, signal: expect.any(AbortSignal) }]);
     expect(stderr).toHaveBeenCalledOnce();
     expect(String(stderr.mock.calls[0]![0])).toContain(`draft ${draftId}, revision 3`);
     expect(request.journal.settleValidation).not.toHaveBeenCalled();
@@ -127,7 +127,7 @@ describe("CLI authoritative validation", () => {
     const retry = vi.fn().mockResolvedValue(result);
     await expect(validateDraftWithProgress({ call: retry } as unknown as OpenCloudClient, reopened)).resolves.toEqual(result);
     expect(retry).toHaveBeenCalledExactlyOnceWith("validateDraft", { appId, draftId, body: { expectedRevision: 3 } },
-      { idempotencyKey: "journal-key-1", timeoutMs: 30_000 });
+      { idempotencyKey: "journal-key-1", timeoutMs: 30_000, signal: expect.any(AbortSignal) });
     expect(reopened.journal.checkpoint?.validation).toMatchObject({ state: "result", validationId: result.id });
   });
 
@@ -194,6 +194,24 @@ describe("CLI authoritative validation", () => {
     expect(await ended).toBe(admissionBusy);
     expect(hintOf(admissionBusy)).toMatch(/^OpenCloud was too busy to start validating draft/);
     expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+  });
+
+  it.each([true, false])("settles the entry on Ctrl-C and exits as interrupted (pinned: %s)", async (pinned) => {
+    const listeners = process.listenerCount("SIGINT");
+    const request = input({ containerCount: 0, frontendBuild: true }, pinned);
+    // A request that only ends when its signal is aborted, as a held one does.
+    const call = vi.fn((_operation: string, _input: unknown, options: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+    const pending = validateDraftWithProgress({ call } as unknown as OpenCloudClient, request).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(call).toHaveBeenCalledOnce());
+    expect(process.listenerCount("SIGINT")).toBe(listeners + 1);
+    process.emit("SIGINT", "SIGINT");
+    const interrupted = await pending;
+    expect(interrupted).toMatchObject({ code: "VALIDATION_INTERRUPTED", retryable: true, pending: settledPending,
+      message: `Interrupted while waiting for the validation of draft ${draftId}, revision 3. OpenCloud may still be validating it; this did not cancel it.` });
+    expect(request.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+    expect(process.listenerCount("SIGINT")).toBe(listeners);
   });
 
   it.each([new DOMException("Timed out", "TimeoutError"), new TypeError("fetch failed"), new Error("Malformed successful response")])(

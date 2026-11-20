@@ -22,9 +22,15 @@
   429, or `DRAFT_VALIDATION_WAIT_TIMEOUT`), the entry is settled and holds
   nothing back; the same command with the same input rejoins that validation,
   in a fresh window once the kept one has passed, and a changed request starts
-  afresh. An interrupted run's validation is sent again by the next run of
-  the same command. `APP_LOCK_BUSY` (nothing started) is sent again while the
-  window lasts. Apps without containers or a frontend build wait at least 90
+  afresh. Ctrl-C while waiting settles the entry the same way and exits 130
+  with `VALIDATION_INTERRUPTED`; a run killed outright leaves its validation
+  for the next run of the same command, which sends it again. A rejoined
+  validation whose draft no longer matches (edited elsewhere) is dropped, and
+  the run applies its source again; one whose draft holds this source's
+  canonical `opencloud.json` (a second validation stopped) is rejoined as it
+  is; one whose draft was deployed or discarded elsewhere fails with
+  `DRAFT_NOT_OPEN`, sends nothing, and the next run starts from a new draft.
+  `APP_LOCK_BUSY` (nothing started) is sent again while the window lasts. Apps without containers or a frontend build wait at least 90
   seconds, not 30, and `DRAFT_VALIDATION_WAIT_TIMEOUT` names the entry and the
   command that rejoins it.
 - Add production and isolated development container commands for jobs, HTTP

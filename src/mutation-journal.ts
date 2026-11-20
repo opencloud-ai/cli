@@ -1354,6 +1354,17 @@ export class MutationRun {
   }
 
   /**
+   * Forgets a kept validation that no longer describes its draft, so the
+   * workflow applies its source again and validates the new revision.
+   * OpenCloud's run for the old revision, if any, ends on its own; nothing
+   * waits on it.
+   */
+  async dropValidation(): Promise<void> {
+    const { validation: _dropped, ...rest } = this.checkpoint ?? { stage: "validating" };
+    await this.saveCheckpoint(rest);
+  }
+
+  /**
    * Ends the workflow at its validation, which changed nothing live: records
    * why and completes the entry, so it holds nothing back. "waiting" means
    * OpenCloud may still be validating; running the very same request again

@@ -1205,6 +1205,18 @@ async function synchronizeValidatedDraft(
   const retainedValidation = run.checkpoint?.validation;
   let validationProgress = retainedValidation?.state === "progress" || retainedValidation?.state === "dispatched"
     ? retainedValidation : null;
+  // A deploy finds its draft only through the validation it rejoins; a
+  // development workflow names its own.
+  const draftFromRejoin = validationProgress !== null && existingDraftId === undefined;
+  /**
+   * The kept validation no longer describes the draft (edited elsewhere, or
+   * holding other files): forget it and resume as an ordinary run, which
+   * applies this source again and validates the new revision.
+   */
+  const dropKeptValidation = async () => {
+    await run.dropValidation();
+    validationProgress = null;
+  };
   if (validationProgress) {
     if (existingDraftId && existingDraftId !== validationProgress.draftId) {
       throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress belongs to a different source draft");
@@ -1240,14 +1252,19 @@ async function synchronizeValidatedDraft(
       draftId: existingDraftId,
     });
     if (["deploying", "deployed", "discarded"].includes(existing.status)) {
+      if (draftFromRejoin) {
+        // Closed elsewhere after this command stopped waiting: there is
+        // nothing to rejoin, so the next run starts from a new draft.
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The draft this command was waiting on (${existing.id}) is ${existing.status} now, so its validation can't be rejoined. Nothing was sent; run the command again to start from a new draft.`));
+      }
       throw callerFailure(new Error(
         `The local dev draft is ${existing.status}; start a new dev session for the next change.`,
       ));
     }
     draft = { id: existing.id, revision: existing.revision };
-    if (validationProgress && draft.revision !== validationProgress.revision) {
-      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "The draft changed after acknowledged validation progress; no request was repeated");
-    }
+    if (validationProgress && draft.revision !== validationProgress.revision) await dropKeptValidation();
   } else {
     await run.markAttempted();
     const created = await control.call(
@@ -1280,7 +1297,22 @@ async function synchronizeValidatedDraft(
   });
   let revision = draft.revision;
   let appliedCount = 0;
-  const applyAndValidate = async (local: DraftFiles) => {
+  /**
+   * The source with OpenCloud's canonical opencloud.json in place of the
+   * author manifest, as stored when OpenCloud resolves that manifest
+   * differently from this CLI (usually an unpinned runtime.sdk.version).
+   */
+  const canonicalFiles = (): DraftFiles => {
+    const canonical: DraftFiles = new Map(upload.files);
+    canonical.delete(bundle.sourceManifest);
+    const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
+    canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
+    return canonical;
+  };
+  const sameFiles = (local: DraftFiles, remote: Map<string, { sha256: string }>) =>
+    local.size === remote.size && [...local].every(([file, value]) => remote.get(file)?.sha256 === value.sha256);
+  const applyAndValidate = async (source: DraftFiles) => {
+  let local = source;
   for (let iteration = 0; iteration < 10_000; iteration += 1) {
     const current = await control.call("getDraft", {
       appId: bundle.manifest.appId,
@@ -1328,7 +1360,13 @@ async function synchronizeValidatedDraft(
     changes.sort((left, right) => left.path.localeCompare(right.path));
     if (!changes.length) break;
     if (validationProgress) {
-      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Draft files changed after acknowledged validation progress; no files were overwritten");
+      // The kept validation is of this source's canonical manifest (a second
+      // validation stopped): rejoin it as the draft holds it.
+      if (upload.mode === "source" && sameFiles(canonicalFiles(), remote)) {
+        local = canonicalFiles();
+        break;
+      }
+      await dropKeptValidation();
     }
     const batch = changes.slice(0, 200);
     await run.checkpointStage({
@@ -1422,11 +1460,7 @@ async function synchronizeValidatedDraft(
     process.stderr.write(brandText(
       `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI (${identity.comparison.manifestKeys.join(", ")}); storing the canonical opencloud.json with the release source.\n`,
     ));
-    const canonical: DraftFiles = new Map(upload.files);
-    canonical.delete(bundle.sourceManifest);
-    const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
-    canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
-    validation = await applyAndValidate(canonical);
+    validation = await applyAndValidate(canonicalFiles());
     identity = await validatedArtifactIdentity(control, bundle, draft.id, validation);
   }
   if (identity.artifactSha256 === null) {
@@ -7005,7 +7039,8 @@ if (asksForVersion(process.argv.slice(2))) {
     }
     // Only the message and hint follow the brand; the report keeps the original.
     process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
-    process.exitCode = 1;
+    // Ctrl-C while waiting for a validation exits as an interrupt does.
+    process.exitCode = (error as { code?: unknown } | null)?.code === "VALIDATION_INTERRUPTED" ? 130 : 1;
     // After the output, without changing it or the exit code; at most 2.5 s.
     await errorReporter.reportFailure(error).catch(() => undefined);
   });

@@ -236,10 +236,14 @@ stops waiting without a result (a lost reply, a proxy's error, or
 `DRAFT_VALIDATION_WAIT_TIMEOUT` after the waiting budget, at least 90
 seconds), its entry is settled and holds nothing back: the same command with the
 same input rejoins that validation, in a fresh window if the last one has
-passed, and a changed request starts afresh. A command interrupted while
-validating (Ctrl-C) leaves its entry to the same command, which sends that
-validation again. `APP_LOCK_BUSY` started nothing, so it is sent again while
-the window lasts. A container command or registry change
+passed, and a changed request starts afresh. Ctrl-C while waiting settles the
+entry the same way and exits 130 with `VALIDATION_INTERRUPTED`; a command
+killed outright leaves its validation to the same command, which sends it
+again. When a rejoined draft no longer matches (edited elsewhere), the kept
+validation is dropped and the source applied again; a draft deployed or
+discarded elsewhere fails with `DRAFT_NOT_OPEN` and the next run starts from
+a new draft. `APP_LOCK_BUSY` started nothing, so it is sent again while the
+window lasts. A container command or registry change
 that OpenCloud refused with its own code, not retryable, holds nothing, so a
 corrected request is sent; so is a deploy after `ARTIFACT_MISMATCH`.
 

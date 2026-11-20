@@ -27,8 +27,29 @@ const FRONTEND_BUILD_BUSY_DELAY_MS = 6_000;
 
 type ValidationJournal = Pick<MutationRun, "checkpoint" | "checkpointValidation" | "markAttempted" | "failIfUnknown" | "settleValidation">;
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+/** A wait that Ctrl-C (the run's abort signal) cuts short. */
+function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal!.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+/**
+ * Ctrl-C while this run waits for a validation: the request is abandoned
+ * (OpenCloud's run goes on) and the entry settled, so the command exits 130
+ * holding nothing back. A second Ctrl-C exits at once.
+ */
+function interruptOnSigint(): { signal: AbortSignal; release: () => void } {
+  const controller = new AbortController();
+  const onSigint = () => {
+    if (controller.signal.aborted) process.exit(130);
+    controller.abort(new Error("Interrupted while waiting for validation"));
+  };
+  process.on("SIGINT", onSigint);
+  return { signal: controller.signal, release: () => { process.off("SIGINT", onSigint); } };
 }
 
 /** 503 APP_LOCK_BUSY: OpenCloud says this request did not start validation. */
@@ -59,10 +80,20 @@ type ValidationInput = {
  */
 export async function validateDraftWithProgress(control: OpenCloudClient, input: ValidationInput) {
   input.journal.failIfUnknown();
-  const retained = input.journal.checkpoint?.validation;
   const requestSha256 = createHash("sha256").update(JSON.stringify({ appId: input.appId, draftId: input.draftId,
     revision: input.revision, version: input.version ?? null, idempotencyKey: input.idempotencyKey ?? null })).digest("hex");
-  if (!input.pinned) return validateUnpinned(control, input, requestSha256);
+  const interrupt = interruptOnSigint();
+  try {
+    return input.pinned
+      ? await validatePinned(control, input, requestSha256, interrupt.signal)
+      : await validateUnpinned(control, input, requestSha256, interrupt.signal);
+  } finally {
+    interrupt.release();
+  }
+}
+
+async function validatePinned(control: OpenCloudClient, input: ValidationInput, requestSha256: string, signal: AbortSignal) {
+  const retained = input.journal.checkpoint?.validation;
   const timeoutMs = Math.max(draftValidationWaitTimeoutMs(input.manifest), MINIMUM_WAIT_MS);
   const pending = retained?.state === "progress" || retained?.state === "dispatched" ? retained : null;
   if (pending && (pending.draftId !== input.draftId || pending.revision !== input.revision || pending.requestSha256 !== requestSha256)) {
@@ -76,7 +107,7 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
     : Date.now() + timeoutMs;
   if (pending?.state === "progress") {
     const delayMs = Math.max(0, Date.parse(pending.retryNotBefore) - Date.now());
-    if (delayMs) await sleep(delayMs);
+    if (delayMs) await sleep(delayMs, signal).catch((error: unknown) => settleEndedValidation(input, error, signal));
   }
   const coordinates = { draftId: input.draftId, revision: input.revision, requestSha256, deadline: new Date(deadline).toISOString() };
   const journaled: Pick<OpenCloudClient, "call"> = { call: async (operation, request, options) => {
@@ -104,7 +135,7 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
           // Nothing started, so the same request goes again while time allows.
           await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
           if (deadline - Date.now() < ADMISSION_BUSY_DELAY_MS + 25_000) throw error;
-          await sleep(ADMISSION_BUSY_DELAY_MS);
+          await sleep(ADMISSION_BUSY_DELAY_MS, signal);
           continue;
         } else if (isDefiniteRefusal(error)) {
           // OpenCloud's own non-retryable 4xx: this validation is not running.
@@ -122,6 +153,7 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
       body: { expectedRevision: input.revision, ...(input.version ? { version: input.version } : {}) },
     }, {
       timeoutMs: Math.max(30_000, deadline - Date.now()),
+      signal,
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       onProgress: () => {
         if (Date.now() - lastProgress < 30_000) return;
@@ -130,7 +162,7 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
       },
     });
   } catch (error) {
-    return settleEndedValidation(input, error);
+    return settleEndedValidation(input, error, signal);
   }
 }
 
@@ -139,10 +171,17 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
  * when OpenCloud answered (the next run starts afresh), otherwise waiting
  * (the same request rejoins it), with the next step as the error's hint.
  */
-async function settleEndedValidation(input: ValidationInput, error: unknown): Promise<never> {
+async function settleEndedValidation(input: ValidationInput, error: unknown, signal: AbortSignal): Promise<never> {
   const validation = input.journal.checkpoint?.validation;
   // The journal's own refusals, and anything after the result, settle nothing.
   if (validation?.state === "result" || error instanceof MutationJournalError || error instanceof CliContractError) throw error;
+  if (signal.aborted) {
+    // Ctrl-C: whatever the abandoned request said, nothing is held back.
+    const settled = await input.journal.settleValidation("waiting");
+    throw new MutationJournalError("VALIDATION_INTERRUPTED",
+      `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}. OpenCloud may still be validating it; this did not cancel it.`,
+      true, settled);
+  }
   if (validation?.state === "refused" && error instanceof ApiError && !admissionBusy(error)) {
     await input.journal.settleValidation("refused");
     throw error;
@@ -172,7 +211,7 @@ async function settleEndedValidation(input: ValidationInput, error: unknown): Pr
  * one request at a time, nine minutes for a build, that answer retried on the
  * same revision, journaled as the pinned path is.
  */
-async function validateUnpinned(control: OpenCloudClient, input: ValidationInput, requestSha256: string) {
+async function validateUnpinned(control: OpenCloudClient, input: ValidationInput, requestSha256: string, signal: AbortSignal) {
   const built = input.manifest?.frontendBuild === true;
   const coordinates = { draftId: input.draftId, revision: input.revision, requestSha256,
     deadline: new Date(Date.now() + (FRONTEND_BUILD_BUSY_RETRIES + 1) * (FRONTEND_BUILD_REQUEST_MS + FRONTEND_BUILD_BUSY_DELAY_MS)).toISOString() };
@@ -183,7 +222,7 @@ async function validateUnpinned(control: OpenCloudClient, input: ValidationInput
       try {
         const result = await control.call("validateDraft",
           { appId: input.appId, draftId: input.draftId, body: input.version ? { version: input.version } : {} },
-          { ...(built ? { timeoutMs: FRONTEND_BUILD_REQUEST_MS } : {}), ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) });
+          { signal, ...(built ? { timeoutMs: FRONTEND_BUILD_REQUEST_MS } : {}), ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) });
         if (result.draftId !== input.draftId || result.revision !== input.revision) {
           // That server validated the draft as it is now: it changed meanwhile.
           await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
@@ -200,7 +239,7 @@ async function validateUnpinned(control: OpenCloudClient, input: ValidationInput
           // This request ended; the build goes on, and validating again waits on it.
           await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
           process.stderr.write("OpenCloud is still building this app's frontend (or another build for it); validating the same revision again.\n");
-          await sleep(FRONTEND_BUILD_BUSY_DELAY_MS);
+          await sleep(FRONTEND_BUILD_BUSY_DELAY_MS, signal);
           continue;
         }
         if (isDefiniteRefusal(error)) await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
@@ -208,6 +247,6 @@ async function validateUnpinned(control: OpenCloudClient, input: ValidationInput
       }
     }
   } catch (error) {
-    return settleEndedValidation(input, error);
+    return settleEndedValidation(input, error, signal);
   }
 }
