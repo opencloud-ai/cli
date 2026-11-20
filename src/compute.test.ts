@@ -70,6 +70,17 @@ describe("compute command boundaries", () => {
     expect(logSurface("runtime")).toBe("runtime");
     expect(logSurface("Runtime")).toBe("runtime");
     expect(logSurface("containers")).toBe("containers");
+    // The request kinds the dashboard offered are edge lines, read by OpenCloud.
+    for (const kind of ["page", "REST", " storage "]) expect(logSurface(kind)).toBe(kind.trim().toLowerCase());
+    // Names for lines of two surfaces are refused with both, as OpenCloud does.
+    let split: unknown;
+    try { logSurface("Cron"); } catch (error) { split = error; }
+    expect(structuredCliError(split).error).toMatchObject({
+      code: "LOG_SURFACE_UNKNOWN",
+      message: "\"cron\" isn't one log surface: a scheduled Function's own lines are function lines and the scheduler's are platform lines; use function or platform",
+      details: { field: "surface", use: ["function", "platform"] },
+    });
+    expect(() => logSurface("realtime")).toThrowError(expect.objectContaining({ details: expect.objectContaining({ use: ["http", "platform"] }) }));
     for (const unknown of ["edge", "runtimes", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
       expect(() => logSurface(unknown)).toThrowError(expect.objectContaining({
         code: "LOG_SURFACE_UNKNOWN",
@@ -82,7 +93,7 @@ describe("compute command boundaries", () => {
     expect(structuredCliError(refusal).error).toMatchObject({
       code: "LOG_SURFACE_UNKNOWN",
       details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"],
-        aliases: { functions: "function", runtime: "function", containers: "container" } },
+        aliases: { functions: "function", runtime: "function", containers: "container", page: "http", rest: "http", storage: "http" } },
     });
     expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "functions" }).surface).toBe("functions");
     expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "runtime" }).surface).toBe("runtime");

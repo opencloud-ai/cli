@@ -267,8 +267,13 @@ try {
   assert.equal(unknownSurface.code, "LOG_SURFACE_UNKNOWN");
   assert.equal(unknownSurface.message, 'Unknown log surface "edge": use function, container, http, ai or platform (runtime, the older name for function, still works)');
   assert.deepEqual(unknownSurface.details, { field: "surface", allowed: ["function", "container", "http", "ai", "platform"],
-    aliases: { functions: "function", runtime: "function", containers: "container" } });
+    aliases: { functions: "function", runtime: "function", containers: "container", page: "http", rest: "http", storage: "http" } });
+  const cron = (await run(["logs", appId, "--surface", "cron", "--from", now, "--to", "2026-11-14T01:00:00Z"], 1)).error;
+  assert.deepEqual([cron.code, cron.details.use], ["LOG_SURFACE_UNKNOWN", ["function", "platform"]]);
   assert.equal(requests.length, surfaceBefore, "an unknown surface reached the API");
+  // The dashboard's old request kinds are sent as typed; OpenCloud reads them as http.
+  await run(["logs", appId, "--surface", "page", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
+  assert.equal(requests.at(-1).body.surface, "page");
   const devPage = await run(["app", "dev", "logs", directory, "--kind", "job", "--surface", "container", "--from", now, "--to", "2026-11-14T01:00:00Z"]);
   assert.equal(requests.at(-1).body.surface, "container");
   assert.deepEqual(devPage.entries[0].fields, loggedFields, "app dev logs keeps a Function's logged fields");

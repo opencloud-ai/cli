@@ -72,32 +72,50 @@ export interface ComputeLogOptions extends ComputeQueryOptions {
  */
 export const LOG_SURFACES = ["function", "container", "http", "ai", "platform"] as const;
 /**
- * Other names the platform accepts for a surface: the plurals people type, and
+ * Other names the platform accepts for a surface: the plurals people type;
  * `runtime`, the older name for Function lines that the published telemetry
- * guide, earlier CLIs and OpenCloud releases before the surface names use.
+ * guide, earlier CLIs and OpenCloud releases before the surface names use;
+ * and the request kinds the dashboard used to offer, which are edge lines.
  */
 const LOG_SURFACE_ALIASES: Readonly<Record<string, (typeof LOG_SURFACES)[number]>> = {
   functions: "function",
   runtime: "function",
   containers: "container",
+  page: "http",
+  rest: "http",
+  storage: "http",
+};
+/** Names the dashboard used to offer whose lines sit under two surfaces. */
+const SPLIT_LOG_SURFACES: Readonly<Record<string, { lines: string; use: readonly (typeof LOG_SURFACES)[number][] }>> = {
+  realtime: { lines: "realtime connections are http lines and realtime deliveries are platform lines", use: ["http", "platform"] },
+  cron: { lines: "a scheduled Function's own lines are function lines and the scheduler's are platform lines", use: ["function", "platform"] },
 };
 
 /**
  * The surface a log page asks for: a name or alias, sent as typed (trimmed and
  * lowercased), never mapped. OpenCloud reads each alias itself, and a release
  * from before the surface names labels Function lines `runtime` and matches
- * the value exactly, so `runtime` must reach it as `runtime`. Any other value
- * would only match nothing, so it is refused before a request with the
- * platform's own code and wording.
+ * the value exactly, so `runtime` must reach it as `runtime`. Only a value no
+ * OpenCloud reads as a surface is refused before a request, with the
+ * platform's own code, wording and details; `container` is left to OpenCloud,
+ * which refuses it where containers don't run.
  */
 export function logSurface(value: string): string {
   const name = value.trim().toLowerCase();
   if ((LOG_SURFACES as readonly string[]).includes(name) || Object.hasOwn(LOG_SURFACE_ALIASES, name)) return name;
-  // The platform's own code, wording and details for the same refusal.
+  const details = { field: "surface", allowed: [...LOG_SURFACES], aliases: { ...LOG_SURFACE_ALIASES } };
+  const split = Object.hasOwn(SPLIT_LOG_SURFACES, name) ? SPLIT_LOG_SURFACES[name] : undefined;
+  if (split) {
+    throw callerFailure(new CliContractError(
+      "LOG_SURFACE_UNKNOWN",
+      `"${name}" isn't one log surface: ${split.lines}; use ${split.use.join(" or ")}`,
+      { details: { ...details, use: [...split.use] } },
+    ));
+  }
   throw callerFailure(new CliContractError(
     "LOG_SURFACE_UNKNOWN",
     `Unknown log surface ${JSON.stringify(value.trim().slice(0, 40))}: use function, container, http, ai or platform (runtime, the older name for function, still works)`,
-    { details: { field: "surface", allowed: [...LOG_SURFACES], aliases: { ...LOG_SURFACE_ALIASES } } },
+    { details },
   ));
 }
 

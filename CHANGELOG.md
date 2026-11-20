@@ -50,9 +50,11 @@
   was parsed.
 - `logs` and `app dev logs` name the surfaces `--surface` accepts in their help
   (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
-  `containers` and `runtime`, the older name for `function`) and refuse any
-  other value with `LOG_SURFACE_UNKNOWN` before sending a request, as the
-  platform does, instead of returning an empty page. Each name is sent as
+  `containers`, `page`, `rest` and `storage` for `http`, and `runtime`, the
+  older name for `function`) and refuse any other value with
+  `LOG_SURFACE_UNKNOWN` before sending a request, as the platform does,
+  instead of returning an empty page; `realtime` and `cron` name both
+  surfaces to use in `details.use`. Each name is sent as
   typed, never mapped: OpenCloud reads every alias itself, and a release from
   before the surface names still finds Function lines with `runtime`.
 - When OpenCloud refuses the input itself, the error keeps what it should be

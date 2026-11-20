@@ -627,10 +627,13 @@ exactly the same filters, `--from`, `--to`, and limit. Logs without any page or
 compute filter retain their legacy response. Feed v1 stays the default.
 `--surface` selects where lines came from: `function` (the app's Functions),
 `container`, `http` (the edge), `ai` (the AI gateway) or `platform`;
-`functions` and `containers` work too, and so does `runtime`, the older name
-for `function` and the only one an OpenCloud release from before these names
-knows. Each is sent as typed, never mapped to another name. Any other value
-fails with `LOG_SURFACE_UNKNOWN` before a request is sent.
+`functions` and `containers` work too, `page`, `rest` and `storage` select
+`http`, and `runtime` is the older name for `function` and the only one an
+OpenCloud release from before these names knows. Each is sent as typed, never
+mapped to another name, and OpenCloud decides; where containers don't run it
+refuses `container`. `realtime` and `cron` name lines of two surfaces, so
+they fail with `LOG_SURFACE_UNKNOWN` and both surfaces in `details.use`, as
+any other value does, before a request is sent.
 
 Registry connections belong to one app and one exact host. They authorize
 trusted image fetching; containers never receive the credential:

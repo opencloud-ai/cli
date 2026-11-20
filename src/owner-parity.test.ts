@@ -417,6 +417,13 @@ describe("owner-parity CLI helpers", () => {
       code: "LOG_SURFACE_UNKNOWN", status: 400, retryable: false,
       details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function", containers: "container" } },
     });
+    const split = structuredCliError(new ApiError(400, {
+      code: "LOG_SURFACE_UNKNOWN",
+      message: "\"realtime\" isn't one log surface: realtime connections are http lines and realtime deliveries are platform lines; use http or platform",
+      details: { field: "surface", allowed: ["function", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function" }, use: ["http", "platform"] },
+    }));
+    expect(split.error.details).toEqual({ field: "surface", allowed: ["function", "http", "ai", "platform"],
+      aliases: { functions: "function", runtime: "function" }, use: ["http", "platform"] });
     const malformed = structuredCliError(new ApiError(400, {
       code: "invalid_request",
       message: "Request validation failed: query.limit: Too big: expected number to be <=100",

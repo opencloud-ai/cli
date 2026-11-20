@@ -509,14 +509,19 @@ const shortText = (value: unknown, limit: number): value is string =>
 /**
  * What a refused request's details say about the input, as OpenCloud names it:
  * the field, the values it accepts and their aliases (an unknown log surface),
- * and each refused field with its reason (a malformed request). Only these,
- * checked and bounded, so nothing else in a body is printed.
+ * the ones to use instead (a name that stands for lines of several), and each
+ * refused field with its reason (a malformed request). Only these, checked
+ * and bounded, so nothing else in a body is printed.
  */
 export function inputDetails(details: Record<string, unknown>): Record<string, unknown> | null {
   const picked: Record<string, unknown> = {};
   if (shortText(details.field, 200)) picked.field = details.field;
   if (Array.isArray(details.allowed) && details.allowed.length <= 50 && details.allowed.every((value) => shortText(value, 100))) {
     picked.allowed = details.allowed;
+  }
+  // The values to use instead, when one name stands for lines of several.
+  if (Array.isArray(details.use) && details.use.length && details.use.length <= 10 && details.use.every((value) => shortText(value, 100))) {
+    picked.use = details.use;
   }
   const aliases = record(details.aliases);
   const aliasEntries = Object.entries(aliases);

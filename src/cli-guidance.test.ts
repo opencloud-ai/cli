@@ -342,7 +342,7 @@ describe("log surfaces", spawning, () => {
       expect(help.status, help.stderr).toBe(0);
       // Commander wraps option text to the terminal's width.
       expect(help.stdout.replace(/\s+/g, " ")).toContain(
-        "--surface <surface> where the lines came from: function (the app's Functions), container, http (the edge), ai (the AI gateway) or platform; functions and containers also work, as does runtime, the older name for function and the only one an older OpenCloud knows",
+        "--surface <surface> where the lines came from: function (the app's Functions), container, http (the edge), ai (the AI gateway) or platform; functions and containers also work, page, rest and storage select http, and runtime is the older name for function and the only one an older OpenCloud knows",
       );
     }
   });
