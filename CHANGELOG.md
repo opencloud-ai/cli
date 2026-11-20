@@ -6,12 +6,20 @@
   before applying, and reconcile lost start/sync apply replies through exact
   reads without automatically repeating the request.
 - Wait for slow draft validation using short requests pinned to the exact
-  revision. Retry only explicit validation-progress responses; keep lost
-  replies, proxy failures and interrupted dispatches uncertain in the mutation
-  journal. Persist each dispatch and acknowledged response before continuing.
+  revision. Persist each dispatch and acknowledged response before continuing.
   Deployment, development and direct draft validation share this behavior.
   Resumed validation can still normalize the source manifest after its exact
-  result has been durably acknowledged.
+  result has been durably acknowledged. Validating the same revision again
+  joins OpenCloud's run for it, so a validation is never left as an unknown
+  outcome: when the wait ends without a result (a lost reply, a proxy's 5xx or
+  429, or `DRAFT_VALIDATION_WAIT_TIMEOUT`), the entry is settled and holds
+  nothing back; the same command with the same input rejoins that validation,
+  in a fresh window once the kept one has passed, and a changed request starts
+  afresh. An interrupted run's validation is sent again by the next run of
+  the same command. `APP_LOCK_BUSY` (nothing started) is sent again while the
+  window lasts. Apps without containers or a frontend build wait at least 90
+  seconds, not 30, and `DRAFT_VALIDATION_WAIT_TIMEOUT` names the entry and the
+  command that rejoins it.
 - Add production and isolated development container commands for jobs, HTTP
   services, and workers: list, get, run, executions, execution, cancel, pause,
   resume, restart, scale, and events. Mutations retain their exact scope and

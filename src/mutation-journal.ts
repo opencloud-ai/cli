@@ -99,6 +99,20 @@ export class MutationJournalError extends Error {
 
 const GENERATED_KEY = /^ocj1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** A workflow settled while OpenCloud may still be validating its draft. */
+const VALIDATION_WAITING_STAGE = "validation_waiting";
+
+/**
+ * A completed entry is forgotten by the next run without a key, except one
+ * settled while OpenCloud may still be validating: the very same request
+ * rejoins that validation instead of uploading a new draft. Any other request
+ * starts afresh, so a settled validation never holds one back.
+ */
+function rejoinsValidation(entry: MutationJournalEntry, commandId: string, scopeDigest: string, requestDigest: string): boolean {
+  return entry.checkpoint?.stage === VALIDATION_WAITING_STAGE && entry.checkpoint.validation !== undefined &&
+    entry.commandId === commandId && entry.scopeDigest === scopeDigest && entry.requestDigest === requestDigest;
+}
+
 function pendingMutation(entry: MutationJournalEntry, appId: string): PendingMutation {
   const checkpoint = entry.checkpoint;
   const operationId = entry.operationId ?? checkpoint?.deploymentOperationId ?? checkpoint?.operationId;
@@ -1196,7 +1210,6 @@ export class MutationRun {
   }
 
   async markAttempted(): Promise<void> {
-    this.assertValidationAcknowledged();
     await this.assertBeforeEffect();
     const now = this.journal.timestamp();
     this.entry = {
@@ -1213,7 +1226,6 @@ export class MutationRun {
   }
 
   async checkpointOperation(operationId: string): Promise<void> {
-    this.assertValidationAcknowledged();
     await this.assertAnchored();
     if (!UUID.test(operationId)) {
       throw new MutationJournalError(
@@ -1235,7 +1247,6 @@ export class MutationRun {
   }
 
   async checkpointStage(checkpoint: SafeMutationCheckpoint): Promise<void> {
-    this.assertValidationAcknowledged();
     // Workflow stages cannot erase a validation dispatch/progress receipt.
     await this.saveCheckpoint({ ...checkpoint, ...(this.checkpoint?.validation ? { validation: this.checkpoint.validation } : {}) });
   }
@@ -1245,16 +1256,19 @@ export class MutationRun {
     if (!validValidationCheckpoint(validation)) {
       throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Invalid validation receipt coordinates");
     }
-    const sameRequest = previous && previous.draftId === validation.draftId && previous.revision === validation.revision &&
-      previous.requestSha256 === validation.requestSha256 && previous.deadline === validation.deadline;
+    const samePinned = previous !== undefined && previous.draftId === validation.draftId && previous.revision === validation.revision &&
+      previous.requestSha256 === validation.requestSha256;
+    const sameRequest = samePinned && previous.deadline === validation.deadline;
     if (validation.state !== "dispatched" && (!sameRequest || previous?.state !== "dispatched")) {
       throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Validation response has no matching dispatched request");
     }
-    if (validation.state === "dispatched") {
-      this.assertValidationAcknowledged();
-      if (previous?.state === "progress" && (!sameRequest || Date.now() < Date.parse(previous.retryNotBefore))) {
-        throw new MutationJournalError("MUTATION_REPLAY_MISMATCH", "Validation retry must retain its exact request, deadline and acknowledged wait");
-      }
+    // Validating a pinned revision again joins OpenCloud's run for it, so a
+    // dispatch whose reply never came may be sent again, as may one OpenCloud
+    // said is still running once its wait is over. Either way only for the
+    // same draft, revision and request; its deadline may be a fresh one.
+    if (validation.state === "dispatched" && (previous?.state === "dispatched" || previous?.state === "progress") &&
+        (!samePinned || (previous.state === "progress" && Date.now() < Date.parse(previous.retryNotBefore)))) {
+      throw new MutationJournalError("MUTATION_REPLAY_MISMATCH", "Validation retry must retain its exact request and acknowledged wait");
     }
     await this.saveCheckpoint({ ...(this.checkpoint ?? { stage: "validating" }), validation });
   }
@@ -1308,8 +1322,9 @@ export class MutationRun {
   }
 
   failIfUnknown(): void {
-    this.assertValidationAcknowledged();
-    if (this.entry.state === "unknown") {
+    // An earlier candidate marked a validation whose reply was lost unknown;
+    // validating that pinned revision again is safe, so it resumes instead.
+    if (this.entry.state === "unknown" && this.entry.unknownCode !== "DRAFT_VALIDATION_OUTCOME_UNKNOWN") {
       throw new MutationJournalError(
         this.entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN",
         "The previous request may have taken effect, and the CLI will not retry it blindly. Inspect current app state, then use a new explicit --idempotency-key only when a new mutation is intended.",
@@ -1320,7 +1335,6 @@ export class MutationRun {
   }
 
   async complete(): Promise<void> {
-    this.assertValidationAcknowledged();
     await this.assertAnchored();
     const now = this.journal.timestamp();
     this.entry = {
@@ -1334,13 +1348,20 @@ export class MutationRun {
     await this.assertAnchored();
   }
 
-  private assertValidationAcknowledged(): void {
-    const validation = this.checkpoint?.validation;
-    if (validation?.state === "dispatched") {
-      throw new MutationJournalError("DRAFT_VALIDATION_OUTCOME_UNKNOWN",
-        `Validation for draft ${validation.draftId}, revision ${validation.revision} was dispatched without a durably acknowledged reply. No validation was repeated.`,
-        false, pendingMutation(this.entry, this.journal.appId));
-    }
+  /**
+   * Ends the workflow at its validation, which changed nothing live: records
+   * why and completes the entry, so it holds nothing back. "waiting" means
+   * OpenCloud may still be validating; running the very same request again
+   * rejoins that validation (see MutationJournal.run). "refused" means it
+   * answered, so the next run starts afresh.
+   */
+  async settleValidation(outcome: "waiting" | "refused"): Promise<PendingMutation> {
+    await this.saveCheckpoint({
+      ...(this.checkpoint ?? { stage: "validating" }),
+      stage: outcome === "waiting" ? VALIDATION_WAITING_STAGE : "validation_refused",
+    });
+    await this.complete();
+    return pendingMutation(this.entry, this.journal.appId);
   }
 }
 
@@ -1927,7 +1948,8 @@ export class MutationJournal {
       if (
         entry?.state === "completed" &&
         !concurrentCompletion &&
-        explicitKey === null
+        explicitKey === null &&
+        !rejoinsValidation(entry, spec.commandId, scopeDigest, requestDigest)
       ) {
         entry = null;
       }

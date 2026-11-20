@@ -1157,7 +1157,11 @@ async function synchronizeValidatedDraft(
   validation: unknown;
 }> {
   run.failIfUnknown();
-  let validationProgress = run.checkpoint?.validation?.state === "progress" ? run.checkpoint.validation : null;
+  // A validation OpenCloud may still be running (one it said is running, or
+  // one whose reply never came) is rejoined for its exact draft and revision.
+  const retainedValidation = run.checkpoint?.validation;
+  let validationProgress = retainedValidation?.state === "progress" || retainedValidation?.state === "dispatched"
+    ? retainedValidation : null;
   if (validationProgress) {
     if (existingDraftId && existingDraftId !== validationProgress.draftId) {
       throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress belongs to a different source draft");
@@ -1325,7 +1329,7 @@ async function synchronizeValidatedDraft(
     const receipt = run.checkpoint?.validation;
     if (receipt?.state !== "result" || receipt.draftId !== validationProgress.draftId ||
         receipt.revision !== validationProgress.revision || receipt.requestSha256 !== validationProgress.requestSha256 ||
-        receipt.deadline !== validationProgress.deadline || receipt.validationId !== result.id ||
+        receipt.validationId !== result.id ||
         receipt.passed !== result.passed || receipt.artifactSha256 !== result.artifactSha256) {
       throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress has no matching durable result; no files were overwritten");
     }

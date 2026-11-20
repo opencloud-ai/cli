@@ -392,11 +392,22 @@ async function assertValidationInterruption(argumentsList, key, busyBeforeInterr
   const expectedPosts = busyBeforeInterruption ? 2 : 1;
   assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
   await ageInterruptedLocks(temporary);
+  await assertRejoined(args, key);
+}
+
+/**
+ * K3: validating a pinned revision again joins OpenCloud's run for it, so the
+ * next run with the same input sends that validation again, once, and
+ * overwrites no file before its result.
+ */
+async function assertRejoined(args, key) {
   const reentryAt = state.requests.length;
-  const reopened = await runCli(args, { status: 1 });
-  assert.equal(JSON.parse(reopened.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
-  assert.ok(state.requests.slice(reentryAt).every(request => request.method === "GET"), "Unacknowledged validation recovery must not overwrite files or replay any POST");
-  assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, expectedPosts);
+  await runCli(args);
+  const reentry = state.requests.slice(reentryAt);
+  assert.equal(reentry.filter(request => request.path.endsWith("/validate")).length, 1, "The next run validates the same revision once");
+  const validatedAt = reentry.findIndex(request => request.path.endsWith("/validate"));
+  assert.ok(reentry.slice(0, validatedAt).every(request => request.method === "GET"), "Rejoining a validation must not overwrite files first");
+  assert.equal((await validationEntry(key)).state, "completed");
 }
 
 async function validationEntry(key) {
@@ -411,18 +422,17 @@ async function assertValidationHttpFailure(argumentsList, key, status) {
   const args = [...argumentsList, "--idempotency-key", key];
   const before = state.requests.length;
   state.validationHttpFailure = status;
-  const failed = await runCli(args, { status: 1 });
-  assert.equal(JSON.parse(failed.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+  const failed = JSON.parse((await runCli(args, { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  // The proxy's own failure, with the way forward; never a permanent unknown.
+  assert.equal(failed.status, status);
+  assert.match(failed.hint, /^OpenCloud may still be validating draft .*Run the same command again/);
   const entry = await validationEntry(key);
-  assert.equal(entry.state, "unknown");
-  assert.equal(entry.checkpoint.validation.state, "dispatched");
+  assert.deepEqual([entry.state, entry.checkpoint.stage, entry.checkpoint.validation.state], ["completed", "validation_waiting", "dispatched"],
+    "A validation the CLI stopped waiting for is settled: it holds nothing back");
   assert.equal(state.drafts.get(entry.checkpoint.validation.draftId).validation.passed, true, "The upstream accepted this validation");
-  const reentryAt = state.requests.length;
-  const reopened = await runCli(args, { status: 1 });
-  assert.equal(JSON.parse(reopened.stderr.trim().split("\n").at(-1)).error.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN");
-  assert.ok(state.requests.slice(reentryAt).every(request => request.method === "GET"));
   assert.equal(state.requests.slice(before).filter(request => request.path.endsWith("/validate")).length, 1,
-    `HTTP ${status} must not authorize another validation POST on reopen`);
+    `HTTP ${status} is not retried in the same run`);
+  await assertRejoined(args, key);
 }
 
 async function interruptAcknowledgedProgress(args, key) {
@@ -473,14 +483,12 @@ try {
   await assertValidationInterruption(["draft", "validate", appId, lastDraft().id], "kill-after-acknowledged-progress", true);
   await assertValidationInterruption(["app", "dev", "sync", app], "kill-dev-sync-validation");
   await assertValidationInterruption(["app", "dev", "start", app], "kill-dev-start-validation");
-  await assertValidationInterruption(["deploy", app], "kill-deploy-validation");
 
   for (const status of [408, 500, 502, 503, 504]) {
     await assertValidationHttpFailure(["draft", "validate", appId, lastDraft().id], `http-${status}-direct-validation`, status);
   }
   await assertValidationHttpFailure(["app", "dev", "sync", app], "http-504-dev-sync-validation", 504);
   await assertValidationHttpFailure(["app", "dev", "start", app], "http-504-dev-start-validation", 504);
-  await assertValidationHttpFailure(["deploy", app], "http-504-deploy-validation", 504);
 
   // 2. dev sync follows a local change with OpenCloud's new digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v2</title>\n");
@@ -505,6 +513,11 @@ try {
   );
   await assert.rejects(readFile(path.join(app, ".opencloud", "dev.json")), { code: "ENOENT" });
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, synced);
+
+  // A deploy rejoins its validation too, and then goes live; so it runs here,
+  // after the development session has been promoted.
+  await assertValidationInterruption(["deploy", app], "kill-deploy-validation");
+  await assertValidationHttpFailure(["deploy", app], "http-504-deploy-validation", 504);
 
   // 4. A plain deploy releases the same content under OpenCloud's digest.
   await write("frontend/index.html", "<!doctype html><title>Counter v3</title>\n");
@@ -606,13 +619,16 @@ try {
   await write("frontend/index.html", "<!doctype html><title>Counter v8</title>\n");
   const entriesBefore = (await readdir(path.join(temporary, "journal", "entries"))).length;
   const heldResumeAt = state.requests.length;
-  const resumed = errorOf(await runCli(["app", "dev", "start", app, "--idempotency-key", held.pending.idempotencyKey], { status: 1 }));
-  assert.equal(resumed.code, "DRAFT_VALIDATION_OUTCOME_UNKNOWN", "Its own key resumes the interrupted entry");
-  assert.equal(resumed.pending.idempotencyKey, held.pending.idempotencyKey);
-  assert.match(resumed.hint, /^The validation may still be running and was not repeated\. Check with `opencloud draft get /);
+  // Its own key resumes the interrupted entry: it validates the same revision
+  // again (K3), once, and the start finishes.
+  const resumed = JSON.parse((await runCli(["app", "dev", "start", app, "--idempotency-key", held.pending.idempotencyKey])).stdout);
+  assert.equal(resumed.session.id, kept.sessionId);
   assert.equal((await readdir(path.join(temporary, "journal", "entries"))).length, entriesBefore, "No second entry under that key");
-  assert.ok(state.requests.slice(heldResumeAt).every((request) => request.method === "GET"), "Resuming repeats no request");
-  assert.equal(state.requests.slice(interruptedAt).filter((request) => request.path.endsWith("/validate")).length, 1);
+  const resumedRequests = state.requests.slice(heldResumeAt);
+  assert.equal(resumedRequests.filter((request) => request.path.endsWith("/validate")).length, 1);
+  assert.ok(resumedRequests.slice(0, resumedRequests.findIndex((request) => request.path.endsWith("/validate")))
+    .every((request) => request.method === "GET"), "Resuming overwrites no file before the validation");
+  assert.equal(state.requests.slice(interruptedAt).filter((request) => request.path.endsWith("/validate")).length, 2);
 
   // 9. A sync after a direct production deploy (J2, J3) says production
   //    changed, names both releases and the commands, and sends no apply.
@@ -630,7 +646,7 @@ try {
   assert.equal(appliesIn(syncAt), 0, "No apply is sent to a session production overtook");
 
   process.stdout.write(
-    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures with no replay, resumed canonical manifest normalization, initial drift refusal, real mismatch refusal, a refused development apply retried with its kept session, an interrupted start resumed by its own key, and a sync production overtook refused before any apply.\n",
+    "Artifact compression and recovery contract passed: authoritative digests, dev readiness with lost replies, five killed validation dispatches and eight HTTP failures, each settled and rejoined once by the next run, resumed canonical manifest normalization, initial drift refusal, real mismatch refusal, a refused development apply retried with its kept session, an interrupted start resumed by its own key, and a sync production overtook refused before any apply.\n",
   );
 } finally {
   server.close();

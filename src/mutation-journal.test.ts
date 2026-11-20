@@ -728,7 +728,7 @@ describe("mutation journal", () => {
     );
   });
 
-  it("will not erase an unresolved validation dispatch after process reopening", async () => {
+  it("keeps a validation dispatch whose reply never came, and lets only the same request send it again", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const binding = { directory, apiUrl: API_URL, appId: APP_ID };
     const intent = { commandId: "opencloud draft validate" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "validate" } };
@@ -742,11 +742,19 @@ describe("mutation journal", () => {
     const reopened = await MutationJournal.open(binding);
     await reopened.run(intent, async run => {
       expect(run.checkpoint?.validation).toEqual(dispatched);
-      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" }));
-      for (const attempt of [() => run.checkpointStage({ stage: "draft_ready" }), () => run.markAttempted(), () => run.complete()]) {
-        await expect(attempt()).rejects.toMatchObject({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" });
-      }
+      // Validating that pinned revision again joins OpenCloud's run for it.
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.checkpointStage({ stage: "draft_ready" });
       expect(run.checkpoint?.validation).toEqual(dispatched);
+      await run.markAttempted();
+      for (const other of [{ revision: 3 }, { requestSha256: "b".repeat(64) }, { draftId: APP_ID }]) {
+        await expect(run.checkpointValidation({ ...dispatched, ...other })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+      }
+      // The same request, in a fresh window.
+      const again = { ...dispatched, deadline: new Date(Date.now() + 90_000).toISOString() };
+      await run.checkpointValidation(again);
+      await run.checkpointValidation({ ...again, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) });
+      await run.complete();
     });
   });
 
@@ -755,7 +763,7 @@ describe("mutation journal", () => {
     const binding = { directory, apiUrl: API_URL, appId: APP_ID };
     const intent = { commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "deploy" } };
     const coordinates = { draftId: OTHER_APP_ID, revision: 2, requestSha256: "b".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
-    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() - 1000).toISOString() };
+    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() + 60_000).toISOString() };
     await (await MutationJournal.open(binding)).run(intent, async run => {
       await run.checkpointValidation({ ...coordinates, state: "dispatched" });
       await expect(run.checkpointValidation({ ...progress, revision: 3 })).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
@@ -764,14 +772,86 @@ describe("mutation journal", () => {
     });
     await (await MutationJournal.open(binding)).run(intent, async run => {
       expect(run.checkpoint?.validation).toEqual(progress);
-      await expect(run.checkpointValidation({ ...coordinates, deadline: new Date(Date.now() + 120_000).toISOString(), state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+      // Not before OpenCloud's own wait is over.
+      await expect(run.checkpointValidation({ ...coordinates, state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+    });
+    vi.useFakeTimers({ now: Date.parse(progress.retryNotBefore) + 1, toFake: ["Date"] });
+    try {
+      await (await MutationJournal.open(binding)).run(intent, async run => {
+        const fresh = { ...coordinates, deadline: new Date(Date.now() + 90_000).toISOString() };
+        await expect(run.checkpointValidation({ ...fresh, revision: 3, state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+        await run.checkpointValidation({ ...fresh, state: "dispatched" });
+        const result: SafeValidationCheckpoint = { ...fresh, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) };
+        // A response belongs to the dispatch it answers, deadline included.
+        await expect(run.checkpointValidation({ ...result, deadline: coordinates.deadline })).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+        await run.checkpointValidation(result);
+        await run.checkpointStage({ stage: "validated", draftId: OTHER_APP_ID, revision: 2 });
+        expect(run.checkpoint?.validation).toEqual(result);
+        await expect(run.checkpointValidation({ ...fresh, state: "dispatched", source: "must not be retained" } as SafeValidationCheckpoint))
+          .rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a validation wait so it holds nothing back, while the same request rejoins it", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = (artifact: string) => ({ commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "deploy", artifact } });
+    const coordinates = { draftId: OTHER_APP_ID, revision: 2, requestSha256: "d".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() - 1_000).toISOString() };
+    let key = "";
+    await (await MutationJournal.open(binding)).run(intent("first"), async run => {
+      key = run.idempotencyKey;
+      await run.checkpointStage({ stage: "draft_ready", draftId: OTHER_APP_ID, revision: 2 });
       await run.checkpointValidation({ ...coordinates, state: "dispatched" });
-      const result: SafeValidationCheckpoint = { ...coordinates, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) };
-      await run.checkpointValidation(result);
-      await run.checkpointStage({ stage: "validated", draftId: OTHER_APP_ID, revision: 2 });
-      expect(run.checkpoint?.validation).toEqual(result);
-      await expect(run.checkpointValidation({ ...coordinates, state: "dispatched", source: "must not be retained" } as SafeValidationCheckpoint))
-        .rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      await run.checkpointValidation(progress);
+      const pending = await run.settleValidation("waiting");
+      expect(pending).toMatchObject({ command: "opencloud deploy", idempotencyKey: key, state: "completed", draftId: OTHER_APP_ID, revision: 2 });
+    });
+    // The very same request, without a key, rejoins it.
+    await (await MutationJournal.open(binding)).run(intent("first"), async run => {
+      expect(run.idempotencyKey).toBe(key);
+      expect(run.checkpoint).toMatchObject({ stage: "validation_waiting", draftId: OTHER_APP_ID, validation: progress });
+      await run.checkpointValidation({ ...coordinates, state: "dispatched", deadline: new Date(Date.now() + 90_000).toISOString() });
+      await run.settleValidation("waiting");
+    });
+    // A changed request is not held back: it starts afresh.
+    await (await MutationJournal.open(binding)).run(intent("changed"), async run => {
+      expect(run.idempotencyKey).not.toBe(key);
+      expect(run.checkpoint).toBeNull();
+      await run.checkpointStage({ stage: "draft_ready", draftId: APP_ID, revision: 1 });
+      await run.checkpointValidation({ ...coordinates, draftId: APP_ID, revision: 1, state: "dispatched" });
+      await run.checkpointValidation({ ...coordinates, draftId: APP_ID, revision: 1, state: "refused" });
+      await run.settleValidation("refused");
+    });
+    // OpenCloud answered that one: even the same request starts afresh.
+    await (await MutationJournal.open(binding)).run(intent("changed"), async run => {
+      expect(run.checkpoint).toBeNull();
+      await run.complete();
+    });
+  });
+
+  it("resumes a validation an earlier candidate marked unknown, instead of refusing it", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud draft validate" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "validate" } };
+    await expect((await MutationJournal.open(binding)).run(intent, async run => {
+      await run.markAttempted();
+      return run.markUnknown("DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.markAttempted();
+      await run.complete();
+    });
+    await expect((await MutationJournal.open(binding)).run(intent, async run => {
+      await run.markAttempted();
+      return run.markUnknown("MUTATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "MUTATION_OUTCOME_UNKNOWN" }));
     });
   });
 

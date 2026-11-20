@@ -220,9 +220,19 @@ not, fails with `IDEMPOTENCY_KEY_REUSED` instead. Waiting never clears it, so
 it is not retryable: send the new request with a new key.
 A key the journal generated, passed back with `--idempotency-key`, resumes
 that same entry; it never starts a second one under the same key. Unknown
-outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `DRAFT_VALIDATION_OUTCOME_UNKNOWN`,
-`MUTATION_OUTCOME_UNKNOWN`) carry the same `pending` field and say what to
-check before deciding on a new key. A container command or registry change
+outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `MUTATION_OUTCOME_UNKNOWN`) carry the
+same `pending` field and say what to check before deciding on a new key.
+
+Validation is never an unknown outcome: validating the same draft revision
+again joins OpenCloud's run for it. When `deploy` or `app dev start` or `sync`
+stops waiting without a result (a lost reply, a proxy's error, or
+`DRAFT_VALIDATION_WAIT_TIMEOUT` after the waiting budget, at least 90
+seconds), its entry is settled and holds nothing back: the same command with the
+same input rejoins that validation, in a fresh window if the last one has
+passed, and a changed request starts afresh. A command interrupted while
+validating (Ctrl-C) leaves its entry to the same command, which sends that
+validation again. `APP_LOCK_BUSY` started nothing, so it is sent again while
+the window lasts. A container command or registry change
 that OpenCloud refused with its own code, not retryable, holds nothing, so a
 corrected request is sent; so is a deploy after `ARTIFACT_MISMATCH`.
 

@@ -20,6 +20,8 @@ export function commandLine(route: readonly string[], args: readonly string[] = 
 export interface PendingView {
   command: string;
   idempotencyKey: string;
+  /** Whether the CLI chose the key because none was given. */
+  generatedKey?: boolean | undefined;
   state: string;
   unknownCode?: string | undefined;
   appId: string;
@@ -80,6 +82,14 @@ export function journalHint(code: string, pending: PendingView, running: Running
     const again = same ? quoted(`${commandLine(running.route, [...running.args.values()])} --idempotency-key <new-key>`) : "the command with a new --idempotency-key";
     const revision = pending.revision === undefined ? "" : `: it did if session.activeRevision.draftRevision is ${pending.revision}`;
     return `OpenCloud did not confirm the development apply in time, and it was not repeated. Check with ${check}${revision}. If it did not take effect, run ${again} to apply again.`;
+  }
+  if (code === "DRAFT_VALIDATION_WAIT_TIMEOUT") {
+    // A generated key rejoins without being named; a given one must be given again.
+    const again = same
+      ? quoted(`${commandLine(running.route, [...running.args.values()])}${pending.generatedKey ? "" : ` --idempotency-key ${pending.idempotencyKey}`}`)
+      : quoted(`${pending.command} … --idempotency-key ${pending.idempotencyKey}`);
+    const draft = pending.draftId ? quoted(commandLine(["draft", "get"], [pending.appId, pending.draftId])) : check;
+    return `To keep waiting, run ${again} again with the same input: it rejoins that validation instead of starting another. To see the draft's status, run ${draft}. A changed request starts afresh.`;
   }
   if (code === "DRAFT_VALIDATION_OUTCOME_UNKNOWN") {
     const draft = pending.draftId ? quoted(commandLine(["draft", "get"], [pending.appId, pending.draftId])) : check;
