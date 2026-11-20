@@ -68,6 +68,9 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- `/version` markers count only when they are exactly 1; any other value reads
+  as absent (the earlier flow), not as `API_CONTRACT_MISMATCH` on every
+  journaled command.
 - Accept container frontends and routes. A manifest that pins no SDK keeps
   CLI 3.20's default, 2.3.0, which every supported OpenCloud installs, so an
   unpinned app never moves to another SDK on its next deploy; one that
