@@ -759,6 +759,57 @@ async function outputReplayMutation<T>(
 }
 
 /**
+ * Runs OpenCloud's production verification (verify_app) on a release that
+ * just went live, as `app dev promote` does. A worker starts only after the
+ * switch, so the deploy's own success can't say whether it runs; the
+ * verification can. The release stays live either way: a failed
+ * verification exits non-zero with its code, its reason and the ways forward.
+ */
+async function verifyLiveRelease(control: OpenCloudClient, input: {
+  appId: string;
+  idempotencyKey: string;
+  options: OperationOptions;
+  deploymentId: string | null;
+  /** The release to go back to, when this command knows it. */
+  previousDeploymentId: string | null;
+  /** When the command started, for the logs window. */
+  since: string;
+}): Promise<unknown> {
+  const { appId } = input;
+  const started = await control.call("verifyApp", { appId }, { idempotencyKey: input.idempotencyKey, timeoutMs: 120_000 });
+  let operationError: Record<string, unknown> = {};
+  try {
+    await followOperation({ client: control, started, options: { ...input.options, follow: true } });
+  } catch (error) {
+    if (!(error instanceof OperationTerminalError)) throw error;
+    operationError = (error.operation.error && typeof error.operation.error === "object" ? error.operation.error : {}) as Record<string, unknown>;
+  }
+  const verification = await control.call("getVerification", { appId, verificationId: started.verification.id });
+  if (!Object.keys(operationError).length && verification.state === "passed") return verification;
+  const diagnostic = verification.diagnostics.find((item) => item.level === "error");
+  const code = diagnostic?.code ?? (typeof operationError.code === "string" ? operationError.code : "APP_VERIFICATION_FAILED");
+  const reason = diagnostic?.message ?? (typeof operationError.message === "string" ? operationError.message : `verification ${verification.state}`);
+  const window = `--from ${input.since} --to ${new Date().toISOString()}`;
+  const logs = code.startsWith("COMPUTE_")
+    ? `\`opencloud logs ${appId} --page --surface container ${window}\``
+    : `\`opencloud logs ${appId} --page ${window}\``;
+  const back = input.previousDeploymentId
+    ? `\`opencloud deployment rollback ${appId} ${input.previousDeploymentId}\``
+    : `\`opencloud deployment rollback ${appId} <release-id>\` (\`opencloud deployment list ${appId}\` names them)`;
+  const failure = new CliContractError("VERIFICATION_FAILED",
+    `The release went live, but OpenCloud's verification of it failed with ${code}: ${reason}`, {
+      fields: {
+        verificationId: verification.id,
+        verificationCode: code,
+        ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}),
+      },
+      hint: `The release is live. To see why, run ${logs}. To check it again, run \`opencloud app verify ${appId}\`. To go back to the earlier release, run ${back}.`,
+    });
+  // A release that failed its checks is the app's to repair; anything else is a fault.
+  throw verification.state === "failed" ? callerFailure(failure) : failure;
+}
+
+/**
  * Follows a journaled operation. One OpenCloud ended as failed or cancelled
  * is settled: its outcome is known and nothing waits on it, so the next
  * request (with fixed source, say) is not held behind it.
@@ -779,6 +830,8 @@ async function outputDurableMutation(
     control: OpenCloudClient,
     idempotencyKey: string,
   ) => Promise<unknown>,
+  /** After the operation succeeded and its entry settled: what to print instead. */
+  finish?: (completed: unknown, control: OpenCloudClient, run: MutationRun) => Promise<unknown>,
 ): Promise<void> {
   const context = input.ownerAccountLogin === true
     ? await ownerMutationContext(input.appId, input.cwd)
@@ -812,6 +865,11 @@ async function outputDurableMutation(
       started,
       options,
     });
+    if (finish) {
+      await run.complete();
+      await outputAsync(await finish(completed, context.control, run));
+      return;
+    }
     await outputAsync(completed);
     await run.complete();
   });
@@ -5051,9 +5109,11 @@ addOperationOptions(
     .option(
       "--force",
       "Deploy even if a newer release replaced the one this copy is based on",
-    ),
+    )
+    .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(
-  async (directory, options: OperationOptions & { force?: boolean }) => {
+  async (directory, options: OperationOptions & { force?: boolean; verify?: boolean }) => {
+    const since = new Date().toISOString();
     const sourceRoot = callerPath(directory);
     const bundle = await localBundle(sourceRoot);
     process.stderr.write(
@@ -5159,7 +5219,8 @@ addOperationOptions(
           started,
           options,
         });
-        if (operationFrom(completed)?.state === "succeeded" && draftId) {
+        const live = operationFrom(completed)?.state === "succeeded";
+        if (live && draftId) {
           await recordReleaseBase(
             context.control,
             sourceRoot,
@@ -5168,12 +5229,21 @@ addOperationOptions(
             (started as { deployment?: unknown }).deployment,
           );
         }
+        // The deploy is done; its verification is reported on its own.
+        await run.complete();
+        const deployed = (started as { deployment?: { id?: unknown } }).deployment?.id;
+        const verification = live && options.verify !== false
+          ? await verifyLiveRelease(context.control, {
+            appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
+            deploymentId: typeof deployed === "string" ? deployed : null,
+            previousDeploymentId: expectedActiveDeploymentId ?? null,
+          })
+          : undefined;
         await outputAsync(
           completed && typeof completed === "object" && !Array.isArray(completed)
-            ? { ...completed, ...sourceOnlyFields(upload) }
+            ? { ...completed, ...sourceOnlyFields(upload), ...(verification ? { verification } : {}) }
             : completed,
         );
-        await run.complete();
       },
     );
   },
@@ -5551,8 +5621,10 @@ addOperationOptions(
   deployment
     .command("rollback")
     .argument("<app-id>")
-    .argument("<deployment-id>"),
-).action(async (appId, deploymentId, options: OperationOptions) => {
+    .argument("<deployment-id>")
+    .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
+).action(async (appId, deploymentId, options: OperationOptions & { verify?: boolean }) => {
+  const since = new Date().toISOString();
   await outputDurableMutation(
     {
       commandId: "opencloud deployment rollback",
@@ -5568,6 +5640,15 @@ addOperationOptions(
         {},
         key,
       ),
+    // The release that went live gets OpenCloud's verification, as a deploy's does.
+    async (completed, control, run) => {
+      if (options.follow === false || options.verify === false || operationFrom(completed)?.state !== "succeeded") return completed;
+      const verification = await verifyLiveRelease(control, {
+        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
+        deploymentId: String(deploymentId), previousDeploymentId: null,
+      });
+      return completed && typeof completed === "object" && !Array.isArray(completed) ? { ...completed, verification } : completed;
+    },
   );
 });
 

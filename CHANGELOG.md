@@ -80,6 +80,15 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- `deploy` and `deployment rollback` run OpenCloud's production verification
+  (`verify_app`) once the release is live, as `app dev promote` does, and print
+  it as `verification`. A worker starts only after the switch, so a release
+  whose worker can't start used to print "succeeded". When the verification
+  fails, the command exits non-zero with `VERIFICATION_FAILED`, its code (such
+  as `COMPUTE_CRASH_LOOP`) and reason, `verificationId` and `deploymentId`,
+  and a hint naming the logs command, `app verify` and the rollback to the
+  earlier release; the release stays live. `--no-verify` skips it, and
+  `--no-follow` waits for neither.
 - A deploy or rollback OpenCloud compensated, which used to print only
   `OPERATION_FAILED` and `DEPLOYMENT_COMPENSATED`, now prints the operation's
   own message and the failed release: `deploymentId` and `deploymentError`

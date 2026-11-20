@@ -552,9 +552,10 @@ try {
   assert.match(retried.stderr, /resolved opencloud\.yaml differently from this CLI \(runtime\)/);
   assert.ok(lastDraft().files.has("opencloud.json"));
   assert.equal(lastDraft().id, progress.draftId, "Resume must retain the exact source draft");
+  // A live deploy is followed by OpenCloud's production verification.
   const resumedWrites = state.requests.slice(resumedAt).filter(request => request.method !== "GET");
   assert.deepEqual(resumedWrites.map(request => [request.method, request.path.split("/").at(-1)]), [
-    ["POST", "validate"], ["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"],
+    ["POST", "validate"], ["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"], ["POST", "verifications"],
   ]);
   assert.equal((await validationEntry(normalizationKey)).state, "completed");
   state.canonicalReceiptKey = null;
@@ -575,7 +576,7 @@ try {
   const rejoinAt = state.requests.length;
   await runCli(["deploy", app, "--idempotency-key", canonicalKey]);
   assert.deepEqual(state.requests.slice(rejoinAt).filter(request => request.method !== "GET")
-    .map(request => [request.method, request.path.split("/").at(-1)]), [["POST", "validate"], ["POST", "deploy"]]);
+    .map(request => [request.method, request.path.split("/").at(-1)]), [["POST", "validate"], ["POST", "deploy"], ["POST", "verifications"]]);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, canonicalDraft.validatedDigest);
   state.resolveYamlDifferently = false;
 
@@ -595,7 +596,8 @@ try {
     await runCli(["deploy", app, "--idempotency-key", key]);
     assert.deepEqual(state.requests.slice(before).filter(request => request.method !== "GET")
       .map(request => [request.method, request.path.split("/").at(-1)]),
-    drift === "revision" ? [["POST", "validate"], ["POST", "deploy"]] : [["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"]]);
+    drift === "revision" ? [["POST", "validate"], ["POST", "deploy"], ["POST", "verifications"]]
+      : [["PATCH", "files"], ["POST", "validate"], ["POST", "deploy"], ["POST", "verifications"]]);
     assert.equal(draft.validatedRevision, draft.revision, "The new revision was validated");
     assert.equal((await validationEntry(key)).state, "completed");
   }

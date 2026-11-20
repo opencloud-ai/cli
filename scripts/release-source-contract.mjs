@@ -31,6 +31,10 @@ const state = {
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
+  /** Production verifications by ID; the next one fails when failNextVerification is set. */
+  verifications: new Map(),
+  /** The next production verification fails, as a worker in a crash loop does. */
+  failNextVerification: false,
   /** The next deploy's candidate fails, as a container that exits at once does, and the live release stays. */
   failNextDeploy: false,
   /** What GET /v1/installation answers; null answers 404, as servers before it did. */
@@ -58,6 +62,30 @@ function deploymentRecord(release) {
     source: release.source
       ? { sha256: release.source.sha256, sizeBytes: release.source.bytes.length, fileCount: release.source.fileCount }
       : null,
+  };
+}
+
+const CRASH_LOOP = "Container worker sync stopped after repeated failures (COMPUTE_CRASH_LOOP): exec /app/order-sync-bin failed";
+
+/** OpenCloud's production verification record: passed, or failed on a worker in a crash loop. */
+function verificationRecord(verification) {
+  return {
+    id: verification.id, appId, deploymentId: verification.deploymentId, operationId: verification.operationId,
+    state: verification.failed ? "failed" : "passed",
+    phases: verification.failed
+      ? [{ name: "canonical-head", passed: true, detail: "Canonical production HEAD returned HTTP 200.", durationMs: 12 }]
+      : [{ name: "canonical-head", passed: true, detail: "Canonical production HEAD returned HTTP 200.", durationMs: 12 },
+        { name: "container-workers", passed: true, detail: "sync is running (1 of 1 copy)", durationMs: 3 }],
+    diagnostics: verification.failed ? [{ level: "error", code: "COMPUTE_CRASH_LOOP", message: CRASH_LOOP }] : [],
+    startedAt: now, finishedAt: now, createdAt: now,
+  };
+}
+
+function verificationOperation(verification) {
+  return {
+    id: verification.operationId, appId, deploymentId: verification.deploymentId, type: "verify_app",
+    state: verification.failed ? "failed" : "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted",
+    error: verification.failed ? { code: "COMPUTE_CRASH_LOOP", message: CRASH_LOOP } : null, createdAt: now, updatedAt: now,
   };
 }
 
@@ -158,6 +186,8 @@ const server = createServer(async (request, response) => {
     return state.installation ? send(response, 200, state.installation) : send(response, 404, { code: "NOT_FOUND", message: "not found" });
   }
   if (parts[0] === "v1" && parts[1] === "operations") {
+    const verification = [...state.verifications.values()].find((value) => value.operationId === parts[2]);
+    if (verification) return send(response, 200, verificationOperation(verification));
     const release = [...state.deployments.values()].find((value) => value.operationId === parts[2]);
     return send(response, 200, operation(parts[2], release?.id ?? null, release?.operationFailure ?? null));
   }
@@ -272,6 +302,18 @@ const server = createServer(async (request, response) => {
       draft.status = "deployed";
       return send(response, 202, { draft: draftRecord(draft), deployment: deploymentRecord(release), operation: operation(operationId, id) });
     }
+  }
+  if (parts[3] === "verifications" && request.method === "POST") {
+    const failed = state.failNextVerification;
+    state.failNextVerification = false;
+    const verification = { id: randomUUID(), operationId: randomUUID(), deploymentId: state.activeDeploymentId, failed };
+    state.verifications.set(verification.id, verification);
+    return send(response, 200, { verification: { ...verificationRecord(verification), state: "queued", phases: [], diagnostics: [], finishedAt: null },
+      operation: { ...verificationOperation(verification), state: "queued", error: null } });
+  }
+  if (parts[3] === "verifications" && parts[4]) {
+    const verification = state.verifications.get(parts[4]);
+    return verification ? send(response, 200, verificationRecord(verification)) : send(response, 404, { code: "NOT_FOUND", message: "verification" });
   }
   if (parts[3] === "deployments" && parts[4]) {
     const release = state.deployments.get(parts[4]);
@@ -403,6 +445,28 @@ try {
   });
   assert.match(compensated.hint, new RegExp(`^OpenCloud kept the release that was live before\\. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container --workload pricing --from `));
   assert.equal(compensated.operationErrorMessage, "Deployment failed and the previous runtime topology was restored: The container failed to start successfully.");
+
+  // 4d. A deploy goes live and OpenCloud's verification follows; when it
+  //     fails (a worker in a crash loop), the deploy exits non-zero with its
+  //     code, reason and the ways forward, though the release stays live.
+  const verifiedDeploy = JSON.parse((await runCli(["deploy", app])).stdout);
+  assert.equal(verifiedDeploy.verification.state, "passed");
+  assert.equal(verifiedDeploy.verification.phases.at(-1).name, "container-workers");
+  const beforeBroken = state.activeDeploymentId;
+  state.failNextVerification = true;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3d');\n");
+  const unverified = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.notEqual(state.activeDeploymentId, beforeBroken, "The release went live before verification");
+  assert.equal(unverified.code, "VERIFICATION_FAILED");
+  assert.equal(unverified.message, `The release went live, but OpenCloud's verification of it failed with COMPUTE_CRASH_LOOP: ${CRASH_LOOP}`);
+  assert.equal(unverified.verificationCode, "COMPUTE_CRASH_LOOP");
+  assert.equal(unverified.deploymentId, state.activeDeploymentId);
+  assert.ok(unverified.hint.startsWith(`The release is live. To see why, run \`opencloud logs ${appId} --page --surface container --from `), unverified.hint);
+  assert.ok(unverified.hint.endsWith(`To check it again, run \`opencloud app verify ${appId}\`. To go back to the earlier release, run \`opencloud deployment rollback ${appId} ${beforeBroken}\`.`), unverified.hint);
+  // --no-verify skips it, and the deploy's entry was settled, so this runs at once.
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3e');\n");
+  const unchecked = JSON.parse((await runCli(["deploy", app, "--no-verify"])).stdout);
+  assert.equal("verification" in unchecked, false);
 
   // 5. When the server resolves the author manifest differently, the CLI keeps
   //    the source but sends the canonical manifest instead.

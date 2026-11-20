@@ -165,7 +165,13 @@ commit that session file. Commands use it automatically:
 
 `deploy` uses the canonical server draft, file-change, validation, and
 deployment contract. It refuses deployment when the local and server bundle
-digests differ. For normal agent work, prefer the isolated development and
+digests differ. Once the release is live, `deploy` (like `deployment
+rollback`) runs OpenCloud's production verification and prints it as
+`verification`: a worker starts only after the switch, so this is what says
+whether the release runs. A failed verification exits non-zero with
+`VERIFICATION_FAILED`, its code (such as `COMPUTE_CRASH_LOOP`) and reason,
+and a hint naming the logs, `app verify` and the rollback; the release stays
+live. `--no-verify` skips it. For normal agent work, prefer the isolated development and
 verified-promotion flow below.
 
 New projects use manifest schema 3 and omit a top-level release version;
