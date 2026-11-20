@@ -16,6 +16,14 @@ const MINIMUM_WAIT_MS = 90_000;
 const MINIMUM_REMAINING_MS = 30_000;
 /** OpenCloud's admission was too busy to start the validation: try again this soon. */
 const ADMISSION_BUSY_DELAY_MS = 2_000;
+/**
+ * 3.20's flow, for an OpenCloud without pinned validation (2.35.x and older):
+ * a frontend build's request may take up to 70 seconds before
+ * FRONTEND_BUILD_BUSY, which is retried on the same revision.
+ */
+const FRONTEND_BUILD_REQUEST_MS = 9 * 60_000;
+const FRONTEND_BUILD_BUSY_RETRIES = 20;
+const FRONTEND_BUILD_BUSY_DELAY_MS = 6_000;
 
 type ValidationJournal = Pick<MutationRun, "checkpoint" | "checkpointValidation" | "markAttempted" | "failIfUnknown" | "settleValidation">;
 
@@ -28,28 +36,33 @@ function admissionBusy(error: ApiError): boolean {
   return error.status === 503 && error.code === "APP_LOCK_BUSY";
 }
 
-/**
- * Validates one pinned draft revision and waits for OpenCloud's result,
- * journaling each request. Validating the same revision again joins
- * OpenCloud's run for it, so a request whose reply never came is sent again
- * when the command runs again, never marked unknown. When this wait ends
- * without a result, the entry is settled: it holds nothing back, and the very
- * same request run again rejoins the validation, in a fresh window if the
- * kept one has passed.
- */
-export async function validateDraftWithProgress(control: OpenCloudClient, input: {
+type ValidationInput = {
   appId: string;
   draftId: string;
   revision: number;
   version?: string;
   idempotencyKey?: string;
   manifest?: { containerCount: number; frontendBuild: boolean };
+  /** OpenCloud advertises contracts.pinnedDraftValidation; see releaseContracts. */
+  pinned: boolean;
   journal: ValidationJournal;
-}) {
+};
+
+/**
+ * Validates one draft revision and waits for OpenCloud's result, journaling
+ * each request. Where OpenCloud pins validation to a revision, validating it
+ * again joins its run, so a request whose reply never came is sent again when
+ * the command runs again, never marked unknown. When this wait ends without a
+ * result, the entry is settled: it holds nothing back, and the very same
+ * request run again rejoins the validation, in a fresh window if the kept one
+ * has passed. An OpenCloud without pinned validation gets 3.20's requests.
+ */
+export async function validateDraftWithProgress(control: OpenCloudClient, input: ValidationInput) {
   input.journal.failIfUnknown();
   const retained = input.journal.checkpoint?.validation;
   const requestSha256 = createHash("sha256").update(JSON.stringify({ appId: input.appId, draftId: input.draftId,
     revision: input.revision, version: input.version ?? null, idempotencyKey: input.idempotencyKey ?? null })).digest("hex");
+  if (!input.pinned) return validateUnpinned(control, input, requestSha256);
   const timeoutMs = Math.max(draftValidationWaitTimeoutMs(input.manifest), MINIMUM_WAIT_MS);
   const pending = retained?.state === "progress" || retained?.state === "dispatched" ? retained : null;
   if (pending && (pending.draftId !== input.draftId || pending.revision !== input.revision || pending.requestSha256 !== requestSha256)) {
@@ -117,27 +130,84 @@ export async function validateDraftWithProgress(control: OpenCloudClient, input:
       },
     });
   } catch (error) {
-    const validation = input.journal.checkpoint?.validation;
-    // The journal's own refusals, and anything after the result, settle nothing.
-    if (validation?.state === "result" || error instanceof MutationJournalError || error instanceof CliContractError) throw error;
-    if (validation?.state === "refused" && error instanceof ApiError && !admissionBusy(error)) {
-      // OpenCloud answered: nothing is running, and the next run starts afresh.
-      await input.journal.settleValidation("refused");
-      throw error;
-    }
-    // OpenCloud may still be validating (or its admission stayed busy): this
-    // run stops waiting, and the same request run again rejoins it.
-    const settled = await input.journal.settleValidation("waiting");
-    if (error instanceof DraftValidationWaitTimeoutError) {
-      throw new MutationJournalError("DRAFT_VALIDATION_WAIT_TIMEOUT",
-        `OpenCloud is still validating draft ${input.draftId}, revision ${input.revision}; this did not cancel it, and this command stopped waiting.`,
-        true, settled);
-    }
-    if (error instanceof ApiError && admissionBusy(error)) {
-      withHint(error, `OpenCloud was too busy to start validating draft ${input.draftId}, revision ${input.revision}, so nothing started. Run the same command again shortly.`);
-    } else if (error instanceof Error) {
-      withHint(error, `OpenCloud may still be validating draft ${input.draftId}, revision ${input.revision}. Run the same command again: it validates that revision again and waits for the result.`);
-    }
+    return settleEndedValidation(input, error);
+  }
+}
+
+/**
+ * Settles a validation this run stopped waiting for, then rethrows: refused
+ * when OpenCloud answered (the next run starts afresh), otherwise waiting
+ * (the same request rejoins it), with the next step as the error's hint.
+ */
+async function settleEndedValidation(input: ValidationInput, error: unknown): Promise<never> {
+  const validation = input.journal.checkpoint?.validation;
+  // The journal's own refusals, and anything after the result, settle nothing.
+  if (validation?.state === "result" || error instanceof MutationJournalError || error instanceof CliContractError) throw error;
+  if (validation?.state === "refused" && error instanceof ApiError && !admissionBusy(error)) {
+    await input.journal.settleValidation("refused");
     throw error;
+  }
+  // OpenCloud may still be validating (or its admission stayed busy): this
+  // run stops waiting, and the same request run again rejoins it.
+  const settled = await input.journal.settleValidation("waiting");
+  if (error instanceof DraftValidationWaitTimeoutError) {
+    throw new MutationJournalError("DRAFT_VALIDATION_WAIT_TIMEOUT",
+      `OpenCloud is still validating draft ${input.draftId}, revision ${input.revision}; this did not cancel it, and this command stopped waiting.`,
+      true, settled);
+  }
+  if (error instanceof ApiError && admissionBusy(error)) {
+    withHint(error, `OpenCloud was too busy to start validating draft ${input.draftId}, revision ${input.revision}, so nothing started. Run the same command again shortly.`);
+  } else if (error instanceof Error) {
+    withHint(error, `OpenCloud may still be validating draft ${input.draftId}, revision ${input.revision}. Run the same command again: it validates that revision again and waits for the result.`);
+  }
+  throw error;
+}
+
+/**
+ * 3.20's validation, for an OpenCloud that does not advertise
+ * pinnedDraftValidation (2.35.x and older). That server ignores
+ * expectedRevision and validates the draft as it is; it holds a frontend
+ * build's request up to 70 seconds, then answers FRONTEND_BUILD_BUSY while
+ * the build goes on, and validating the same revision again waits on it. So:
+ * one request at a time, nine minutes for a build, that answer retried on the
+ * same revision, journaled as the pinned path is.
+ */
+async function validateUnpinned(control: OpenCloudClient, input: ValidationInput, requestSha256: string) {
+  const built = input.manifest?.frontendBuild === true;
+  const coordinates = { draftId: input.draftId, revision: input.revision, requestSha256,
+    deadline: new Date(Date.now() + (FRONTEND_BUILD_BUSY_RETRIES + 1) * (FRONTEND_BUILD_REQUEST_MS + FRONTEND_BUILD_BUSY_DELAY_MS)).toISOString() };
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      await input.journal.markAttempted();
+      await input.journal.checkpointValidation({ ...coordinates, state: "dispatched" });
+      try {
+        const result = await control.call("validateDraft",
+          { appId: input.appId, draftId: input.draftId, body: input.version ? { version: input.version } : {} },
+          { ...(built ? { timeoutMs: FRONTEND_BUILD_REQUEST_MS } : {}), ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) });
+        if (result.draftId !== input.draftId || result.revision !== input.revision) {
+          // That server validated the draft as it is now: it changed meanwhile.
+          await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
+          await input.journal.settleValidation("refused");
+          throw new CliContractError("DRAFT_REVISION_CHANGED",
+            `OpenCloud validated revision ${result.revision} of draft ${result.draftId}, not revision ${input.revision}, which this command uploaded: the draft changed meanwhile. Run the command again.`);
+        }
+        await input.journal.checkpointValidation({ ...coordinates, state: "result", validationId: result.id,
+          passed: result.passed, artifactSha256: result.artifactSha256 });
+        return result;
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        if (built && error.code === "FRONTEND_BUILD_BUSY" && attempt < FRONTEND_BUILD_BUSY_RETRIES) {
+          // This request ended; the build goes on, and validating again waits on it.
+          await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
+          process.stderr.write("OpenCloud is still building this app's frontend (or another build for it); validating the same revision again.\n");
+          await sleep(FRONTEND_BUILD_BUSY_DELAY_MS);
+          continue;
+        }
+        if (isDefiniteRefusal(error)) await input.journal.checkpointValidation({ ...coordinates, state: "refused" });
+        throw error;
+      }
+    }
+  } catch (error) {
+    return settleEndedValidation(input, error);
   }
 }

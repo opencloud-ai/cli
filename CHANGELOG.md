@@ -9,7 +9,11 @@
   an apply that became ready at the very end instead of calling it unknown;
   running the command again takes that last look too.
 - Wait for slow draft validation using short requests pinned to the exact
-  revision. Persist each dispatch and acknowledged response before continuing.
+  revision, where OpenCloud advertises `contracts.pinnedDraftValidation` in
+  `/version`. An OpenCloud without it (2.35.x and older) gets 3.20's
+  requests: no revision, up to nine minutes for a frontend build, and
+  `FRONTEND_BUILD_BUSY` validated again on the same revision, up to 20 times.
+  Persist each dispatch and acknowledged response before continuing.
   Deployment, development and direct draft validation share this behavior.
   Resumed validation can still normalize the source manifest after its exact
   result has been durably acknowledged. Validating the same revision again

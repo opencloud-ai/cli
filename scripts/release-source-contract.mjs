@@ -20,7 +20,7 @@ const now = "2026-10-14T12:00:00.000Z";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 const state = {
-  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 },
+  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 },
   drafts: new Map(),
   deployments: new Map(),
   activeDeploymentId: null,
@@ -31,6 +31,10 @@ const state = {
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
+  /** A 2.35.x server: how long it holds the next frontend-build validation. */
+  legacyHoldMs: 0,
+  /** A 2.35.x server: frontend-build validations to answer FRONTEND_BUILD_BUSY first. */
+  legacyBuildBusy: 0,
   requests: [],
 };
 
@@ -187,7 +191,21 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
-      assert.equal(JSON.parse(body).expectedRevision, draft.revision);
+      if (state.contracts.pinnedDraftValidation === 1) assert.equal(JSON.parse(body).expectedRevision, draft.revision);
+      else {
+        // A server before pinned validation (2.35.x) was never sent a revision.
+        assert.equal("expectedRevision" in JSON.parse(body), false, "an older server was sent a pinned revision");
+        if (state.legacyHoldMs) {
+          const hold = state.legacyHoldMs;
+          state.legacyHoldMs = 0;
+          await new Promise((resolve) => setTimeout(resolve, hold));
+        }
+        if (state.legacyBuildBusy > 0) {
+          state.legacyBuildBusy -= 1;
+          return send(response, 429, { statusCode: 429, code: "FRONTEND_BUILD_BUSY", retryable: true,
+            message: "OpenCloud is still building this frontend; validate the same revision again to wait for it" });
+        }
+      }
       if (state.validationBusy > 0) {
         state.validationBusy -= 1;
         response.setHeader("Retry-After", "2");
@@ -357,7 +375,7 @@ try {
   assert.equal(deployRequest().query, "");
   assert.doesNotMatch(bundleOnly.stderr, /Also kept with the app's source/);
   assert.equal("sourceOnlyFiles" in JSON.parse(bundleOnly.stdout), false);
-  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 };
 
   // 7. pull writes a release into an empty directory and records its base.
   const live = await externalRelease({ "opencloud.yaml": manifest, "frontend/src/main.ts": "console.log('live');\n" });
@@ -451,14 +469,29 @@ try {
   await runCli(["deploy", built]);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "d".repeat(64));
 
-  // 14. An API that cannot build frontends refuses before creating a draft.
+  // 14. A server from before pinned validation (2.35.x) gets 3.20's requests:
+  //     no revision, a frontend build's request held past 30 seconds instead
+  //     of being abandoned, and FRONTEND_BUILD_BUSY validated again on the same
+  //     revision.
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
+  state.legacyHoldMs = 31_000;
+  state.legacyBuildBusy = 1;
+  state.validationDigests = ["e".repeat(64)];
+  await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built on 2.35');\n");
+  const legacyAt = state.requests.length;
+  const legacy = await runCli(["deploy", built]);
+  assert.equal(state.requests.slice(legacyAt).filter((request) => request.path.endsWith("/validate")).length, 2);
+  assert.match(legacy.stderr, /OpenCloud is still building this app's frontend .*validating the same revision again/);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "e".repeat(64));
+
+  // 15. An API that cannot build frontends refuses before creating a draft.
   state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 };
   const drafts = state.drafts.size;
   const unsupported = await runCli(["deploy", built], { status: 1 });
   assert.equal(JSON.parse(unsupported.stderr.trim().split("\n").at(-1)).error.code, "PLATFORM_BUILD_UNSUPPORTED");
   assert.equal(state.drafts.size, drafts);
 
-  process.stdout.write("Release source HTTP contract passed: full-source upload and its source-only files, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, and platform-built frontends.\n");
+  process.stdout.write("Release source HTTP contract passed: full-source upload and its source-only files, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, platform-built frontends, and 3.20's validation for a server without pinned validation.\n");
 } finally {
   server.close();
   await rm(temporary, { recursive: true, force: true });

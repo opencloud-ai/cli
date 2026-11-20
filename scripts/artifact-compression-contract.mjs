@@ -155,7 +155,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/version") {
     return send(response, 200, {
       version: "9.9.9", commit: "contract", builtAt: now, releaseId: "platform-v9.9.9",
-      contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 },
+      contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 },
     });
   }
   if (parts[0] === "v1" && parts[1] === "operations") {

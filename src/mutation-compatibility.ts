@@ -22,6 +22,12 @@ export interface ReleaseContracts {
   deployPreconditions: boolean;
   /** Validation builds a frontend that declares frontend.build. */
   platformBuilds: boolean;
+  /**
+   * Validation honours expectedRevision: a request joins that revision's run
+   * and answers DRAFT_VALIDATION_IN_PROGRESS while it lasts. Without it
+   * (2.35.x and older), the CLI keeps 3.20's flow; see draft-validation.ts.
+   */
+  pinnedDraftValidation: boolean;
 }
 
 const releaseContractCache = new WeakMap<object, Promise<ReleaseContracts>>();
@@ -38,6 +44,7 @@ export function releaseContracts(
         releaseSource: value.contracts.releaseSource === 1,
         deployPreconditions: value.contracts.deployPreconditions === 1,
         platformBuilds: value.contracts.platformBuilds === 1,
+        pinnedDraftValidation: value.contracts.pinnedDraftValidation === 1,
       }))
       .catch((error: unknown) => {
         releaseContractCache.delete(control);

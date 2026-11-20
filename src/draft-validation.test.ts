@@ -30,10 +30,67 @@ function journal(checkpoint: SafeMutationCheckpoint | null = null) {
 /** The same run's journal as the next process reads it. */
 const reopen = (previous: ReturnType<typeof journal>) => journal(structuredClone(previous.checkpoint));
 const plain = { containerCount: 0, frontendBuild: false };
-const input = (manifest = { containerCount: 10, frontendBuild: false }) => ({ appId, draftId, revision: 3,
-  idempotencyKey: "journal-key-1", manifest, journal: journal() });
+const input = (manifest = { containerCount: 10, frontendBuild: false }, pinned = true) => ({ appId, draftId, revision: 3,
+  idempotencyKey: "journal-key-1", manifest, pinned, journal: journal() });
 const states = (request: ReturnType<typeof input>) => request.journal.checkpointValidation.mock.calls.map(([value]) => value.state);
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+describe("validation on an OpenCloud without pinned validation (2.35.x)", () => {
+  const buildBusy = new ApiError(429, { code: "FRONTEND_BUILD_BUSY", retryable: true,
+    message: "OpenCloud is still building this frontend; validate the same revision again to wait for it" });
+  const built = { containerCount: 0, frontendBuild: true };
+
+  it("sends 3.20's requests: no revision, nine minutes for a build, and FRONTEND_BUILD_BUSY validated again", async () => {
+    vi.useFakeTimers();
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    // That server ignores expectedRevision and holds a build up to 70 s, then says it is busy.
+    const call = vi.fn().mockRejectedValueOnce(buildBusy).mockRejectedValueOnce(buildBusy).mockResolvedValue(result);
+    const request = input(built, false);
+    const pending = validateDraftWithProgress({ call } as unknown as OpenCloudClient, request);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await expect(pending).resolves.toEqual(result);
+    expect(call).toHaveBeenCalledTimes(3);
+    for (const args of call.mock.calls) expect(args).toEqual(["validateDraft", { appId, draftId, body: {} },
+      { timeoutMs: 540_000, idempotencyKey: "journal-key-1" }]);
+    expect(stderr).toHaveBeenCalledTimes(2);
+    expect(states(request)).toEqual(["dispatched", "refused", "dispatched", "refused", "dispatched", "result"]);
+    expect(request.journal.settleValidation).not.toHaveBeenCalled();
+  });
+
+  it("validates a plain app with one request, as 3.20 did, and keeps its legacy version", async () => {
+    const call = vi.fn().mockResolvedValue(result), request = { ...input(plain, false), version: "legacy-2" };
+    await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).resolves.toEqual(result);
+    expect(call).toHaveBeenCalledExactlyOnceWith("validateDraft", { appId, draftId, body: { version: "legacy-2" } },
+      { idempotencyKey: "journal-key-1" });
+    // FRONTEND_BUILD_BUSY is retried only for a build, as 3.20 did.
+    const busyPlain = input(plain, false), once = vi.fn().mockRejectedValue(buildBusy);
+    await expect(validateDraftWithProgress({ call: once } as unknown as OpenCloudClient, busyPlain)).rejects.toBe(buildBusy);
+    expect(once).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a result for another revision, which that server validates when the draft changed", async () => {
+    const call = vi.fn().mockResolvedValue({ ...result, revision: 4 }), request = input(plain, false);
+    await expect(validateDraftWithProgress({ call } as unknown as OpenCloudClient, request)).rejects.toMatchObject({
+      code: "DRAFT_REVISION_CHANGED",
+      message: `OpenCloud validated revision 4 of draft ${draftId}, not revision 3, which this command uploaded: the draft changed meanwhile. Run the command again.`,
+    });
+    expect(request.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("refused");
+  });
+
+  it("settles a lost reply as waiting, and a build still busy after 20 tries too", async () => {
+    const lost = input(built, false), dropped = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    await expect(validateDraftWithProgress({ call: dropped } as unknown as OpenCloudClient, lost)).rejects.toThrow("fetch failed");
+    expect(lost.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+    vi.useFakeTimers();
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const stuck = input(built, false), always = vi.fn().mockRejectedValue(buildBusy);
+    const ended = validateDraftWithProgress({ call: always } as unknown as OpenCloudClient, stuck).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(21 * 6_000);
+    expect(await ended).toBe(buildBusy);
+    expect(always).toHaveBeenCalledTimes(21);
+    expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+  });
+});
 
 describe("CLI authoritative validation", () => {
   it("waits visibly through exact busy responses and preserves the revision and key", async () => {

@@ -223,6 +223,13 @@ that same entry; it never starts a second one under the same key. Unknown
 outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `MUTATION_OUTCOME_UNKNOWN`) carry the
 same `pending` field and say what to check before deciding on a new key.
 
+Where OpenCloud advertises `contracts.pinnedDraftValidation` in `/version`,
+validation is pinned to the uploaded draft revision and waited for with short
+requests. An OpenCloud without it (2.35.x and older) gets 3.20's requests: no
+revision, up to nine minutes for a frontend build, and `FRONTEND_BUILD_BUSY`
+validated again on the same revision. A result for another revision there
+means the draft changed meanwhile and fails with `DRAFT_REVISION_CHANGED`.
+
 Validation is never an unknown outcome: validating the same draft revision
 again joins OpenCloud's run for it. When `deploy` or `app dev start` or `sync`
 stops waiting without a result (a lost reply, a proxy's error, or

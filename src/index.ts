@@ -1323,6 +1323,7 @@ async function synchronizeValidatedDraft(
   await run.markAttempted();
   const result = await validateDraftWithProgress(control, {
     appId: bundle.manifest.appId, draftId: draft.id, revision, journal: run,
+    pinned: (await releaseContracts(control)).pinnedDraftValidation,
     manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: platformBuilt(bundle) },
   });
   if (validationProgress) {
@@ -2596,7 +2597,7 @@ dev
           retained.artifactSha256 === bundle.sha256
         ) {
           const validation = await validateDraftWithProgress(context.control, {
-            appId, draftId: retained.draftId,
+            appId, draftId: retained.draftId, pinned: (await releaseContracts(context.control)).pinnedDraftValidation,
             revision: retained.revision ?? (await context.control.call("getDraft", { appId, draftId: retained.draftId })).revision,
             journal: run,
             manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: false },
@@ -4729,6 +4730,7 @@ draft
         await run.markAttempted();
         const result = await validateDraftWithProgress(context.control, {
           appId: String(appId), draftId: String(draftId), revision, journal: run,
+          pinned: (await releaseContracts(context.control)).pinnedDraftValidation,
           ...(legacyVersion ? { version: legacyVersion } : {}), idempotencyKey: run.idempotencyKey,
         });
         if (
