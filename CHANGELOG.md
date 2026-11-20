@@ -74,6 +74,10 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- `validate`, and `deploy` and `app dev start` or `sync` before uploading,
+  warn with `CONTAINERS_NEED_SDK_2_8` when a manifest declares containers but
+  pins an SDK older than 2.8.0, naming the fix (`runtime.sdk.version: 2.8.0`).
+  `init` still pins 2.3.0.
 - A manifest with containers, or a container frontend, fails with
   `COMPUTE_NOT_OFFERED` ("This installation doesn't run containers") before
   `deploy`, `app dev start` or `sync` upload anything when the installation's

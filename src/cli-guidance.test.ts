@@ -183,6 +183,11 @@ describe("validate", spawning, () => {
     expect(summary.routes).toEqual([
       { id: "render", path: "/render", container: "renderer", access: "inherit", methods: ["POST"] },
     ]);
+    // init pins SDK 2.3.0; containers added to it are told which SDK they need.
+    expect(summary.warnings).toContainEqual({
+      code: "CONTAINERS_NEED_SDK_2_8", path: "opencloud.yaml",
+      message: "opencloud.yaml declares containers but pins runtime SDK 2.3.0; Functions can call containers only from SDK 2.8.0. Set runtime.sdk.version: 2.8.0 in opencloud.yaml.",
+    });
   });
 
   it("prints one readable line per manifest problem instead of Zod's issue tree", async () => {

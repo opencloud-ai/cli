@@ -48,6 +48,7 @@ import {
 } from "./account-auth.js";
 import {
   buildBundle,
+  cliBundleWarnings,
   OPEN_CLOUD_E2E_TEST_PATH,
   serializeBundleManifest,
 } from "./bundle.js";
@@ -1224,7 +1225,7 @@ async function synchronizeValidatedDraft(
     existingDraftId = validationProgress.draftId;
   }
   printBundleFiles(bundle.files);
-  printBundleWarnings(bundle.warnings);
+  printBundleWarnings([...bundle.warnings, ...cliBundleWarnings(bundle)]);
   const note = sourceOnlyNote(upload.sourceOnlyFiles, platformBuilt(bundle));
   if (note) process.stderr.write(`${note}\n`);
   if (
@@ -5147,7 +5148,7 @@ program
       e2eTest: bundle.e2eTest
         ? { path: bundle.e2eTest.path, sha256: bundle.e2eTest.sha256 }
         : null,
-      warnings: bundle.warnings,
+      warnings: [...bundle.warnings, ...cliBundleWarnings(bundle)],
       archivePath,
       next: archivePath
         ? "Use app dev start/sync for authoritative server validation."

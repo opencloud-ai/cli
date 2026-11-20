@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as tar from "tar";
 import {
   buildBundle,
+  cliBundleWarnings,
   OPEN_CLOUD_E2E_TEST_MAX_BYTES,
   OPEN_CLOUD_E2E_TEST_PATH,
 } from "./bundle.js";
@@ -114,7 +115,15 @@ ${pin}containers:
     expect(plainBundle.manifest.runtime.sdk.version).toBe("2.3.0");
     expect(containerBundle.manifest.runtime.sdk.version).toBe("2.8.0");
     await writeFile(path.join(containers, "opencloud.yaml"), containerManifest("runtime:\n  sdk:\n    version: 2.7.0\n"));
-    expect((await buildBundle(containers, { platformFrontend: true })).manifest.runtime.sdk.version).toBe("2.7.0");
+    const pinnedOlder = await buildBundle(containers, { platformFrontend: true });
+    expect(pinnedOlder.manifest.runtime.sdk.version).toBe("2.7.0");
+    // OpenCloud accepts it, so it is a warning that names the fix.
+    expect(cliBundleWarnings(pinnedOlder)).toEqual([{
+      code: "CONTAINERS_NEED_SDK_2_8", path: "opencloud.yaml",
+      message: "opencloud.yaml declares containers but pins runtime SDK 2.7.0; Functions can call containers only from SDK 2.8.0. Set runtime.sdk.version: 2.8.0 in opencloud.yaml.",
+    }]);
+    expect(cliBundleWarnings(containerBundle)).toEqual([]);
+    expect(cliBundleWarnings(plainBundle)).toEqual([]);
     await writeFile(path.join(plain, "opencloud.yaml"), `
 schemaVersion: 3
 appId: aeea1c71-72a3-4b1d-a32e-213900735091

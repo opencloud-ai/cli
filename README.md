@@ -594,7 +594,9 @@ payer. Declare jobs, services, and workers in `opencloud.yaml`; commands cannot
 override their image, resources, or permissions. A manifest that declares
 containers and pins no SDK gets SDK 2.8.0, whose Functions can call the
 containers; other unpinned manifests keep 2.3.0, which every supported
-OpenCloud installs. Explicit SDK pins remain unchanged. Where the
+OpenCloud installs. Explicit SDK pins remain unchanged; a manifest with
+containers and a pin older than 2.8.0 gets a `CONTAINERS_NEED_SDK_2_8` warning
+from `validate` and before uploading, which names the fix. Where the
 installation's public `/v1/installation` says it doesn't run containers,
 `deploy` and `app dev start` or `sync` fail with `COMPUTE_NOT_OFFERED` before
 uploading anything.
