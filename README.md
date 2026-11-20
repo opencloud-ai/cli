@@ -222,7 +222,9 @@ A key the journal generated, passed back with `--idempotency-key`, resumes
 that same entry; it never starts a second one under the same key. Unknown
 outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `DRAFT_VALIDATION_OUTCOME_UNKNOWN`,
 `MUTATION_OUTCOME_UNKNOWN`) carry the same `pending` field and say what to
-check before deciding on a new key.
+check before deciding on a new key. A container command or registry change
+that OpenCloud refused with its own code, not retryable, holds nothing, so a
+corrected request is sent; so is a deploy after `ARTIFACT_MISMATCH`.
 
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every

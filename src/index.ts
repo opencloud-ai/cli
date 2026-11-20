@@ -150,6 +150,7 @@ import {
   operationFrom,
   parseBoundedNumber,
   parseCommaList,
+  isDefiniteRefusal,
   persistCredentialToken,
   secretFromStdin,
   structuredCliError,
@@ -677,6 +678,13 @@ interface JournalMutationInput {
   /** Owner-only commands an app credential cannot run; see ownerAccountLogin. */
   ownerAccountLogin?: boolean | undefined;
   cwd?: string | undefined;
+  /**
+   * Settle the entry when OpenCloud definitely refuses the request (see
+   * isDefiniteRefusal), so a corrected request for the same target, such as
+   * a control with the generation `get` now shows, is not held behind it.
+   * Only for requests that run no app code.
+   */
+  settleRefusals?: boolean | undefined;
 }
 
 function mutationIntent(input: JournalMutationInput): MutationIntentSpec {
@@ -704,7 +712,14 @@ async function outputReplayMutation<T>(
   await context.journal.run(mutationIntent(input), async (run) => {
     run.failIfUnknown();
     await run.markAttempted();
-    const result = await start(context.control, run.idempotencyKey);
+    let result: T;
+    try {
+      result = await start(context.control, run.idempotencyKey);
+    } catch (error) {
+      // OpenCloud refused it, so nothing happened and nothing waits on it.
+      if (input.settleRefusals === true && isDefiniteRefusal(error)) await run.complete();
+      throw error;
+    }
     await outputAsync(await render(result));
     await run.complete();
   });
@@ -1367,6 +1382,9 @@ async function synchronizeValidatedDraft(
     identity = await validatedArtifactIdentity(control, bundle, draft.id, validation);
   }
   if (identity.artifactSha256 === null) {
+    // Nothing went live, and the next attempt, usually with changed source,
+    // starts afresh instead of being held behind this one until a new key.
+    await run.complete();
     throw new CliContractError(
       "ARTIFACT_MISMATCH",
       describeArtifactMismatch(
@@ -6320,7 +6338,7 @@ containers
       body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers run", appId: scope.appId,
+      commandId: "opencloud containers run", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
       explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("submitContainerJob", input, { idempotencyKey }));
@@ -6337,7 +6355,7 @@ containers
     const input = computeInput("cancelContainerExecution", { ...scope, executionId: String(executionId) });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers cancel", appId: scope.appId,
+      commandId: "opencloud containers cancel", appId: scope.appId, settleRefusals: true,
       safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("cancelContainerExecution", input, { idempotencyKey }));
   });
@@ -6355,7 +6373,7 @@ containers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers pause", appId: scope.appId,
+      commandId: "opencloud containers pause", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("pauseContainer", input, { idempotencyKey }));
   });
@@ -6373,7 +6391,7 @@ containers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers resume", appId: scope.appId,
+      commandId: "opencloud containers resume", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("resumeContainer", input, { idempotencyKey }));
   });
@@ -6391,7 +6409,7 @@ containers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers restart", appId: scope.appId,
+      commandId: "opencloud containers restart", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("restartContainer", input, { idempotencyKey }));
   });
@@ -6410,7 +6428,7 @@ containers
       body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers scale", appId: scope.appId,
+      commandId: "opencloud containers scale", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("scaleContainer", input, { idempotencyKey }));
   });
@@ -6513,7 +6531,7 @@ devContainers
       body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers run", appId: scope.appId,
+      commandId: "opencloud app dev containers run", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: { requestSha256: mutationDigest(input.body) },
       explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("submitDevContainerJob", input, { idempotencyKey }));
@@ -6532,7 +6550,7 @@ devContainers
     const input = computeInput("cancelDevContainerExecution", { ...scope, executionId: String(executionId) });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers cancel", appId: scope.appId,
+      commandId: "opencloud app dev containers cancel", appId: scope.appId, settleRefusals: true,
       safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("cancelDevContainerExecution", input, { idempotencyKey }));
   });
@@ -6552,7 +6570,7 @@ devContainers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers pause", appId: scope.appId,
+      commandId: "opencloud app dev containers pause", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("pauseDevContainer", input, { idempotencyKey }));
   });
@@ -6572,7 +6590,7 @@ devContainers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers resume", appId: scope.appId,
+      commandId: "opencloud app dev containers resume", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("resumeDevContainer", input, { idempotencyKey }));
   });
@@ -6592,7 +6610,7 @@ devContainers
       body: { expectedGeneration: controlGeneration(options.generation) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers restart", appId: scope.appId,
+      commandId: "opencloud app dev containers restart", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("restartDevContainer", input, { idempotencyKey }));
   });
@@ -6613,7 +6631,7 @@ devContainers
       body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud app dev containers scale", appId: scope.appId,
+      commandId: "opencloud app dev containers scale", appId: scope.appId, settleRefusals: true,
       safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
     }, (control, idempotencyKey) => control.call("scaleDevContainer", input, { idempotencyKey }));
   });
@@ -6659,7 +6677,7 @@ containerRegistry.command("create").argument("<app-id>")
     } });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers registry create", appId: input.appId,
+      commandId: "opencloud containers registry create", appId: input.appId, settleRefusals: true,
       // Each registry is its own target. The journal digests only what names
       // the connection, never the password: an unsalted digest of a weak one
       // could be guessed offline. OpenCloud compares the password itself when
@@ -6677,7 +6695,7 @@ containerRegistry.command("remove").argument("<app-id>").argument("<connection-i
     const input = computeInput("deleteContainerRegistry", { appId: String(appId), connectionId: String(connectionId) });
     const key = computeKey(options.idempotencyKey);
     await outputReplayMutation({
-      commandId: "opencloud containers registry remove", appId: input.appId,
+      commandId: "opencloud containers registry remove", appId: input.appId, settleRefusals: true,
       safeScope: input, safeRequest: { action: "revoke-registry" }, explicitIdempotencyKey: key,
     }, (control, idempotencyKey) => control.call("deleteContainerRegistry", input, { idempotencyKey }));
   });

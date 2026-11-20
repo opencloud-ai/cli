@@ -79,6 +79,15 @@
   conflicts, instead of a retryable `MUTATION_IN_PROGRESS`. A request sent
   without a key still waits for the target's unresolved one with
   `MUTATION_IN_PROGRESS`.
+- A container command or registry change that OpenCloud refuses with its own
+  code, not retryable (such as `COMPUTE_REVISION_CONFLICT` once the
+  generation moved on), settles its journal entry: the corrected command, for
+  example with the generation `containers get` now shows, is sent instead of
+  failing with `MUTATION_IN_PROGRESS`. A retryable or uncertain answer
+  (`COMPUTE_OUTCOME_UNKNOWN`) still holds the target until the same request
+  resumes it with its key. A deploy or development start that fails with
+  `ARTIFACT_MISMATCH` settles its entry too, so changed source goes out
+  without a new key.
 - A development apply OpenCloud refuses (a coded 4xx answer or a compute
   error such as `COMPUTE_NO_CAPACITY`) is recorded as refused, so running the
   command again sends a new apply instead of waiting out the old one's

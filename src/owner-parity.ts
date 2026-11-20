@@ -14,7 +14,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
-import { computeErrorSchema } from "@opencloud/contracts/containers";
+import { computeErrorCatalog, computeErrorCodeSchema, computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
 import { CliContractError, hintOf } from "./cli-contract-error.js";
@@ -529,6 +529,24 @@ export function inputDetails(details: Record<string, unknown>): Record<string, u
     if (fields.length) picked.fields = fields;
   }
   return Object.keys(picked).length ? picked : null;
+}
+
+/**
+ * A definite refusal: OpenCloud answered with a 4xx code of its own, not
+ * retryable and naming no operation, so the request took no effect. A proxy's
+ * uncoded answer, a timeout and a retryable code (which may mean the same
+ * request is still being handled) are not. Nor is a compute code whose
+ * effects are not yet known, such as COMPUTE_OUTCOME_UNKNOWN, a 409.
+ */
+export function isDefiniteRefusal(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status < 400 || error.status > 499 || error.status === 408) return false;
+  if (error.retryable || error.operation !== null || typeof error.code !== "string" || !error.code) return false;
+  const compute = computeErrorCodeSchema.safeParse(error.code);
+  if (compute.success) {
+    const { origin, retryScope } = computeErrorCatalog[compute.data];
+    return origin !== "unknown" && retryScope !== "observer_reconciliation";
+  }
+  return true;
 }
 
 /** The next step OpenCloud names for an error, in `details.suggestedFix`. */

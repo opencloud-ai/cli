@@ -19,6 +19,17 @@ const requests = [];
 const effects = new Map();
 let dropNext = false;
 let denied = false;
+/** Answers for the next mutations, in order: [status, body]. OpenCloud stores nothing for a refusal. */
+const refusals = [];
+/** An execution the next run and execution reads answer with. */
+let executionAnswer = null;
+const refusal = (statusCode, code, message, details) => ({ statusCode, code, message, requestId: "compute-test", details });
+const REVISION_CONFLICT = refusal(409, "COMPUTE_REVISION_CONFLICT", "The workload changed. Refresh its control generation.",
+  { category: "configuration", origin: "policy", phase: "admission", retryScope: "none", retryable: false, billingDisposition: "none" });
+const CAPACITY_EXCEEDED = refusal(429, "COMPUTE_CAPACITY_EXCEEDED", "The account has reached its container capacity limit.",
+  { category: "capacity", origin: "policy", phase: "admission", retryScope: "request", retryable: true, billingDisposition: "none", retryAfterSeconds: 5 });
+const OUTCOME_UNKNOWN = refusal(409, "COMPUTE_OUTCOME_UNKNOWN", "The execution outcome is not yet known. Do not repeat its effects.",
+  { category: "execution", origin: "unknown", phase: "running", retryScope: "observer_reconciliation", retryable: false, billingDisposition: "pending_evidence" });
 const usage = { quantities: { vcpuSeconds: "9007199254740993", memoryGiBSeconds: "4", scratchGiBSeconds: "2" }, currency: "usd",
   grossEstimatedCostMinor: "0.123456789012", appliedCreditMinor: "0.02", netEstimatedCostMinor: "0.103456789012",
   priceVersionIds: [revisionId], pendingEvidenceCount: 1, lastSettledAt: null, observedAt: now };
@@ -81,19 +92,24 @@ const server = createServer(async (request, response) => {
   } else if (url.pathname.endsWith("/compute/registries")) {
     value = request.method === "GET" ? { connections: [connection] } : connection;
   } else if (url.pathname.includes("/compute/registries/")) value = { revoked: true };
-  else if (request.method !== "GET") {
+  else if (request.method !== "GET" && refusals.length) {
+    assert.ok(request.headers["idempotency-key"], "mutation lost its stable key");
+    const [status, answer] = refusals.shift();
+    response.statusCode = status;
+    value = answer;
+  } else if (request.method !== "GET") {
     assert.ok(request.headers["idempotency-key"], "mutation lost its stable key");
     const identity = `${url.pathname}:${request.headers["idempotency-key"]}`;
     if (!effects.has(identity)) effects.set(identity, body);
     else assert.deepEqual(body, effects.get(identity), "server replay changed the request");
-    value = url.pathname.endsWith("/executions") || url.pathname.endsWith("/cancel") ? execution(isDev)
+    value = url.pathname.endsWith("/executions") || url.pathname.endsWith("/cancel") ? executionAnswer ?? execution(isDev)
       // A control change commits at once: the receipt names the next generation, no operation.
       : { workloadName: "worker", generation: 4, acceptedAt: now };
     if (dropNext) { dropNext = false; response.destroy(); return; }
   } else if (url.pathname.endsWith("/containers")) value = { workloads: [workload(isDev)], nextCursor: "opaque+/=", observedAt: now };
   else if (url.pathname.endsWith("/container-executions")) value = { executions: [execution(isDev)], nextCursor: null, observedAt: now };
   else if (url.pathname.endsWith(`/container-executions/${failedExecutionId}`)) value = failedExecution(isDev);
-  else if (url.pathname.includes("/container-executions/")) value = execution(isDev);
+  else if (url.pathname.includes("/container-executions/")) value = executionAnswer ?? execution(isDev);
   else if (url.pathname.endsWith("/events")) value = { events: [], nextCursor: null, observedAt: now };
   else value = workload(isDev);
   response.end(JSON.stringify(value));
@@ -178,6 +194,53 @@ try {
     await run([...prefix, "events", scope, "worker", "--limit", "2"]);
     assert.equal(requests.at(-1).path, `${route}/containers/worker/events`);
   }
+  // K5, K13: refused and uncertain controls. A definite refusal settles its
+  // entry, so the corrected control is sent; a retryable or uncertain answer
+  // holds the target, and only the same request resumes it, with its key.
+  const control = (action, generation, status = 0) =>
+    run(["containers", action, appId, "worker", "--generation", String(generation), ...(action === "scale" ? ["--replicas", "2"] : [])], status);
+  refusals.push([409, REVISION_CONFLICT]);
+  let at = requests.length;
+  const stale = (await control("pause", 2, 1)).error;
+  assert.deepEqual([stale.code, stale.status, stale.retryable], ["COMPUTE_REVISION_CONFLICT", 409, false]);
+  assert.equal(business(at).length, 1, "a refused control was sent again");
+  at = requests.length;
+  assert.equal((await control("pause", 3)).generation, 4, "the corrected control was held behind the refused one");
+  assert.equal(business(at).length, 1);
+  assert.equal(requests.at(-1).body.expectedGeneration, 3);
+  for (const [status, answer] of [[429, CAPACITY_EXCEEDED], [503, {}], [409, OUTCOME_UNKNOWN]]) {
+    refusals.push([status, answer]);
+    at = requests.length;
+    const held = (await control("resume", 3, 1)).error;
+    assert.equal(held.status, status);
+    assert.equal(held.code, answer.code ?? `HTTP_${status}`);
+    const heldKey = requests.at(-1).key;
+    // Retryable (429, a proxy's 503) or uncertain (COMPUTE_OUTCOME_UNKNOWN):
+    // nothing proves it took no effect, so a different control waits for it.
+    at = requests.length;
+    const waiting = (await control("resume", 5, 1)).error;
+    assert.equal(waiting.code, "MUTATION_IN_PROGRESS", JSON.stringify(waiting));
+    assert.equal(waiting.pending.idempotencyKey, heldKey);
+    assert.equal(business(at).length, 0, "a different control overtook an unresolved one");
+    at = requests.length;
+    await control("resume", 3);
+    assert.equal(business(at).length, 1);
+    assert.equal(requests.at(-1).key, heldKey, "the same control resumed with another key");
+  }
+  // Answers with an uncertain or replaced job are printed as received: a run
+  // whose outcome is not yet known, and one a newer release cancelled.
+  executionAnswer = { ...execution(false), state: "outcome_unknown", waitReason: null, attempt: 1, startedAt: now };
+  const uncertain = await run(["containers", "run", appId, "job", "--input", "{}", "--idempotency-key", "uncertain-run-1"]);
+  assert.equal(uncertain.state, "outcome_unknown");
+  assert.equal((await run(["containers", "execution", appId, executionId])).state, "outcome_unknown");
+  executionAnswer = { ...execution(false), state: "cancelled", waitReason: null, finishedAt: now,
+    error: refusal(409, "COMPUTE_RELEASE_REPLACED", "Another release (a deploy, rollback or dev sync) replaced the one this job was accepted for, so the waiting job was cancelled. Start it again to run it on the current release.",
+      { category: "configuration", origin: "policy", phase: "admission", retryScope: "none", retryable: false, billingDisposition: "none" }) };
+  delete executionAnswer.error.requestId;
+  const replaced = await run(["containers", "execution", appId, executionId]);
+  assert.deepEqual([replaced.state, replaced.error.code, replaced.error.details.retryScope], ["cancelled", "COMPUTE_RELEASE_REPLACED", "none"]);
+  executionAnswer = null;
+
   // Production and development controls print the same full receipt (W3 saw them differ).
   for (const action of ["pause", "resume", "restart", "scale"]) {
     assert.deepEqual(controlOutputs.get(`${action}:false`), { workloadName: "worker", generation: 4, acceptedAt: now });

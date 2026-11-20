@@ -25,6 +25,7 @@ import {
   OperationWaitTimeoutError,
   downloadToFile,
   followOperation,
+  isDefiniteRefusal,
   jsonOption,
   parseBoundedNumber,
   persistCredentialToken,
@@ -66,6 +67,35 @@ describe("owner-parity CLI helpers", () => {
     expect(() => parseBoundedNumber("1e-1", "--interval", 0.05, 60, false)).toThrow(/--interval/);
     expect(parseBoundedNumber(".5", "--interval", 0.05, 60, false)).toBe(0.5);
     expect(parseBoundedNumber(50, "--limit", 1, 100)).toBe(50);
+  });
+
+  it("treats only OpenCloud's own non-retryable 4xx codes as refusals that took no effect", () => {
+    const compute = (status: number, code: string, details: Record<string, unknown>) => new ApiError(status, {
+      statusCode: status, code, message: "refused", details: { billingDisposition: "none", ...details },
+    });
+    const definite = [
+      compute(409, "COMPUTE_REVISION_CONFLICT", { category: "configuration", origin: "policy", phase: "admission", retryScope: "none", retryable: false }),
+      compute(429, "COMPUTE_BUDGET_EXCEEDED", { category: "billing", origin: "policy", phase: "admission", retryScope: "none", retryable: false }),
+      new ApiError(422, { code: "INVALID_REGISTRY_HOST", message: "refused" }),
+      new ApiError(404, { code: "NOT_FOUND", message: "missing" }),
+    ];
+    for (const error of definite) expect(isDefiniteRefusal(error), error.code ?? "").toBe(true);
+    const uncertain = [
+      // Its effects may still happen.
+      compute(409, "COMPUTE_OUTCOME_UNKNOWN", { category: "execution", origin: "unknown", phase: "running", retryScope: "observer_reconciliation", retryable: false }),
+      // Retryable: the same request may still be in hand.
+      compute(429, "COMPUTE_CAPACITY_EXCEEDED", { category: "capacity", origin: "policy", phase: "admission", retryScope: "request", retryable: true }),
+      new ApiError(409, { code: "REQUEST_IN_PROGRESS", message: "busy", retryable: true }),
+      // A proxy's or an older server's uncoded answer, and a timeout.
+      new ApiError(404, "<html>not found</html>"),
+      new ApiError(408, { code: "REQUEST_TIMEOUT", message: "slow" }),
+      new ApiError(503, { code: "APP_LOCK_BUSY", message: "busy", retryable: true }),
+      new ApiError(500, { code: "INTERNAL", message: "fault" }),
+      // An answer naming an operation is about work that exists.
+      new ApiError(409, { code: "OPERATION_EXISTS", message: "exists", operation: { id: "11111111-1111-4111-8111-111111111111", state: "running" } }),
+      new Error("fetch failed"),
+    ];
+    for (const error of uncertain) expect(isDefiniteRefusal(error), String((error as ApiError).code ?? error.message)).toBe(false);
   });
 
   it("loads exactly one JSON input source and checks its shape", async () => {

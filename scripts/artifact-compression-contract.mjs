@@ -617,8 +617,9 @@ try {
   // 9. A sync after a direct production deploy (J2, J3) says production
   //    changed, names both releases and the commands, and sends no apply.
   await write("frontend/index.html", "<!doctype html><title>Counter v10</title>\n");
-  // Section 6's refused deploy still holds the unkeyed deploy target.
-  await runCli(["deploy", app, "--idempotency-key", "overtaking-production-deploy"]);
+  // Section 6's ARTIFACT_MISMATCH settled its entry (K5), so this deploy of
+  // changed source needs no key of its own.
+  await runCli(["deploy", app]);
   const syncAt = state.requests.length;
   const overtaken = errorOf(await runCli(["app", "dev", "sync", app], { status: 1 }));
   assert.equal(overtaken.code, "ACTIVE_DEPLOYMENT_CHANGED");
