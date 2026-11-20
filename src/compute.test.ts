@@ -163,7 +163,7 @@ describe("compute command boundaries", () => {
     expect(workerReplicas(" 3 ")).toBe(3);
     expect(controlGeneration("3")).toBe(3);
     for (const typed of ["", " ", "0x2", "1e1", "2.0", "-1", "+2", "Infinity", "21"]) {
-      expect(() => workerReplicas(typed), typed).toThrowError(expect.objectContaining({ code: "INVALID_OPTION", message: "--replicas must be an integer from 0 through 20" }));
+      expect(() => workerReplicas(typed), typed).toThrowError(expect.objectContaining({ code: "INVALID_OPTION", message: "--replicas must be an integer from 0 through 20, in plain digits" }));
     }
     for (const typed of ["", " ", "0", "0x3", "3e0", "3.5", undefined]) {
       expect(() => controlGeneration(typed), String(typed)).toThrowError(expect.objectContaining({ code: "INVALID_OPTION" }));

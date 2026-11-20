@@ -68,12 +68,10 @@ export function addOperationOptions(command: Command): Command {
 }
 
 /**
- * Plain decimal digits only. Number() reads "" and " " as 0 and accepts
- * 0x2 or 1e1, so `--replicas "$UNSET"` would otherwise mean zero replicas.
+ * A bounded number in the forms 3.20 accepted (`1e2`, `5.`, `0x10`), for
+ * options whose zero is out of range anyway. Options where an empty value
+ * would mean zero use parseDecimalInteger.
  */
-const DECIMAL_INTEGER = /^\d+$/;
-const DECIMAL_NUMBER = /^(?:\d+(?:\.\d+)?|\.\d+)$/;
-
 export function parseBoundedNumber(
   raw: unknown,
   name: string,
@@ -81,8 +79,7 @@ export function parseBoundedNumber(
   maximum: number,
   integer = true,
 ): number {
-  const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
-  const value = (integer ? DECIMAL_INTEGER : DECIMAL_NUMBER).test(text) ? Number(text) : Number.NaN;
+  const value = Number(raw);
   if (
     !Number.isFinite(value) ||
     (integer && !Number.isSafeInteger(value)) ||
@@ -93,6 +90,19 @@ export function parseBoundedNumber(
       "INVALID_OPTION",
       `${name} must be ${integer ? "an integer" : "a number"} from ${minimum} through ${maximum}`,
     );
+  }
+  return value;
+}
+
+/**
+ * Plain decimal digits only. Number() reads "" and " " as 0 and accepts 0x2
+ * or 1e1, so `--replicas "$UNSET"` would otherwise mean zero replicas.
+ */
+export function parseDecimalInteger(raw: unknown, name: string, minimum: number, maximum: number): number {
+  const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new CliContractError("INVALID_OPTION", `${name} must be an integer from ${minimum} through ${maximum}, in plain digits`);
   }
   return value;
 }

@@ -160,10 +160,11 @@
   2 problems: containers[0].resources.cpu: must be one of 1, 2, 4, 8; …`),
   plus an `issues` list, instead of Zod's issue tree as JSON inside
   `CLI_ERROR`. Other invalid command input is listed the same way.
-- Numeric options take plain decimal digits. An empty value (such as an unset
-  variable in `--replicas "$N"`), whitespace, `0x2` or `1e1` fails with
-  `INVALID_OPTION` before any request, instead of being read as 0, 2 or 10:
-  `containers scale --replicas ""` used to stop every replica.
+- `--replicas` and `--generation` take plain decimal digits. An empty value
+  (such as an unset variable in `--replicas "$N"`), whitespace, `0x2` or `1e1`
+  fails with `INVALID_OPTION` before any request, instead of being read as 0,
+  2 or 10: `containers scale --replicas ""` used to stop every replica. Other
+  numeric options accept what 3.20 accepted, such as `--timeout 1e2`.
 
 ## 3.20.0
 

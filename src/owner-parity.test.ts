@@ -28,6 +28,7 @@ import {
   isDefiniteRefusal,
   jsonOption,
   parseBoundedNumber,
+  parseDecimalInteger,
   persistCredentialToken,
   secretFromStdin,
   structuredCliError,
@@ -60,13 +61,15 @@ describe("owner-parity CLI helpers", () => {
     expect(() => parseBoundedNumber("101", "--limit", 1, 100)).toThrow(
       /--limit/,
     );
-    // Number() would read these as 0, 16 or 10.
-    for (const typed of ["", "   ", "0x10", "1e1", "Infinity", "-0"]) {
-      expect(() => parseBoundedNumber(typed, "--limit", 0, 100), typed).toThrow(/--limit must be an integer/);
-    }
-    expect(() => parseBoundedNumber("1e-1", "--interval", 0.05, 60, false)).toThrow(/--interval/);
-    expect(parseBoundedNumber(".5", "--interval", 0.05, 60, false)).toBe(0.5);
+    // The forms 3.20 accepted still work for general options.
+    expect(parseBoundedNumber("1e2", "--timeout", 1, 600)).toBe(100);
+    expect(parseBoundedNumber("5.", "--timeout", 1, 600)).toBe(5);
     expect(parseBoundedNumber(50, "--limit", 1, 100)).toBe(50);
+    // Compute controls take plain digits: Number() reads these as 0, 16 or 10.
+    for (const typed of ["", "   ", "0x10", "1e1", "Infinity", "-0", "5."]) {
+      expect(() => parseDecimalInteger(typed, "--replicas", 0, 100), typed).toThrow(/--replicas must be an integer from 0 through 100, in plain digits/);
+    }
+    expect(parseDecimalInteger(" 07 ", "--replicas", 0, 20)).toBe(7);
   });
 
   it("treats only OpenCloud's own non-retryable 4xx codes as refusals that took no effect", () => {
