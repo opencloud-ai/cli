@@ -62,13 +62,14 @@ describe("compute command boundaries", () => {
       expect(() => computeInput("scaleContainer", { appId: id, name: "worker", body })).toThrow();
     }
   });
-  it("filters logs by the platform's surface names and plurals, refusing anything else before a request", () => {
+  it("filters logs by the platform's surface names and aliases as typed, refusing anything else before a request", () => {
     for (const name of ["function", "container", "http", "ai", "platform"]) expect(logSurface(name)).toBe(name);
-    expect(logSurface(" Functions ")).toBe("function");
-    // The older name for Function lines, which the published guide and earlier CLIs use.
-    expect(logSurface("runtime")).toBe("function");
-    expect(logSurface("Runtime")).toBe("function");
-    expect(logSurface("containers")).toBe("container");
+    // Aliases are not mapped: OpenCloud reads them itself, and a release from
+    // before the surface names knows Function lines only as `runtime`.
+    expect(logSurface(" Functions ")).toBe("functions");
+    expect(logSurface("runtime")).toBe("runtime");
+    expect(logSurface("Runtime")).toBe("runtime");
+    expect(logSurface("containers")).toBe("containers");
     for (const unknown of ["edge", "runtimes", "functionz", "__proto__", "constructor", "http.log.access.log0"]) {
       expect(() => logSurface(unknown)).toThrowError(expect.objectContaining({
         code: "LOG_SURFACE_UNKNOWN",
@@ -83,7 +84,8 @@ describe("compute command boundaries", () => {
       details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"],
         aliases: { functions: "function", runtime: "function", containers: "container" } },
     });
-    expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "functions" }).surface).toBe("function");
+    expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "functions" }).surface).toBe("functions");
+    expect(computeLogBody({ from: "2026-01-01T00:00:00Z", to: "2026-01-01T01:00:00Z", surface: "runtime" }).surface).toBe("runtime");
   });
 
   it("binds log filters without exposing another environment selector", () => {

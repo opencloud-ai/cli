@@ -189,11 +189,13 @@ try {
   assert.deepEqual(page.entries[0].fields, loggedFields, "logs --page keeps a Function's logged fields");
   assert.deepEqual((await run(["logs", appId, "--page", "--from", now, "--to", "2026-11-14T01:00:00Z"])).entries[0].fields, loggedFields);
   assert.equal(page.computeObservation.gaps[0].droppedLines, "3");
-  // W1b, W2b: Function lines are the `function` surface. A plural and the older
-  // name `runtime` are sent by that name; an unknown surface is refused first.
-  for (const alias of ["functions", "runtime"]) {
+  // W1b, W2b, K7: Function lines are the `function` surface. A plural and the
+  // older name `runtime` are sent as typed, never mapped: OpenCloud reads each
+  // alias itself, and an older release matches Function lines only as
+  // `runtime`. An unknown surface is refused first.
+  for (const alias of ["functions", "runtime", "Runtime"]) {
     await run(["logs", appId, "--surface", alias, "--from", now, "--to", "2026-11-14T01:00:00Z"]);
-    assert.equal(requests.at(-1).body.surface, "function");
+    assert.equal(requests.at(-1).body.surface, alias.toLowerCase());
   }
   const surfaceBefore = requests.length;
   const unknownSurface = (await run(["logs", appId, "--surface", "edge", "--from", now, "--to", "2026-11-14T01:00:00Z"], 1)).error;

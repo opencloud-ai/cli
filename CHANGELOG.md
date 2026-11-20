@@ -32,8 +32,9 @@
   (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
   `containers` and `runtime`, the older name for `function`) and refuse any
   other value with `LOG_SURFACE_UNKNOWN` before sending a request, as the
-  platform does, instead of returning an empty page. An alias is sent by the
-  name it stands for.
+  platform does, instead of returning an empty page. Each name is sent as
+  typed, never mapped: OpenCloud reads every alias itself, and a release from
+  before the surface names still finds Function lines with `runtime`.
 - When OpenCloud refuses the input itself, the error keeps what it should be
   in `details`: the `field`, the values it `allowed` and their `aliases`
   (`LOG_SURFACE_UNKNOWN`, whether the platform or the CLI refused it), or each

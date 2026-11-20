@@ -74,7 +74,7 @@ export const LOG_SURFACES = ["function", "container", "http", "ai", "platform"] 
 /**
  * Other names the platform accepts for a surface: the plurals people type, and
  * `runtime`, the older name for Function lines that the published telemetry
- * guide and earlier CLIs use.
+ * guide, earlier CLIs and OpenCloud releases before the surface names use.
  */
 const LOG_SURFACE_ALIASES: Readonly<Record<string, (typeof LOG_SURFACES)[number]>> = {
   functions: "function",
@@ -83,15 +83,16 @@ const LOG_SURFACE_ALIASES: Readonly<Record<string, (typeof LOG_SURFACES)[number]
 };
 
 /**
- * The surface a log page asks for, by name or alias, as the platform reads it.
- * Any other value would only match nothing, so it is refused before a request
- * with the platform's own code and wording.
+ * The surface a log page asks for: a name or alias, sent as typed (trimmed and
+ * lowercased), never mapped. OpenCloud reads each alias itself, and a release
+ * from before the surface names labels Function lines `runtime` and matches
+ * the value exactly, so `runtime` must reach it as `runtime`. Any other value
+ * would only match nothing, so it is refused before a request with the
+ * platform's own code and wording.
  */
-export function logSurface(value: string): (typeof LOG_SURFACES)[number] {
+export function logSurface(value: string): string {
   const name = value.trim().toLowerCase();
-  const surface = Object.hasOwn(LOG_SURFACE_ALIASES, name) ? LOG_SURFACE_ALIASES[name] : name;
-  const known = LOG_SURFACES.find((candidate) => candidate === surface);
-  if (known) return known;
+  if ((LOG_SURFACES as readonly string[]).includes(name) || Object.hasOwn(LOG_SURFACE_ALIASES, name)) return name;
   // The platform's own code, wording and details for the same refusal.
   throw callerFailure(new CliContractError(
     "LOG_SURFACE_UNKNOWN",
