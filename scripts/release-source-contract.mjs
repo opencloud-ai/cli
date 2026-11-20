@@ -31,6 +31,8 @@ const state = {
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
+  /** The next deploy's candidate fails, as a container that exits at once does, and the live release stays. */
+  failNextDeploy: false,
   /** What GET /v1/installation answers; null answers 404, as servers before it did. */
   installation: null,
   /** A 2.35.x server: how long it holds the next frontend-build validation. */
@@ -48,9 +50,9 @@ function deploymentRecord(release) {
     artifactSha256: release.artifactSha256,
     sdkVersion: "2.3.0",
     manifest: {},
-    state: release.rolledBack ? "rolled_back" : state.activeDeploymentId === release.id ? "active" : "superseded",
+    state: release.failure ? "failed" : release.rolledBack ? "rolled_back" : state.activeDeploymentId === release.id ? "active" : "superseded",
     rollbackOfDeploymentId: null,
-    error: null,
+    error: release.failure ?? null,
     createdAt: now,
     activatedAt: now,
     source: release.source
@@ -84,17 +86,17 @@ function fileRecord(filePath, value) {
   };
 }
 
-function operation(id, deploymentId) {
+function operation(id, deploymentId, failure = null) {
   return {
     id,
     appId,
     deploymentId,
     type: "deploy",
-    state: "succeeded",
+    state: failure ? "failed" : "succeeded",
     actorType: "user",
     actorId,
     idempotencyKey: "server-redacted",
-    error: null,
+    error: failure,
     createdAt: now,
     updatedAt: now,
   };
@@ -157,7 +159,7 @@ const server = createServer(async (request, response) => {
   }
   if (parts[0] === "v1" && parts[1] === "operations") {
     const release = [...state.deployments.values()].find((value) => value.operationId === parts[2]);
-    return send(response, 200, operation(parts[2], release?.id ?? null));
+    return send(response, 200, operation(parts[2], release?.id ?? null, release?.operationFailure ?? null));
   }
   if (parts[0] !== "v1" || parts[1] !== "apps" || parts[2] !== appId) return send(response, 404, { code: "NOT_FOUND", message: "not found" });
   if (parts.length === 3 && request.method === "GET") {
@@ -257,6 +259,14 @@ const server = createServer(async (request, response) => {
         source: sourceBytes ? { bytes: sourceBytes, sha256: sha256(sourceBytes), fileCount: draft.files.size } : null,
       };
       state.deployments.set(id, release);
+      if (state.failNextDeploy) {
+        state.failNextDeploy = false;
+        release.failure = { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.",
+          details: { category: "execution", origin: "app", phase: "startup", retryScope: "none", retryable: false, billingDisposition: "confirmed_usage", exitCode: 3, workloadName: "pricing" } };
+        release.operationFailure = { code: "DEPLOYMENT_COMPENSATED",
+          message: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully." };
+        return send(response, 202, { draft: draftRecord(draft), deployment: deploymentRecord(release), operation: operation(operationId, id, release.operationFailure) });
+      }
       state.activeDeploymentId = id;
       draft.status = "deployed";
       return send(response, 202, { draft: draftRecord(draft), deployment: deploymentRecord(release), operation: operation(operationId, id) });
@@ -377,6 +387,21 @@ try {
   await runCli(["deploy", app]);
   assert.equal(deployRequest().query, `?expectedActiveDeploymentId=${newer}`);
   assert.notEqual(state.activeDeploymentId, newer);
+
+  // 4c. A deploy OpenCloud compensated names the release's own failure, with
+  //     its exit code and the logs that show it, and the live release stays.
+  const liveBeforeFailure = state.activeDeploymentId;
+  state.failNextDeploy = true;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3c');\n");
+  const compensated = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.equal(state.activeDeploymentId, liveBeforeFailure);
+  assert.deepEqual({ code: compensated.code, operationErrorCode: compensated.operationErrorCode, deploymentError: compensated.deploymentError }, {
+    code: "OPERATION_FAILED", operationErrorCode: "DEPLOYMENT_COMPENSATED",
+    deploymentError: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.", details: {
+      category: "execution", origin: "app", phase: "startup", retryScope: "none", retryable: false, billingDisposition: "confirmed_usage", exitCode: 3, workloadName: "pricing" } },
+  });
+  assert.match(compensated.hint, new RegExp(`^OpenCloud kept the release that was live before\\. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container --workload pricing --from `));
+  assert.equal(compensated.operationErrorMessage, "Deployment failed and the previous runtime topology was restored: The container failed to start successfully.");
 
   // 5. When the server resolves the author manifest differently, the CLI keeps
   //    the source but sends the canonical manifest instead.

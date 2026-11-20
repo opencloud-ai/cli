@@ -74,6 +74,16 @@
   bounded parts are kept, with credentials redacted. An owner-only action
   refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
   forward as the error's `hint`.
+- A deploy or rollback OpenCloud compensated, which used to print only
+  `OPERATION_FAILED` and `DEPLOYMENT_COMPENSATED`, now prints the operation's
+  own message and the failed release: `deploymentId` and `deploymentError`
+  (code, message and the compute details, such as `exitCode` and
+  `workloadName`), with a hint giving the `logs --page --surface container`
+  command for the deploy's window. `operation get` does the same. A release
+  that failed for the app's own reason (its container, by the compute
+  catalog, or a refused migration) is not sent as an error report, and an
+  operation that failed or was cancelled settles its journal entry, so the
+  next deploy of fixed source is not held behind it.
 - A deploy refused with `ACTIVE_DEPLOYMENT_CHANGED` gives the exact recovery
   in its hint, with this copy's directory and the release to base it on: after
   a rollback (the copy's base was rolled back),

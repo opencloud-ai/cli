@@ -150,6 +150,7 @@ import {
   downloadToFile,
   followOperation,
   jsonOption,
+  OperationTerminalError,
   operationFrom,
   parseBoundedNumber,
   parseCommaList,
@@ -757,6 +758,20 @@ async function outputReplayMutation<T>(
   });
 }
 
+/**
+ * Follows a journaled operation. One OpenCloud ended as failed or cancelled
+ * is settled: its outcome is known and nothing waits on it, so the next
+ * request (with fixed source, say) is not held behind it.
+ */
+async function followJournaledOperation(run: MutationRun, input: Parameters<typeof followOperation>[0]): Promise<unknown> {
+  try {
+    return await followOperation(input);
+  } catch (error) {
+    if (error instanceof OperationTerminalError) await run.complete();
+    throw error;
+  }
+}
+
 async function outputDurableMutation(
   input: JournalMutationInput,
   options: OperationOptions,
@@ -792,7 +807,7 @@ async function outputDurableMutation(
       }
       await run.checkpointOperation(operation.id);
     }
-    const completed = await followOperation({
+    const completed = await followJournaledOperation(run, {
       client: context.control,
       started,
       options,
@@ -5139,7 +5154,7 @@ addOperationOptions(
             operationId: operation.id,
           });
         }
-        const completed = await followOperation({
+        const completed = await followJournaledOperation(run, {
           client: context.control,
           started,
           options,

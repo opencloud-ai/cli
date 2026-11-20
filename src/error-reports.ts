@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { CommanderError, type Command } from "commander";
 import { ApiError } from "./api-client.js";
-import { computeErrorSchema } from "@opencloud/contracts/containers";
+import { computeErrorCatalog, computeErrorCodeSchema, computeErrorSchema } from "@opencloud/contracts/containers";
 import {
   COMMAND_VARIABLE,
   PRODUCT_NAME_VARIABLE,
@@ -249,6 +249,22 @@ function isCommanderError(error: unknown): boolean {
   return typeof code === "string" && code.startsWith("commander.");
 }
 
+/** Release failures that are the app's own to fix: its migrations, or its containers. */
+const CALLER_RELEASE_CODES = new Set(["RUNTIME_MIGRATION_HISTORY_INVALID", "RUNTIME_MIGRATION_POLICY_INVALID"]);
+
+/**
+ * A compensated deploy or rollback whose release failed for the app's own
+ * reason (a container that exited or never became ready, by the compute
+ * catalog's origin, or a migration OpenCloud refused) is the caller's
+ * outcome, not a fault to report.
+ */
+function callerCausedRelease(cause: Record<string, unknown> | undefined): boolean {
+  if (!cause || typeof cause.code !== "string") return false;
+  if (CALLER_RELEASE_CODES.has(cause.code)) return true;
+  const code = computeErrorCodeSchema.safeParse(cause.code);
+  return code.success && ["app", "policy"].includes(computeErrorCatalog[code.data].origin);
+}
+
 /**
  * A failure is reported when the CLI itself failed, OpenCloud answered 5xx
  * or not at all, or a durable operation failed or has an unknown outcome.
@@ -267,7 +283,7 @@ export function isReportableFailure(error: unknown): boolean {
     return error.status >= 500 || record(error.operation)?.state === "failed";
   }
   if (error instanceof OperationTerminalError) {
-    return error.operation.state === "failed";
+    return error.operation.state === "failed" && !callerCausedRelease(error.deployment?.error);
   }
   return !CALLER_OUTCOME_CODES.has(String(structuredCliError(error).error.code));
 }

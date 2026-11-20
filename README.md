@@ -627,7 +627,12 @@ opencloud containers events "$APP_ID" web --limit 50
 `run` returns durable acceptance, followed by execution status and independently
 reported completion delivery. After a lost reply, repeat the same input and key
 to recover that execution. An unknown process outcome is never permission to
-repeat its effects. Control commands require the generation from `get`; scaling
+repeat its effects. A deploy or rollback OpenCloud compensated (a new
+container that never became ready, or exited) fails with `OPERATION_FAILED`,
+and its error names the release in `deploymentId` and its own failure in
+`deploymentError` (code, message and details such as `exitCode`), with a
+`hint` giving the `logs --page --surface container` command for that window;
+the release that was live keeps serving. Control commands require the generation from `get`; scaling
 applies only to workers and resets at the next deployment. `pause`, `resume`,
 `restart` and `scale` answer with `workloadName`, the new `generation` and
 `acceptedAt`. The change is already saved when the command answers, so there is

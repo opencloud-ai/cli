@@ -17,7 +17,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api-client.js";
 import { apiErrorFromResponse } from "../vendor/control-plane-client/src/errors.js";
 import { withCliHeaders } from "./cli-http.js";
-import { withHint } from "./cli-contract-error.js";
+import { hintOf, withHint } from "./cli-contract-error.js";
+import { isReportableFailure } from "./error-reports.js";
 import { MutationJournalError } from "./mutation-journal.js";
 import {
   CliContractError,
@@ -179,6 +180,38 @@ describe("owner-parity CLI helpers", () => {
         sleep: async () => undefined,
       }),
     ).rejects.toBeInstanceOf(OperationWaitTimeoutError);
+  });
+
+  it("names why a compensated deploy failed: the release's own error, its exit code, and the logs that show it", async () => {
+    const appId = "11111111-1111-4111-8111-111111111111", deploymentId = "22222222-2222-4222-8222-222222222222";
+    const failed = { id: "33333333-3333-4333-8333-333333333333", appId, deploymentId, state: "failed", type: "deploy",
+      createdAt: "2026-11-20T05:07:28.700Z", updatedAt: "2026-11-20T05:07:52.700Z",
+      error: { code: "DEPLOYMENT_COMPENSATED", message: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully." } };
+    const release = { id: deploymentId, state: "failed", error: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.",
+      details: { exitCode: 3, workloadName: "pricing", notADetail: "dropped", signal: "not a signal" } } };
+    const get = vi.fn().mockResolvedValueOnce({ ...failed, state: "running" }).mockResolvedValueOnce(failed).mockResolvedValueOnce(release);
+    const error = await followOperation({ client: { get }, started: { operation: { ...failed, state: "queued" } },
+      options: { follow: true, interval: "0.05", timeout: "5" }, sleep: async () => undefined }).catch((caught: unknown) => caught);
+    expect(get).toHaveBeenLastCalledWith(`/v1/apps/${appId}/deployments/${deploymentId}`);
+    expect(structuredCliError(error).error).toMatchObject({
+      code: "OPERATION_FAILED", operationErrorCode: "DEPLOYMENT_COMPENSATED",
+      operationErrorMessage: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully.",
+      deploymentId,
+      deploymentError: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.", details: { exitCode: 3, workloadName: "pricing" } },
+      hint: `OpenCloud kept the release that was live before. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container --workload pricing --from 2026-11-20T05:07:28.700Z --to 2026-11-20T05:07:52.700Z\`.`,
+    });
+    // The app's own container failed: the caller's outcome, not a fault to report.
+    expect(isReportableFailure(error)).toBe(false);
+    // A release OpenCloud itself failed is still reported, and no answer leaves only the operation.
+    const hostDown = vi.fn().mockResolvedValue({ id: deploymentId, error: { code: "COMPUTE_HOST_UNAVAILABLE", message: "No compute host" } });
+    const platform = await followOperation({ client: { get: hostDown }, started: failed, options: { follow: false, interval: "2", timeout: "5" } })
+      .catch((caught: unknown) => caught);
+    expect(isReportableFailure(platform)).toBe(true);
+    expect(structuredCliError(platform).error).toMatchObject({ deploymentError: { code: "COMPUTE_HOST_UNAVAILABLE" } });
+    const unreadable = await followOperation({ client: { get: vi.fn().mockRejectedValue(new TypeError("fetch failed")) }, started: failed,
+      options: { follow: false, interval: "2", timeout: "5" } }).catch((caught: unknown) => caught);
+    expect(structuredCliError(unreadable).error).not.toHaveProperty("deploymentError");
+    expect(hintOf(unreadable)).toBeUndefined();
   });
 
   it("reads bounded secrets from standard input without echo metadata", async () => {

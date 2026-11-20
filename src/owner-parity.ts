@@ -14,10 +14,10 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
-import { computeErrorCatalog, computeErrorCodeSchema, computeErrorSchema } from "@opencloud/contracts/containers";
+import { computeErrorCatalog, computeErrorCodeSchema, computeErrorDetailsSchema, computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
-import { CliContractError, hintOf } from "./cli-contract-error.js";
+import { CliContractError, hintOf, withHint } from "./cli-contract-error.js";
 import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 
 export interface OperationOptions {
@@ -37,6 +37,9 @@ export interface OperationLike {
 export { CliContractError };
 
 export class OperationTerminalError extends CliContractError {
+  /** The release a failed operation names, with the error OpenCloud recorded on it. */
+  deployment: { id: string; error: Record<string, unknown> } | undefined;
+
   constructor(readonly operation: OperationLike) {
     super(
       operation.state === "cancelled"
@@ -46,6 +49,41 @@ export class OperationTerminalError extends CliContractError {
     );
     this.name = "OperationTerminalError";
   }
+}
+
+const OPERATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LOG_TIME = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * A failed operation with the cause OpenCloud recorded on the release it
+ * names. A compensated deploy or rollback only says DEPLOYMENT_COMPENSATED;
+ * the release's own error says why, such as a container that never became
+ * ready or exited with code 3, and the hint names the logs that show it.
+ */
+async function terminalOperationError(client: Pick<OpenCloudClient, "get">, operation: OperationLike): Promise<OperationTerminalError> {
+  const failure = new OperationTerminalError(operation);
+  const { appId, deploymentId } = operation;
+  if (operation.state !== "failed" || typeof appId !== "string" || typeof deploymentId !== "string" ||
+      !OPERATION_UUID.test(appId) || !OPERATION_UUID.test(deploymentId)) return failure;
+  let cause: Record<string, unknown>;
+  try {
+    cause = record(record(await client.get(`/v1/apps/${encodeURIComponent(appId)}/deployments/${encodeURIComponent(deploymentId)}`)).error);
+  } catch {
+    // The operation's own failure is still reported.
+    return failure;
+  }
+  if (!Object.keys(cause).length) return failure;
+  failure.deployment = { id: deploymentId, error: cause };
+  if (typeof cause.code === "string" && cause.code.startsWith("COMPUTE_")) {
+    const workload = record(cause.details).workloadName;
+    const window = typeof operation.createdAt === "string" && LOG_TIME.test(operation.createdAt) &&
+      typeof operation.updatedAt === "string" && LOG_TIME.test(operation.updatedAt)
+      ? ` --from ${operation.createdAt} --to ${operation.updatedAt}`
+      : " --from <start> --to <end>";
+    const name = typeof workload === "string" && /^[a-z][a-z0-9-]{0,62}$/.test(workload) ? ` --workload ${workload}` : "";
+    withHint(failure, `OpenCloud kept the release that was live before. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container${name}${window}\`.`);
+  }
+  return failure;
 }
 
 export class OperationWaitTimeoutError extends CliContractError {
@@ -244,7 +282,7 @@ export async function followOperation(input: {
     );
   }
   if (["failed", "cancelled"].includes(operation.state)) {
-    throw new OperationTerminalError(operation);
+    throw await terminalOperationError(input.client, operation);
   }
   if (operation.state === "succeeded" || !input.options.follow) {
     return input.started;
@@ -278,7 +316,7 @@ export async function followOperation(input: {
     }
   }
   if (operation.state !== "succeeded") {
-    throw new OperationTerminalError(operation);
+    throw await terminalOperationError(input.client, operation);
   }
   return replaceOperation(input.started, operation);
 }
@@ -726,11 +764,36 @@ export function structuredCliError(error: unknown): {
   };
 }
 
+/**
+ * The error OpenCloud recorded on a release, as printed with its failed
+ * operation: code, message and the details the compute contract defines
+ * (such as exitCode, signal or workloadName), each checked against its own
+ * schema, so a partial set is kept and nothing else is printed.
+ */
+function deploymentErrorFields(deployment: { id: string; error: Record<string, unknown> }): Record<string, unknown> {
+  const { error } = deployment;
+  const message = typeof error.message === "string" && error.message ? redactMessage(error.message).slice(0, 500) : null;
+  const given = record(error.details);
+  const details = Object.fromEntries(Object.entries(computeErrorDetailsSchema.shape).flatMap(([name, schema]) => {
+    const parsed = given[name] === undefined ? null : schema.safeParse(given[name]);
+    return parsed?.success ? [[name, parsed.data]] : [];
+  }));
+  return {
+    deploymentId: deployment.id,
+    deploymentError: {
+      code: safeCode(error.code, "DEPLOYMENT_ERROR"),
+      ...(message ? { message } : {}),
+      ...(Object.keys(details).length ? { details } : {}),
+    },
+  };
+}
+
 function structuredFields(error: unknown): Record<string, unknown> {
   if (error instanceof ApiError) {
     return apiErrorFields(error);
   }
   if (error instanceof OperationTerminalError) {
+    const operationError = record(error.operation.error);
     return {
       code: error.code,
       message: redactMessage(error.message),
@@ -739,12 +802,13 @@ function structuredFields(error: unknown): Record<string, unknown> {
       operationState: error.operation.state,
       ...(error.operation.error && typeof error.operation.error === "object"
         ? {
-            operationErrorCode: safeCode(
-              (error.operation.error as Record<string, unknown>).code,
-              "OPERATION_ERROR",
-            ),
+            operationErrorCode: safeCode(operationError.code, "OPERATION_ERROR"),
+            ...(typeof operationError.message === "string" && operationError.message
+              ? { operationErrorMessage: redactMessage(operationError.message).slice(0, 500) }
+              : {}),
           }
         : {}),
+      ...(error.deployment ? deploymentErrorFields(error.deployment) : {}),
     };
   }
   if (error instanceof OperationWaitTimeoutError) {
