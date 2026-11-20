@@ -671,6 +671,20 @@ depending on internal Prometheus, Loki, or Grafana APIs:
 Custom metrics and rules are bounded platform contracts. Alerts inform an
 agent; they do not authorize automatic rollback or destructive repair.
 
+`metrics` reads a metric's production series, one value per step (60 seconds
+by default). A metric the app records itself, from a container's
+`recordMetric` or the browser SDK, is read by the name the Agent Feed shows,
+`custom.<name>`; a name without `custom.` is always one of the platform's own
+series, even when the app declares a metric of that name. `--aggregation rate`
+gives a counter's increments per second, or a gauge's change per second from
+one step to the next:
+
+```bash
+"$OPENCLOUD_CLI" metrics "$APP_ID" --metric custom.backlog_depth --aggregation max
+```
+
+On an installation without containers, OpenCloud refuses `custom.` names.
+
 ## Verification
 
 `app request` sends one request to the live app's canonical address through

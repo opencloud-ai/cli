@@ -6766,15 +6766,19 @@ dev.command("logs")
 
 program
   .command("metrics")
+  .description("Read one metric's production series")
   .argument("<app-id>")
-  .requiredOption("--metric <name>")
+  .requiredOption(
+    "--metric <name>",
+    "a platform series, or custom.<name> for a metric the app records (a container's recordMetric or the browser SDK)",
+  )
   .option(
     "--from <iso>",
     "ISO time",
     new Date(Date.now() - 60 * 60 * 1000).toISOString(),
   )
   .option("--to <iso>", "ISO time", new Date().toISOString())
-  .option("--aggregation <name>", "none, sum, avg, max, min, rate", "none")
+  .option("--aggregation <name>", "none, sum, avg, max, min, or rate (per second: a counter's increments, a gauge's change between steps)", "none")
   .option("--step <seconds>", "query step", "60")
   .action(async (appId, options) =>
     output(

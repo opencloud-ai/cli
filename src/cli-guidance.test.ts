@@ -341,6 +341,17 @@ describe("log surfaces", spawning, () => {
   });
 });
 
+describe("metrics names", spawning, () => {
+  it("says a metric the app records is read as custom.<name>", async () => {
+    const context = await workspace("metrics-names");
+    const help = await run(["metrics", "--help"], context);
+    expect(help.status, help.stderr).toBe(0);
+    const text = help.stdout.replace(/\s+/g, " ");
+    expect(text).toContain("--metric <name> a platform series, or custom.<name> for a metric the app records (a container's recordMetric or the browser SDK)");
+    expect(text).toContain("rate (per second: a counter's increments, a gauge's change between steps)");
+  });
+});
+
 describe("app connect", spawning, () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });

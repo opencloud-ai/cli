@@ -35,6 +35,10 @@
 - Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
   source freshness. Expected app and policy errors keep their structured
   diagnostics without becoming platform error reports.
+- `metrics --metric custom.<name>` reads a metric the app records (a
+  container's `recordMetric` or the browser SDK), as the Agent Feed names it;
+  a name without `custom.` is always a platform series. Its help says so, and
+  that `rate` is a counter's increments or a gauge's change per second.
 - `logs --page` and `app dev logs` keep the structured `fields` a Function
   passed to `log` on its log lines; they used to be dropped while the answer
   was parsed.
