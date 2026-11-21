@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.21.0
+## 3.22.0
 
 - `app request --access-token-env` takes any variable name, `OC_FOO`
   included; it refuses only a name shaped like a token itself (`oc_app_…` at
@@ -240,6 +240,14 @@
   fails with `INVALID_OPTION` before any request, instead of being read as 0,
   2 or 10: `containers scale --replicas ""` used to stop every replica. Other
   numeric options accept what 3.20 accepted, such as `--timeout 1e2`.
+
+## 3.21.0
+
+- Accept SDK 2.8.0 pins. Server SDK 2.8.0 lets an AI text, stream, or object
+  call name its `model`, which runs on the same provider as the app's
+  automatic tasks. Deploying a 2.8.0 pin needs a platform release that
+  installs it. SDK 2.3.0 remains the default for new and unpinned apps, and the
+  command surface is unchanged.
 
 ## 3.20.0
 

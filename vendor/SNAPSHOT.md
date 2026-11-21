@@ -194,3 +194,11 @@ commit's `latestCronOccurrence` helper, which the CLI does not use. Every other
 vendored file stays as in the 3.14.0 snapshot (platform commit
 `f08e2e699c4b5b35df507525454cb93cf356368b`). Browser SDK 2.3.0 remains the
 local default.
+
+## CLI 3.21.0 SDK 2.8.0
+
+`contracts/src/manifest.ts` and `contracts/src/manifest.test.ts` are copied from
+platform commit `4e0556e9ef809565dea52b8871af7a8690d5c127`, which adds SDK 2.8.0 to the
+installed manifest versions. Both files are byte-identical to that commit and
+differ from the 3.19.0 snapshot only in that list. Every other vendored file
+stays as before. Browser SDK 2.3.0 remains the local default.
