@@ -370,6 +370,29 @@ describe("declared PostgreSQL search", () => {
   });
 });
 
+describe("Function log", () => {
+  it("keeps the call's message and level, and the call's fields apart under their own names", async () => {
+    const runtime = installRuntime();
+    const info = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    defineFunction({ input: schema.object({}), handler: ({ log }) => {
+      log.info("log probe", { message: "belt sensor recalibrated", level: "error", event: "signup",
+        app_id: "forged", request_id: "upstream-7", count: 3, password: "pw-synthetic" });
+      log.error("plain failure");
+      return {};
+    } });
+    expect((await runtime.invoke()).status).toBe(200);
+    const [record] = info.mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(record).toMatchObject({ level: "info", event: "opencloud_function_log_v2", message: "log probe",
+      app_id: appId, environment: "dev", dev_session_id: devSessionId });
+    expect(record.fields).toEqual({ message: "belt sensor recalibrated", level: "error", event: "signup",
+      app_id: "forged", request_id: "upstream-7", count: 3, password: "[redacted]" });
+    const [failure] = error.mock.calls.map(([line]) => JSON.parse(String(line)));
+    expect(failure).toMatchObject({ level: "error", message: "plain failure" });
+    expect(failure).not.toHaveProperty("fields");
+  });
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -624,7 +647,7 @@ describe("@opencloud/server v2", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("x-request-id")).toBe("req-test");
-    expect(response.headers.get("x-opencloud-sdk-version")).toBe("2.8.0");
+    expect(response.headers.get("x-opencloud-sdk-version")).toBe("2.9.0");
     await expect(response.json()).resolves.toEqual({
       keys: [
         "agentTasks",
@@ -1004,6 +1027,7 @@ describe("@opencloud/server v2", () => {
         });
         const object = await ai.generateObject({
           prompt: "Name the task",
+          model: "claude-haiku-5-5",
           attachments: [
             {
               type: "image",
@@ -1059,6 +1083,7 @@ describe("@opencloud/server v2", () => {
       "Bearer function_test_ai_grant_12345678901234567890",
     );
     expect(headers.has("x-opencloud-files-grant")).toBe(false);
+    expect(headers.has("x-opencloud-ai-model")).toBe(false);
     const firstBody = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));
     expect(firstBody).toMatchObject({
       model: "gpt-5.6-sol",
@@ -1093,6 +1118,9 @@ describe("@opencloud/server v2", () => {
     expect(secondHeaders.get("x-opencloud-files-grant")).toBe(
       "signed-file-grant",
     );
+    // The chosen model travels apart from the body's runtime default.
+    expect(secondHeaders.get("x-opencloud-ai-model")).toBe("claude-haiku-5-5");
+    expect(secondBody.model).toBe("gpt-5.6-sol");
     expect(secondBody.response_format).toMatchObject({
       type: "json_schema",
       json_schema: {
@@ -1146,6 +1174,23 @@ describe("@opencloud/server v2", () => {
         revisedPrompt: "A concise dodo illustration",
       },
     });
+  });
+
+  it("rejects an invalid model before calling the gateway", async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const runtime = installRuntime();
+    defineFunction({
+      input: schema.object({}),
+      handler: ({ ai }) => ai.generateText({ prompt: "Read this", model: "Claude Haiku" }),
+    });
+
+    const response = await runtime.invoke();
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "INVALID_AI_INPUT", retryable: false },
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported or oversized AI attachments before calling the gateway", async () => {
@@ -2560,11 +2605,11 @@ describe("@opencloud/server v2", () => {
 
     const response = await runtime.invoke();
     expect(response.status).toBe(500);
-    expect(response.headers.get("x-opencloud-sdk-version")).toBe("2.8.0");
+    expect(response.headers.get("x-opencloud-sdk-version")).toBe("2.9.0");
     await expect(response.json()).resolves.toMatchObject({
       error: {
         code: "SDK_VERSION_MISMATCH",
-        details: { expected: "2.8.0", received: "0.2.0" },
+        details: { expected: "2.9.0", received: "0.2.0" },
       },
     });
   });

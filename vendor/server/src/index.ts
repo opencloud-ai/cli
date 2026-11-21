@@ -1,5 +1,5 @@
 /** Exact version of the Function SDK materialized with this deployment. */
-export const OPEN_CLOUD_SDK_VERSION = "2.8.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.9.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 
@@ -756,6 +756,14 @@ export interface OpenCloudGenerateTextInput {
   instructions?: string;
   reasoningEffort?: OpenCloudReasoningEffort;
   attachments?: OpenCloudAiAttachment[];
+  /**
+   * A model switched on for the provider that pays for the app's automatic
+   * tasks (App → AI), such as `claude-haiku-5-5`. It runs on that same
+   * provider; a model it can't run fails with `ai_model_unavailable` and is
+   * never swapped for another. Omit it to use the model for automatic tasks.
+   * Added in SDK 2.8.0.
+   */
+  model?: string;
 }
 
 export interface OpenCloudGenerateObjectInput<Output>
@@ -2870,6 +2878,8 @@ function aiClient(
     if (normalized.attachments?.some((attachment) => attachment.type === "file")) {
       headers.set("x-opencloud-files-grant", bindings.filesGrant);
     }
+    // `model` in the body stays the runtime default older platforms expect.
+    if (normalized.model) headers.set("x-opencloud-ai-model", normalized.model);
     const response = await safeFetch(
       new URL("chat/completions", `${bindings.aiBaseUrl.replace(/\/+$/, "")}/`),
       {
@@ -4519,9 +4529,13 @@ function logger(bindings: RuntimeBindings, requestId: string): OpenCloudLogger {
     message: string,
     fields: Record<string, unknown> = {},
   ) => {
+    // The call's fields stay apart, under `fields`, so a field named like one
+    // of the line's own keys (`message`, `level`, ...) never replaces it. The
+    // runtime recognises this shape by its event and keeps each field's name.
+    const own = sanitizeLogFields(fields);
     const record = {
       level,
-      event: "opencloud_function_log",
+      event: "opencloud_function_log_v2",
       message: message.slice(0, 1_000),
       app_id: bindings.appId,
       environment: bindings.environment,
@@ -4529,7 +4543,7 @@ function logger(bindings: RuntimeBindings, requestId: string): OpenCloudLogger {
       ...(bindings.devSessionId
         ? { dev_session_id: bindings.devSessionId }
         : {}),
-      ...sanitizeLogFields(fields),
+      ...(Object.keys(own).length ? { fields: own } : {}),
     };
     const encoded = JSON.stringify(record);
     if (level === "error") console.error(encoded);
@@ -4781,7 +4795,8 @@ function normalizeGenerateInput(
       !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(
         input.reasoningEffort,
       )) ||
-    (input.attachments !== undefined && !Array.isArray(input.attachments))
+    (input.attachments !== undefined && !Array.isArray(input.attachments)) ||
+    (input.model !== undefined && !isAiModelId(input.model))
   ) {
     throw new OpenCloudError("AI generation input is invalid", {
       code: "INVALID_AI_INPUT",
@@ -4854,6 +4869,17 @@ function normalizeGenerateInput(
     });
   }
   return input;
+}
+
+/** A provider-native (`claude-haiku-5-5`) or `provider/model` id. */
+function isAiModelId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 220 &&
+    /^[a-z0-9][a-z0-9._:/-]*$/.test(value) &&
+    !value.endsWith("/") &&
+    !value.includes("//")
+  );
 }
 
 function encodeBase64(bytes: Uint8Array): string {

@@ -502,6 +502,51 @@ runtime:
       /cannot (?:use|access)/,
     );
   });
+
+  it("accepts regular expressions whose text names a network API", async () => {
+    const source = `import { test, expect } from "@opencloud/test";
+
+const ticks = /WebSocket tick \\d+/;
+test("shows live ticks", async ({ ownerPage }) => {
+  await expect(ownerPage.getByText(/WebSocket tick \\d+/)).toBeVisible();
+  await expect(ownerPage.getByRole("status").filter({ hasText: /it's an EventSource [/] XMLHttpRequest/i })).toBeVisible();
+  const ready = true;
+  if (ready) /WebSocket/.test("WebSocket");
+  const rows = [/EventSource/, ticks].length / 2;
+  expect(rows).toBe(1);
+});
+`;
+    const directory = await e2eFixture(source);
+
+    await expect(buildBundle(directory)).resolves.toMatchObject({
+      e2eTest: { source },
+    });
+  });
+
+  it.each([
+    ["a new WebSocket", 'const socket = new WebSocket("wss://example.test");', "WebSocket"],
+    ["a new EventSource", 'const events = new EventSource("/events");', "EventSource"],
+    ["an alias", "const Socket = WebSocket;", "WebSocket"],
+    ["use inside a template", 'const label = `${new EventSource("/events")}`;', "EventSource"],
+    ["use after a regular expression", 'const live = /tick/.test("tick") && new WebSocket("wss://example.test");', "WebSocket"],
+    ["use between divisions", 'const half = 4 / 2; new XMLHttpRequest(); const third = 9 / 3;', "XMLHttpRequest"],
+    ["use after a U+2028 line-comment terminator", '// ok\u2028new WebSocket("wss://evil");', "WebSocket"],
+    ["use after a U+2029 line-comment terminator", '// ok\u2029new WebSocket("wss://evil");', "WebSocket"],
+    ["use after a CR line-comment terminator", '// ok\rnew WebSocket("wss://evil");', "WebSocket"],
+    ["use after an if-header regex containing a quote", `if (1) /'/; new WebSocket("wss://evil");`, "WebSocket"],
+    ["use after a block-closing brace regex containing a quote", `{ const ok = 1; } /'/; new WebSocket("wss://evil");`, "WebSocket"],
+    ["use after an await regex containing a quote", `await /'/; new WebSocket("wss://evil");`, "WebSocket"],
+    ["use inside a template after an if-header regex containing a closing brace", 'const s = `${(() => { if (1) /}/ })() || new WebSocket("wss://evil")}`;', "WebSocket"],
+    ["use between an object-literal division and another division", 'const a = { n: 1 } / 2; new WebSocket("wss://evil"); const b = 4 / 2;', "WebSocket"],
+  ])("refuses %s, naming the network API", async (_label, statement, name) => {
+    const directory = await e2eFixture(
+      `import { test, expect } from "@opencloud/test";\ntest("flow", async ({ ownerPage }) => { ${statement} expect(ownerPage); });\n`,
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      `OpenCloud E2E test cannot use ${name}, a direct network API`,
+    );
+  });
 });
 
 async function functionFixture(

@@ -225,9 +225,14 @@ export const reorderOrganisationAiAccountsRequestSchema = z.object({
   connectionIds: z.array(uuid).min(1).max(50),
 }).strict();
 
+/** `provider/model`, e.g. `anthropic/claude-haiku-5-5`. */
+const usageModel = z.string().min(3).max(220).regex(/^(openai|anthropic|openrouter)\/[a-z0-9][a-z0-9._:/-]*$/);
+
 export const aiUsageRowSchema = z.object({
   kind: aiWorkKindSchema,
   source: aiUsageSourceSchema,
+  /** The model the work ran on; null for work recorded before models were. */
+  model: usageModel.nullable().optional(),
   /** Rated for {productName} AI; estimated at catalogue prices for accounts. */
   costNanodollars: nanodollars,
   tokens: count,
@@ -237,7 +242,7 @@ export const aiUsageRowSchema = z.object({
 export const aiUsageWeekSchema = z.object({
   startsAt: timestamp,
   endsAt: timestamp,
-  rows: z.array(aiUsageRowSchema).max(9),
+  rows: z.array(aiUsageRowSchema).max(200),
 }).strict();
 
 /** A calendar date in the payer's time zone, e.g. 2026-10-17. */
@@ -285,6 +290,8 @@ export const organisationAiUsageSchema = z.object({
     tokens: count,
     operations: z.number().int().nonnegative(),
     bySource: z.object({ accounts: nanodollars, organisation: nanodollars, included: nanodollars }).strict(),
+    /** Models the app's work ran on this week, most expensive first. */
+    models: z.array(usageModel).max(20).optional(),
   }).strict()).max(500),
   /** Work in private chats that haven't become apps, aggregated without identities. */
   privateChats: z.object({ costNanodollars: nanodollars, operations: z.number().int().nonnegative() }).strict(),

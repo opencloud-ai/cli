@@ -412,9 +412,10 @@ function validateE2eTestSource(source: string): void {
     );
   }
 
+  // `$1` in a label names what matched.
   const forbiddenPatterns: Array<[RegExp, string]> = [
     [/\bfetch\s*\(/, "fetch"],
-    [/\b(?:XMLHttpRequest|WebSocket|EventSource)\b/, "direct network APIs"],
+    [/\b(XMLHttpRequest|WebSocket|EventSource)\b/, "$1, a direct network API"],
     [/\bnavigator\s*[.]\s*sendBeacon\s*\(/, "sendBeacon"],
     [
       /[.]\s*(?:evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/,
@@ -431,9 +432,10 @@ function validateE2eTestSource(source: string): void {
     ],
   ];
   for (const [pattern, label] of forbiddenPatterns) {
-    if (pattern.test(code)) {
+    const match = pattern.exec(code);
+    if (match) {
       throw new Error(
-        `OpenCloud E2E test cannot use ${label}; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+        `OpenCloud E2E test cannot use ${label.replace("$1", match[1] ?? "")}; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
       );
     }
   }
@@ -444,6 +446,57 @@ function validateE2eTestSource(source: string): void {
   }
 }
 
+type LexerScope =
+  | { kind: "paren"; regexAfter: boolean; isForHeader: boolean; ternaryDepth: number }
+  | { kind: "bracket"; ternaryDepth: number }
+  | { kind: "brace"; regexAfter: boolean; ternaryDepth: number }
+  | { kind: "template"; ternaryDepth: number };
+
+// Keywords after which a `/` starts a regular expression literal rather than division.
+// E2E tests are ES modules (strict mode), so `await` and `yield` are reserved here.
+const REGULAR_EXPRESSION_KEYWORDS = new Set([
+  "await",
+  "case",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "extends",
+  "in",
+  "instanceof",
+  "new",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// Keywords after which `{` opens an object literal rather than a statement block.
+const EXPRESSION_BRACE_KEYWORDS = new Set([
+  "await",
+  "default",
+  "delete",
+  "extends",
+  "in",
+  "instanceof",
+  "new",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// Statement-header keywords whose closing `)` can be followed directly by a
+// statement (and therefore a regular expression literal).
+const STATEMENT_HEADER_KEYWORDS = new Set(["if", "while", "for", "with"]);
+
+/**
+ * The source with the text of comments and of string, template and regular
+ * expression literals blanked, position for position, so checks read only
+ * code. A template's `${...}` stays code.
+ */
 function maskJavaScriptCommentsAndLiterals(source: string): string {
   let output = "";
   let index = 0;
@@ -454,10 +507,46 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
     | "single-quote"
     | "double-quote"
     | "template" = "code";
+  const scopes: LexerScope[] = [];
+  let topTernaryDepth = 0;
+  let regexAllowed = true;
+  let expectObjectBrace = false;
+  let afterMemberAccess = false;
+  let prevWord: string | null = null;
+  let prevPrevWord: string | null = null;
+  // Scope depth at which an expression-position `function`/`class` awaits its `{` body.
+  let pendingExprBodyAt = -1;
+
+  const incrementTernary = (): void => {
+    const top = scopes.at(-1);
+    if (top) top.ternaryDepth += 1;
+    else topTernaryDepth += 1;
+  };
+  const consumeTernary = (): boolean => {
+    const top = scopes.at(-1);
+    if (top) {
+      if (top.ternaryDepth > 0) {
+        top.ternaryDepth -= 1;
+        return true;
+      }
+      return false;
+    }
+    if (topTernaryDepth > 0) {
+      topTernaryDepth -= 1;
+      return true;
+    }
+    return false;
+  };
+
   while (index < source.length) {
     const character = source[index] ?? "";
     const next = source[index + 1] ?? "";
     if (state === "code") {
+      if (/\s/.test(character)) {
+        output += character;
+        index += 1;
+        continue;
+      }
       if (character === "/" && next === "/") {
         output += "  ";
         index += 2;
@@ -470,15 +559,292 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
         state = "block-comment";
         continue;
       }
-      if (character === "'") state = "single-quote";
-      else if (character === '"') state = "double-quote";
-      else if (character === "`") state = "template";
-      output += state === "code" ? character : " ";
+      if (character === "/") {
+        if (regexAllowed) {
+          const end = regularExpressionLiteralEnd(source, index);
+          if (end > index) {
+            output += " ".repeat(end - index);
+            index = end;
+            regexAllowed = false;
+            expectObjectBrace = false;
+            afterMemberAccess = false;
+            prevWord = null;
+            prevPrevWord = null;
+            continue;
+          }
+        }
+        if (next === "=") {
+          output += "/=";
+          index += 2;
+        } else {
+          output += "/";
+          index += 1;
+        }
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "'" || character === '"' || character === "`") {
+        state =
+          character === "'"
+            ? "single-quote"
+            : character === '"'
+              ? "double-quote"
+              : "template";
+        output += " ";
+        index += 1;
+        continue;
+      }
+      if (character === "}") {
+        const top = scopes.at(-1);
+        if (top?.kind === "template") {
+          scopes.pop();
+          if (pendingExprBodyAt > scopes.length) pendingExprBodyAt = -1;
+          output += " ";
+          index += 1;
+          state = "template";
+          continue;
+        }
+        const popped = top?.kind === "brace" ? scopes.pop() : undefined;
+        if (pendingExprBodyAt > scopes.length) pendingExprBodyAt = -1;
+        output += "}";
+        index += 1;
+        regexAllowed = popped?.kind === "brace" ? popped.regexAfter : true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "{") {
+        const isObject =
+          expectObjectBrace || pendingExprBodyAt === scopes.length;
+        if (pendingExprBodyAt === scopes.length) pendingExprBodyAt = -1;
+        scopes.push({ kind: "brace", regexAfter: !isObject, ternaryDepth: 0 });
+        output += "{";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "(") {
+        const isForHeader =
+          prevWord === "for" || (prevWord === "await" && prevPrevWord === "for");
+        const isStatementHeader =
+          isForHeader ||
+          (prevWord !== null && STATEMENT_HEADER_KEYWORDS.has(prevWord));
+        scopes.push({
+          kind: "paren",
+          regexAfter: isStatementHeader,
+          isForHeader,
+          ternaryDepth: 0,
+        });
+        output += "(";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ")") {
+        const popped = scopes.at(-1)?.kind === "paren" ? scopes.pop() : undefined;
+        output += ")";
+        index += 1;
+        regexAllowed = popped?.kind === "paren" ? popped.regexAfter : false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "[") {
+        scopes.push({ kind: "bracket", ternaryDepth: 0 });
+        output += "[";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "]") {
+        if (scopes.at(-1)?.kind === "bracket") scopes.pop();
+        output += "]";
+        index += 1;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "=" && next === ">") {
+        output += "=>";
+        index += 2;
+        regexAllowed = true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if ((character === "+" || character === "-") && next === character) {
+        output += character + next;
+        index += 2;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "?" && next === ".") {
+        output += "?.";
+        index += 2;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = true;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "?" && next === "?") {
+        output += "??";
+        index += 2;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "?") {
+        output += "?";
+        index += 1;
+        incrementTernary();
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ":") {
+        output += ":";
+        index += 1;
+        const inTernary = consumeTernary();
+        const top = scopes.at(-1);
+        const inObject = top?.kind === "brace" && !top.regexAfter;
+        regexAllowed = true;
+        expectObjectBrace = inTernary || inObject;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "." && next === "." && source[index + 2] === ".") {
+        output += "...";
+        index += 3;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "." || character === "#") {
+        output += character;
+        index += 1;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = true;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ";") {
+        if (pendingExprBodyAt === scopes.length) pendingExprBodyAt = -1;
+        output += ";";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (/[0-9]/.test(character)) {
+        let end = index + 1;
+        while (end < source.length && /[0-9A-Za-z_]/.test(source[end] ?? "")) {
+          end += 1;
+        }
+        output += source.slice(index, end);
+        index = end;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (/[A-Za-z_$\\]|[^\x00-\x7f]/.test(character)) {
+        let end = index + 1;
+        while (
+          end < source.length &&
+          /[A-Za-z0-9_$\\]|[^\x00-\x7f]/.test(source[end] ?? "")
+        ) {
+          end += 1;
+        }
+        const word = source.slice(index, end);
+        output += word;
+        index = end;
+        const asciiWord = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(word);
+        const keyword = !afterMemberAccess && asciiWord;
+        const top = scopes.at(-1);
+        const isForOf =
+          keyword && word === "of" && top?.kind === "paren" && top.isForHeader;
+        if (
+          keyword &&
+          (word === "function" || word === "class") &&
+          expectObjectBrace &&
+          prevWord !== "default"
+        ) {
+          pendingExprBodyAt = scopes.length;
+        }
+        regexAllowed =
+          keyword && (REGULAR_EXPRESSION_KEYWORDS.has(word) || isForOf);
+        if (keyword && word === "async") {
+          // Preserve expression position across `async function() {}`.
+        } else {
+          expectObjectBrace =
+            keyword && (EXPRESSION_BRACE_KEYWORDS.has(word) || isForOf);
+        }
+        prevPrevWord = keyword ? prevWord : null;
+        prevWord = keyword ? word : null;
+        afterMemberAccess = false;
+        continue;
+      }
+      output += character;
       index += 1;
+      const isOperator = ",=!&|+-*%<>~^".includes(character);
+      regexAllowed = isOperator;
+      expectObjectBrace = isOperator;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
       continue;
     }
     if (state === "line-comment") {
-      if (character === "\n") {
+      if (isLineTerminator(character)) {
         output += "\n";
         state = "code";
       } else output += " ";
@@ -504,11 +870,70 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
       index += 2;
       continue;
     }
+    if (state === "template" && character === "$" && next === "{") {
+      // `{` opens an expression, so a `/` straight after it starts a regular expression.
+      output += " {";
+      index += 2;
+      scopes.push({ kind: "template", ternaryDepth: 0 });
+      state = "code";
+      regexAllowed = true;
+      expectObjectBrace = true;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
+      continue;
+    }
     output += character === "\n" ? "\n" : " ";
     index += 1;
-    if (character === terminator) state = "code";
+    if (character === terminator) {
+      state = "code";
+      regexAllowed = false;
+      expectObjectBrace = false;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
+    }
   }
   return output;
+}
+
+// A longer literal stays code, which keeps the scan linear in the source.
+const MAX_REGULAR_EXPRESSION_LITERAL = 1_024;
+
+/** JavaScript's line terminators, which a regular expression literal can't contain. */
+function isLineTerminator(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029;
+}
+
+/**
+ * The index just after a one-line regular expression literal (including any
+ * trailing flag letters) at `start`, or `start` if none closes within the line
+ * and the length limit.
+ */
+function regularExpressionLiteralEnd(source: string, start: number): number {
+  let inClass = false;
+  const limit = Math.min(source.length, start + MAX_REGULAR_EXPRESSION_LITERAL);
+  for (let index = start + 1; index < limit; index += 1) {
+    const character = source[index] ?? "";
+    if (isLineTerminator(character)) return start;
+    if (character === "\\") {
+      index += 1;
+      if (index >= source.length || isLineTerminator(source[index] ?? "")) return start;
+      continue;
+    }
+    if (inClass) {
+      if (character === "]") inClass = false;
+    } else if (character === "[") inClass = true;
+    else if (character === "/") {
+      let end = index + 1;
+      while (end < source.length && /[A-Za-z]/.test(source[end] ?? "")) {
+        end += 1;
+      }
+      return end;
+    }
+  }
+  return start;
 }
 
 async function inspectFunctionEntrypoints(

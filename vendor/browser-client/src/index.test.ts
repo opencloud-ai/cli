@@ -34,7 +34,7 @@ const runtimeConfig = {
   environment: "production",
   sdk: {
     package: "@opencloud/js",
-    version: "2.8.0",
+    version: "2.9.0",
     module: "/_opencloud/sdk.js",
     types: "/_opencloud/sdk.d.ts",
     docs: "https://docs.opencloud.ai/sdk/javascript/",
@@ -218,7 +218,7 @@ describe("@opencloud/js v2", () => {
       OPENCLOUD_APP_ID: appId,
       OPENCLOUD_ENVIRONMENT: "production",
       OPENCLOUD_SCHEMA: "app_test",
-      OPENCLOUD_SDK_VERSION: "2.8.0",
+      OPENCLOUD_SDK_VERSION: "2.9.0",
       OPENCLOUD_DEPLOYMENT_VERSION: "release-7",
       SUPABASE_URL: "https://platform.test",
       SUPABASE_ANON_KEY: "synthetic-anon",
@@ -282,7 +282,7 @@ describe("@opencloud/js v2", () => {
   });
 
   it("exports one stable singleton contract without legacy factories or raw namespaces", () => {
-    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.8.0");
+    expect(OPEN_CLOUD_SDK_VERSION).toBe("2.9.0");
     expect("OPEN_CLOUD_JS_VERSION" in sdk).toBe(false);
     expect(opencloud).toMatchObject({
       app: { info: expect.any(Function) },

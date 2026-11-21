@@ -151,6 +151,26 @@ describe("compute protocol authority and compatibility", () => {
     );
     expect(() => computeLaunchIdentityPayload({ ...launch, unexpected: true })).toThrow();
   });
+  // Review round 4, nit 2: the identity was a plain SHA-256 over the resolved
+  // secret values, stored by Control and in the worker journal (which the
+  // compute export includes), so a weak secret could be guessed offline.
+  it("names a launch's secrets by their versions in its identity, never by their values", () => {
+    const digest = (raw: unknown) => createHash("sha256").update(computeLaunchIdentityPayload(raw)).digest("hex");
+    const secret = (value: string, version = "v-1") => ({
+      ...launch,
+      env: { MODE: "fast", API_TOKEN: value },
+      secretVersions: { API_TOKEN: version },
+    });
+    expect(computeLaunchIdentityPayload(secret("synthetic-weak-secret"))).not.toContain("synthetic-weak-secret");
+    expect(digest(secret("synthetic-weak-secret"))).toBe(digest(secret("another-value")));
+    // A rotated secret is a new version, so a new identity; plain settings still count.
+    expect(digest(secret("synthetic-weak-secret", "v-2"))).not.toBe(digest(secret("synthetic-weak-secret")));
+    expect(digest({ ...secret("synthetic-weak-secret"), env: { MODE: "slow", API_TOKEN: "x" } })).not.toBe(
+      digest(secret("synthetic-weak-secret")),
+    );
+    // A version must name an entry the launch carries.
+    expect(() => computeLaunchIdentityPayload({ ...launch, secretVersions: { MISSING: "v-1" } })).toThrow();
+  });
   it("allows only bounded secret-free retirement metadata and unique signed grants", () => {
     const request = {
       protocolVersion: 1,
@@ -856,6 +876,8 @@ describe("compute protocol authority and compatibility", () => {
         .success,
     ).toBe(false);
     expect(CONTAINER_RUNTIME_ENV.capabilityFile).toBe("OPENCLOUD_CONTAINER_CAPABILITY_FILE");
+    expect(CONTAINER_RUNTIME_ENV.executionId).toBe("OPENCLOUD_EXECUTION_ID");
+    expect(CONTAINER_RUNTIME_ENV.executionAttempt).toBe("OPENCLOUD_EXECUTION_ATTEMPT");
   });
   it("signs only leases, network allowances and route grants, each under its own purpose", () => {
     const payload = { protocolVersion: 1, routeGeneration: 1, signature: "x".repeat(64) };

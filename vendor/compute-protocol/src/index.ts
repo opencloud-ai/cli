@@ -220,6 +220,16 @@ export const computeLaunchRequestSchema = z
     args: computeCommandSchema.optional(),
     /** Resolved values travel only over the authenticated worker channel. Never log them. */
     env: computeEnvironmentValuesSchema.default({}),
+    /**
+     * The `env` entries that carry resolved secrets, each with its immutable
+     * secret version (a development session's generated value names its
+     * secret instead). The launch identity names these versions in place of
+     * the values, so no stored digest can be used to guess a secret.
+     */
+    secretVersions: z
+      .record(computeEnvironmentNameSchema, z.string().min(1).max(200))
+      .refine((value) => Object.keys(value).length <= 64, "At most 64 secret entries")
+      .optional(),
     egress: z.enum(["internet-http", "none"]),
     startupTimeoutSeconds: z.number().int().min(1).max(300),
     lease: computeLeaseSchema,
@@ -280,6 +290,8 @@ export const computeLaunchRequestSchema = z
       context.addIssue({ code: "custom", message: "Steady instances cannot carry job execution deadlines" });
     if ((request.kind === "service") !== (request.service !== undefined))
       context.addIssue({ code: "custom", path: ["service"], message: "Only services require an HTTP policy" });
+    if (Object.keys(request.secretVersions ?? {}).some((name) => !(name in request.env)))
+      context.addIssue({ code: "custom", path: ["secretVersions"], message: "A secret version names a missing entry" });
     if (
       new TextEncoder().encode(JSON.stringify({ command: request.command, args: request.args, env: request.env }))
         .length > 65_536
@@ -289,10 +301,21 @@ export const computeLaunchRequestSchema = z
 export type ComputeLaunchRequest = z.infer<typeof computeLaunchRequestSchema>;
 
 /** Exact legacy launch-identity bytes, not signature canonicalization. Owners SHA256
- * this private payload before transport; never persist or log its resolved secrets. */
+ * this payload; Control stores the digest and the worker journals it. A secret
+ * appears in it only as its version (`secretVersions`), never its value; a
+ * launch without secrets keeps its legacy bytes. */
 export function computeLaunchIdentityPayload(raw: unknown): string {
-  const { lease, networkAllowance, capabilityToken, inputs, ...configuration } = computeLaunchRequestSchema.parse(raw);
-  return JSON.stringify({ ...configuration, inputs });
+  const { lease, networkAllowance, capabilityToken, inputs, secretVersions, ...configuration } =
+    computeLaunchRequestSchema.parse(raw);
+  const secrets = Object.keys(secretVersions ?? {}).sort();
+  if (!secrets.length) return JSON.stringify({ ...configuration, inputs });
+  const env = Object.fromEntries(Object.entries(configuration.env).filter(([name]) => !secrets.includes(name)));
+  return JSON.stringify({
+    ...configuration,
+    env,
+    secretVersions: Object.fromEntries(secrets.map((name) => [name, secretVersions![name]!])),
+    inputs,
+  });
 }
 
 export const computeInstanceStateSchema = z.enum([
@@ -1471,6 +1494,8 @@ export const CONTAINER_RUNTIME_ENV = Object.freeze({
   capabilityToken: "OPENCLOUD_CONTAINER_CAPABILITY",
   capabilityFile: "OPENCLOUD_CONTAINER_CAPABILITY_FILE",
   instanceId: "OPENCLOUD_CONTAINER_INSTANCE_ID",
+  executionId: "OPENCLOUD_EXECUTION_ID",
+  executionAttempt: "OPENCLOUD_EXECUTION_ATTEMPT",
 });
 
 export type ComputeSignaturePurpose =
