@@ -201,13 +201,38 @@ describe("CLI authoritative validation", () => {
     await expect(pending).resolves.toEqual(result);
     expect(call).toHaveBeenCalledTimes(2);
     expect(states(request)).toEqual(["dispatched", "refused", "dispatched", "result"]);
-    // Busy to the end: nothing started, and the next run sends it again.
+    // Busy to the end: nothing started, so it settles as refused and the next run starts fresh.
     const stuck = input(plain), always = vi.fn().mockRejectedValue(admissionBusy);
     const ended = validateDraftWithProgress({ call: always } as unknown as OpenCloudClient, stuck).catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(90_000);
     expect(await ended).toBe(admissionBusy);
     expect(hintOf(admissionBusy)).toMatch(/^OpenCloud was too busy to start validating draft/);
-    expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+    expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("refused");
+  });
+
+  it("settles as refused when Ctrl-C interrupts APP_LOCK_BUSY backoff sleep", async () => {
+    vi.useFakeTimers();
+    const request = input(plain);
+    const call = vi.fn().mockRejectedValueOnce(admissionBusy);
+    const pending = validateDraftWithProgress({ call } as unknown as OpenCloudClient, request).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(call).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    process.emit("SIGINT", "SIGINT");
+    const interrupted = await pending;
+    expect(interrupted).toMatchObject({ code: "VALIDATION_INTERRUPTED", retryable: true, pending: settledPending });
+    expect(request.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("refused");
+  });
+
+  it.each([true, false])("exits as interrupted instead of returning when Ctrl-C arrives right as validation resolves (pinned: %s)", async (pinned) => {
+    const request = input(plain, pinned);
+    const call = vi.fn(async () => {
+      process.emit("SIGINT", "SIGINT");
+      return result;
+    });
+    const interrupted = await validateDraftWithProgress({ call } as unknown as OpenCloudClient, request).catch((error: unknown) => error);
+    expect(interrupted).toMatchObject({ code: "VALIDATION_INTERRUPTED", retryable: true, pending: settledPending });
+    expect(request.journal.checkpoint?.validation).toMatchObject({ state: "result", validationId: result.id });
+    expect(request.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("refused");
   });
 
   it.each([true, false])("settles the entry on Ctrl-C and exits as interrupted (pinned: %s)", async (pinned) => {

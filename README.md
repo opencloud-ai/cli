@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.21.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.22.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.21.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.21.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.22.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.22.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -611,10 +611,10 @@ provide no cancel or redrive action.
 Container compute requires an installation with compute enabled and a configured
 payer. Declare jobs, services, and workers in `opencloud.yaml`; commands cannot
 override their image, resources, or permissions. A manifest that declares
-containers and pins no SDK gets SDK 2.8.0, whose Functions can call the
+containers and pins no SDK gets SDK 2.9.0, whose Functions can call the
 containers; other unpinned manifests keep 2.3.0, which every supported
 OpenCloud installs. Explicit SDK pins remain unchanged; a manifest with
-containers and a pin older than 2.8.0 gets a `CONTAINERS_NEED_SDK_2_8` warning
+containers and a pin older than 2.9.0 gets a `CONTAINERS_NEED_SDK_2_9` warning
 from `validate` and before uploading, which names the fix. Where the
 installation's public `/v1/installation` says it doesn't run containers,
 `deploy` and `app dev start` or `sync` fail with `COMPUTE_NOT_OFFERED` before

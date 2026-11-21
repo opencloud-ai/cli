@@ -149,7 +149,7 @@ try {
   const containerManifest = JSON.parse(await readFile(path.join(extracted, "opencloud.json"), "utf8"));
   assert.deepEqual(containerManifest.frontend, { container: "web" });
   assert.equal(containerManifest.containers[0].kind, "service");
-  assert.equal(containerManifest.runtime.sdk.version, "2.8.0");
+  assert.equal(containerManifest.runtime.sdk.version, "2.9.0");
 
   process.stdout.write(
     `Packed OpenCloud CLI ${packageVersion} installs, exposes compute commands, emits structured failures, initializes schema 3 and bundles a container frontend.\n`,

@@ -410,6 +410,8 @@ export interface AgentFeedSignal {
     | "function"
     | "mixed"
     | "none";
+  /** A custom metric's newest sample in its window, or null with none. */
+  lastSampleAt?: string | null;
 }
 
 export interface AgentFeedAlert {

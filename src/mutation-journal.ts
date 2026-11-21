@@ -40,7 +40,10 @@ const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,200}$/;
  */
 const CREDENTIAL_SHAPES: ReadonlyArray<readonly [kind: string, shape: RegExp]> = [
   ["an OpenCloud app-owner credential (oc_owner_…)", /oc_owner_[A-Za-z0-9_-]{8,}/],
-  ["an OpenCloud access token (oc_app_… or oc_agent_…)", /(?<![A-Za-z0-9])oc_(?:app|agent)_[A-Za-z0-9_-]{16,}/],
+  [
+    "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_platform_cli_…, or oc_run_…)",
+    /(?<![A-Za-z0-9])oc_(?:app|agent|oauth|provisional|platform_cli|run)_[A-Za-z0-9_-]{16,}/,
+  ],
   ["an API secret key (sk-…)", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}/],
   ["a Stripe secret key", /(?<![A-Za-z0-9])[rs]k_(?:live|test)_[A-Za-z0-9]{24,}/],
   ["a GitHub token", /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{70,})/],
@@ -1859,6 +1862,7 @@ export class MutationJournal {
       await this.assertIdentityWitness();
       if (requireExternalIdentity) await this.assertRootIdentity();
       await cleanupOrphanBindingTemps(this.anchoredDirectory);
+      await cleanupOrphanAtomicTemps(this.anchoredDirectory, DIGEST_KEY_FILE);
       const bindingFile = path.join(this.anchoredDirectory, "binding.json");
       const raw = await readOptional(bindingFile);
       if (raw === null) {
@@ -1912,41 +1916,97 @@ export class MutationJournal {
     return createHmac("sha256", await this.digestKey).update(canonicalJson(value)).digest("hex");
   }
 
+  private async withDigestKeyLock<T>(work: () => Promise<T>): Promise<T> {
+    const lockTarget = path.join(this.anchoredDirectory, ".binding-lock");
+    await ensureLockTarget(lockTarget);
+    const release = await lockfile.lock(lockTarget, {
+      realpath: false,
+      stale: LOCK_STALE_MS,
+      update: LOCK_UPDATE_MS,
+      retries: {
+        retries: 100,
+        factor: 1.2,
+        minTimeout: 20,
+        maxTimeout: 500,
+      },
+    });
+    try {
+      return await work();
+    } finally {
+      await release();
+    }
+  }
+
   private async loadDigestKey(): Promise<Buffer> {
     const file = path.join(this.anchoredDirectory, DIGEST_KEY_FILE);
+    const parse = (raw: string): Buffer => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      const record = parsed as Record<string, unknown>;
+      const keys = Object.keys(record).sort();
+      if (
+        keys.length !== 2 ||
+        keys[0] !== "key" ||
+        keys[1] !== "schemaVersion" ||
+        record.schemaVersion !== 1 ||
+        typeof record.key !== "string" ||
+        !/^[0-9a-f]{64}$/.test(record.key)
+      ) {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      return Buffer.from(record.key, "hex");
+    };
     const read = async (): Promise<Buffer | null> => {
       const raw = await readOptional(file);
       if (raw === null) return null;
-      const key = (JSON.parse(raw) as { key?: unknown }).key;
-      if (typeof key !== "string" || !/^[0-9a-f]{64}$/.test(key)) {
-        throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key is invalid");
-      }
-      return Buffer.from(key, "hex");
+      return parse(raw);
     };
-    const existing = await read();
-    if (existing) return existing;
-    // Written in full, then linked into place: it never exists half written,
-    // and when two commands make one at once, both use the first.
-    const temporary = path.join(this.anchoredDirectory, `.${DIGEST_KEY_FILE}.${process.pid}.${randomUUID()}.tmp`);
-    try {
-      const handle = await open(temporary, "wx", 0o600);
+    await this.assertAnchoredPersistence();
+    const resolved = await this.withDigestKeyLock(async () => {
+      await cleanupOrphanAtomicTemps(this.anchoredDirectory, DIGEST_KEY_FILE);
+      const existing = await read();
+      if (existing) return existing;
+      // Written in full, then linked into place: it never exists half written,
+      // and when two commands make one at once, both use the first.
+      const temporary = path.join(this.anchoredDirectory, `.${DIGEST_KEY_FILE}.${process.pid}.${randomUUID()}.tmp`);
       try {
-        await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, key: randomBytes(32).toString("hex") })}\n`, "utf8");
-        if (process.platform !== "win32") await handle.chmod(0o600);
-        await handle.sync();
+        const handle = await open(temporary, "wx", 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, key: randomBytes(32).toString("hex") })}\n`, "utf8");
+          if (process.platform !== "win32") await handle.chmod(0o600);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await link(temporary, file).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        });
+        await syncDirectory(this.anchoredDirectory);
       } finally {
-        await handle.close();
+        await rm(temporary, { force: true }).catch(() => undefined);
       }
-      await link(temporary, file).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      });
-      await syncDirectory(this.anchoredDirectory);
-    } finally {
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
-    const created = await read();
-    if (!created) throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key could not be kept");
-    return created;
+      const created = await read();
+      if (!created) throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key could not be kept");
+      return created;
+    });
+    await this.assertAnchoredPersistence();
+    return resolved;
   }
 
   async run<T>(

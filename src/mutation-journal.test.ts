@@ -749,6 +749,40 @@ describe("mutation journal", () => {
     expect(JSON.parse(await readFile(keyFile, "utf8")).key).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("rejects corrupt digest-key.json with CORRUPT_MUTATION_JOURNAL and cleans orphan digest-key temps", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const first = await MutationJournal.open(binding);
+    await first.keyedDigest({ hello: "world" });
+
+    // Orphan temp file left behind by a crashed writer is cleaned on open and load.
+    const orphanOnOpen = path.join(directory, `.digest-key.json.99999.11111111-1111-4111-8111-111111111111.tmp`);
+    await writeFile(orphanOnOpen, "partial", { mode: 0o600 });
+    const reopened = await MutationJournal.open(binding);
+    expect(await readdir(directory)).not.toContain(path.basename(orphanOnOpen));
+
+    const orphanOnLoad = path.join(directory, `.digest-key.json.99998.22222222-2222-4222-8222-222222222222.tmp`);
+    await writeFile(orphanOnLoad, "partial", { mode: 0o600 });
+    await reopened.keyedDigest({ hello: "world" });
+    expect(await readdir(directory)).not.toContain(path.basename(orphanOnLoad));
+
+    const keyFile = path.join(directory, "digest-key.json");
+    for (const corrupt of [
+      "not-json",
+      "null",
+      "[]",
+      JSON.stringify({ schemaVersion: 2, key: "a".repeat(64) }),
+      JSON.stringify({ schemaVersion: 1, key: "a".repeat(64), extra: true }),
+      JSON.stringify({ schemaVersion: 1, key: "not-hex" }),
+    ]) {
+      await writeFile(keyFile, corrupt, { mode: 0o600 });
+      const fresh = await MutationJournal.open(binding);
+      await expect(fresh.keyedDigest({ hello: "world" }), corrupt).rejects.toMatchObject({
+        code: "CORRUPT_MUTATION_JOURNAL",
+      });
+    }
+  });
+
   it("keeps a validation dispatch whose reply never came, and lets only the same request send it again", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const binding = { directory, apiUrl: API_URL, appId: APP_ID };
@@ -1223,16 +1257,30 @@ describe("mutation journal", () => {
     });
     // S5: "desk-deploy-001" and "task-abcdefghij" hold "sk-" and ten more
     // characters, which is not an API key's shape.
-    for (const key of ["s5-otherdesk-deploy-001", "s5-task-abcdefghij", "OC_FOO-deploy-0001", "release-sk-2026-11-20-final"]) {
+    for (const key of [
+      "s5-otherdesk-deploy-001",
+      "s5-task-abcdefghij",
+      "OC_FOO-deploy-0001",
+      "OC_APP_TOKEN_0123456789abcdef",
+      "OC_OAUTH_ACCESS_TOKEN_0123456789",
+      "release-sk-2026-11-20-final",
+    ]) {
       await expect(journal.run(intent(key), async () => "sent"), key).resolves.toBe("sent");
     }
     // Built from parts, so no complete synthetic secret sits in the source.
     const synthetic = "Synthetic0123456789".repeat(3);
+    const openCloudAccessKind =
+      "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_platform_cli_…, or oc_run_…)";
     for (const [key, kind] of [
       [`s${"k-"}proj-${synthetic}`, "an API secret key (sk-…)"],
       [`deploy:s${"k-"}${synthetic}`, "an API secret key (sk-…)"],
       [`oc_${"owner_"}synthetic-key`, "an OpenCloud app-owner credential (oc_owner_…)"],
-      [`oc_${"app_"}${synthetic}`, "an OpenCloud access token (oc_app_… or oc_agent_…)"],
+      [`oc_${"app_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"agent_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"oauth_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"provisional_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"platform_cli_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"run_"}${synthetic}`, openCloudAccessKind],
       [`s${"k_"}live_${synthetic}`, "a Stripe secret key"],
       [`gh${"p_"}${"A1".repeat(18)}`, "a GitHub token"],
       [`ey${"J"}hbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl`, "a JSON Web Token"],

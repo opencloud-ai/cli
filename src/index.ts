@@ -28,7 +28,7 @@ import {
   portabilityLimits,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
-import { unsupportedComputeCapabilities } from "@opencloud/contracts/containers";
+import { isExpectedComputeError, unsupportedComputeCapabilities } from "@opencloud/contracts/containers";
 import { ApiError, OpenCloudClient } from "./api-client.js";
 import { validateDraftWithProgress } from "./draft-validation.js";
 import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
@@ -152,6 +152,7 @@ import {
   followOperation,
   jsonOption,
   OperationTerminalError,
+  OperationWaitTimeoutError,
   operationFrom,
   parseBoundedNumber,
   parseCommaList,
@@ -168,7 +169,7 @@ import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.21.0";
+const CLI_VERSION = "3.22.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -422,7 +423,7 @@ async function appReadClient(appId?: string): Promise<OpenCloudClient> {
   const binding = availableWorkspace();
   const session = availableSession();
   if (program.opts<{ token?: string }>().token || session?.state === "ready" ||
-      (binding && (appId === undefined || binding.appId.toLowerCase() === String(appId).toLowerCase()))) {
+      (binding && appId !== undefined && binding.appId.toLowerCase() === String(appId).toLowerCase())) {
     return client();
   }
   const login = await ownerAccountLogin();
@@ -759,6 +760,44 @@ async function outputReplayMutation<T>(
   });
 }
 
+const PLATFORM_VERIFICATION_FAILURE_CODES = new Set([
+  "ACTIVE_DEPLOYMENT_MISMATCH",
+  "APP_EXECUTION_AUTHORITY_REVOKED",
+  "APP_VERIFICATION_FAILED",
+  "ARTIFACT_INTEGRITY_FAILED",
+  "CANONICAL_HEAD_FAILED",
+  "RUNTIME_SDK_MISMATCH",
+  "RUNTIME_SDK_MISSING",
+]);
+
+function isObserveScopeDenial(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 403) return false;
+  const code = error.code?.toUpperCase() ?? "";
+  if (code === "INSUFFICIENT_SCOPE" || code === "MISSING_SCOPE" || code === "SCOPE_REQUIRED") {
+    return true;
+  }
+  if (code !== "" && code !== "HTTP_403" && code !== "FORBIDDEN") return false;
+  return /scope|observe|not authorized|cannot perform|forbidden/i.test(error.message);
+}
+
+function isCallerVerificationFailure(
+  verification: {
+    state: string;
+    deploymentId?: string | null;
+    diagnostics?: ReadonlyArray<{ level: string; code?: string | undefined }>;
+  },
+  operationError?: Record<string, unknown>,
+  expectedDeploymentId?: string | null,
+): boolean {
+  if (verification.state !== "failed") return false;
+  if (expectedDeploymentId && verification.deploymentId !== expectedDeploymentId) return false;
+  const diagnosticCode = verification.diagnostics?.find((item) => item.level === "error")?.code;
+  const code = diagnosticCode ?? (typeof operationError?.code === "string" ? operationError.code : null);
+  if (!code || PLATFORM_VERIFICATION_FAILURE_CODES.has(code)) return false;
+  if (code.startsWith("COMPUTE_")) return isExpectedComputeError(code);
+  return true;
+}
+
 /**
  * Runs OpenCloud's production verification (verify_app) on a release that
  * just went live, as `app dev promote` does. A worker starts only after the
@@ -773,23 +812,102 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   deploymentId: string | null;
   /** The release to go back to, when this command knows it. */
   previousDeploymentId: string | null;
-  /** When the command started, for the logs window. */
+  /** When the command started, for the logs window and timeout budget. */
   since: string;
+  startedAtMs: number;
 }): Promise<unknown> {
   const { appId } = input;
-  const started = await control.call("verifyApp", { appId }, { idempotencyKey: input.idempotencyKey, timeoutMs: 120_000 });
-  let operationError: Record<string, unknown> = {};
+  const totalBudgetMs = parseBoundedNumber(input.options.timeout, "--timeout", 1, 1_800, false) * 1_000;
+  const deadlineMs = input.startedAtMs + totalBudgetMs;
+  const remainingBeforeStartMs = deadlineMs - Date.now();
+  if (remainingBeforeStartMs <= 0) {
+    throw new CliContractError(
+      "OPERATION_WAIT_TIMEOUT",
+      "The release went live, but --timeout elapsed before production verification could start.",
+      {
+        retryable: true,
+        fields: { ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}) },
+        hint: `The release is live. Run \`opencloud app verify ${appId}\` to verify it.`,
+      },
+    );
+  }
+  const skippedVerification = {
+    state: "skipped" as const,
+    reason: "MISSING_OBSERVE_SCOPE" as const,
+    message: "Production verification was skipped because this credential does not have the app:observe scope. Grant app:observe or pass --no-verify.",
+  };
+  let started;
   try {
-    await followOperation({ client: control, started, options: { ...input.options, follow: true } });
+    started = await control.call(
+      "verifyApp",
+      { appId },
+      { idempotencyKey: input.idempotencyKey, timeoutMs: Math.min(120_000, remainingBeforeStartMs) },
+    );
+  } catch (error) {
+    if (isObserveScopeDenial(error)) {
+      process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
+      return skippedVerification;
+    }
+    throw error;
+  }
+  const remainingForFollowMs = deadlineMs - Date.now();
+  const startedOperation = operationFrom(started);
+  if (
+    startedOperation &&
+    !["succeeded", "failed", "cancelled"].includes(startedOperation.state) &&
+    remainingForFollowMs <= 0
+  ) {
+    throw new OperationWaitTimeoutError(startedOperation);
+  }
+  let terminalError: OperationTerminalError | null = null;
+  try {
+    await followOperation({
+      client: control,
+      started,
+      options: {
+        ...input.options,
+        follow: true,
+        timeout: String(Math.max(1, Math.min(1_800, remainingForFollowMs / 1_000))),
+      },
+    });
   } catch (error) {
     if (!(error instanceof OperationTerminalError)) throw error;
-    operationError = (error.operation.error && typeof error.operation.error === "object" ? error.operation.error : {}) as Record<string, unknown>;
+    terminalError = error;
   }
-  const verification = await control.call("getVerification", { appId, verificationId: started.verification.id });
-  if (!Object.keys(operationError).length && verification.state === "passed") return verification;
+  let verification;
+  try {
+    verification = await control.call("getVerification", { appId, verificationId: started.verification.id });
+  } catch (error) {
+    if (isObserveScopeDenial(error)) {
+      process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
+      return skippedVerification;
+    }
+    throw error;
+  }
+  const deploymentMismatch = Boolean(input.deploymentId && verification.deploymentId !== input.deploymentId);
+  if (!terminalError && !deploymentMismatch && verification.state === "passed") return verification;
+  if (deploymentMismatch) {
+    throw new CliContractError(
+      "VERIFICATION_FAILED",
+      `The release went live, but OpenCloud verified deployment ${verification.deploymentId ?? "none"} instead of ${input.deploymentId}.`,
+      {
+        fields: {
+          verificationId: verification.id,
+          verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH",
+          deploymentId: input.deploymentId!,
+          ...(verification.deploymentId ? { verifiedDeploymentId: verification.deploymentId } : {}),
+        },
+        hint: `Run \`opencloud app verify ${appId}\` to verify the active release.`,
+      },
+    );
+  }
+  const operationError = (terminalError?.operation.error && typeof terminalError.operation.error === "object"
+    ? terminalError.operation.error
+    : {}) as Record<string, unknown>;
   const diagnostic = verification.diagnostics.find((item) => item.level === "error");
   const code = diagnostic?.code ?? (typeof operationError.code === "string" ? operationError.code : "APP_VERIFICATION_FAILED");
   const reason = diagnostic?.message ?? (typeof operationError.message === "string" ? operationError.message : `verification ${verification.state}`);
+  const deploymentId = input.deploymentId ?? verification.deploymentId ?? null;
   const window = `--from ${input.since} --to ${new Date().toISOString()}`;
   const logs = code.startsWith("COMPUTE_")
     ? `\`opencloud logs ${appId} --page --surface container ${window}\``
@@ -802,12 +920,12 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
       fields: {
         verificationId: verification.id,
         verificationCode: code,
-        ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}),
+        ...(deploymentId ? { deploymentId } : {}),
       },
       hint: `The release is live. To see why, run ${logs}. To check it again, run \`opencloud app verify ${appId}\`. To go back to the earlier release, run ${back}.`,
     });
-  // A release that failed its checks is the app's to repair; anything else is a fault.
-  throw verification.state === "failed" ? callerFailure(failure) : failure;
+  // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+  throw isCallerVerificationFailure(verification, operationError, input.deploymentId) ? callerFailure(failure) : failure;
 }
 
 /**
@@ -1245,7 +1363,13 @@ async function settleStaleReleaseRefusal<T>(
  * as the base is enough: it is older, so this copy already has it. After
  * someone else's newer release, pull that release first.
  */
-async function withStaleReleaseHint<T>(control: OpenCloudClient, appId: string, directory: string, request: Promise<T>): Promise<T> {
+async function withStaleReleaseHint<T>(
+  control: OpenCloudClient,
+  appId: string,
+  directory: string,
+  request: Promise<T>,
+  action: "deploy" | "dev-start" = "deploy",
+): Promise<T> {
   try {
     return await request;
   } catch (error) {
@@ -1261,9 +1385,15 @@ async function withStaleReleaseHint<T>(control: OpenCloudClient, appId: string, 
             .then((value) => (value as { state?: unknown }).state, () => null)
           : null;
         const dir = shellArgument(directory);
-        withHint(error, baseState === "rolled_back"
-          ? `The release this copy is based on was rolled back, and ${release} is live. To deploy this copy over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`
-          : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then deploy again; or deploy with --force to replace it.`);
+        if (action === "dev-start") {
+          withHint(error, baseState === "rolled_back"
+            ? `The release this copy is based on was rolled back, and ${release} is live. To start a dev session over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then run \`opencloud app dev start ${dir}\` again; or pass --force.`
+            : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then run \`opencloud app dev start ${dir}\` again; or pass --force.`);
+        } else {
+          withHint(error, baseState === "rolled_back"
+            ? `The release this copy is based on was rolled back, and ${release} is live. To deploy this copy over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`
+            : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then deploy again; or deploy with --force to replace it.`);
+        }
       }
     }
     throw error;
@@ -1334,7 +1464,8 @@ async function synchronizeValidatedDraft(
     ? retainedValidation : null;
   // A deploy finds its draft only through the validation it rejoins; a
   // development workflow names its own.
-  const draftFromRejoin = validationProgress !== null && existingDraftId === undefined;
+  const hadExplicitDraft = existingDraftId !== undefined;
+  const draftFromRejoin = validationProgress !== null && !hadExplicitDraft;
   /**
    * The kept validation no longer describes the draft (edited elsewhere, or
    * holding other files): forget it and resume as an ordinary run, which
@@ -1377,6 +1508,13 @@ async function synchronizeValidatedDraft(
     const existing = await control.call("getDraft", {
       appId: bundle.manifest.appId,
       draftId: existingDraftId,
+    }).catch(async (error: unknown) => {
+      if (draftFromRejoin && error instanceof ApiError && error.status === 404) {
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The draft this command was waiting on (${existingDraftId}) no longer exists, so its validation can't be rejoined. Nothing was sent; run the command again to start from a new draft.`));
+      }
+      throw error;
     });
     if (["deploying", "deployed", "discarded"].includes(existing.status)) {
       if (draftFromRejoin) {
@@ -1446,6 +1584,11 @@ async function synchronizeValidatedDraft(
       draftId: draft.id,
     });
     if (["deploying", "deployed", "discarded"].includes(current.status)) {
+      if (!hadExplicitDraft || draftFromRejoin) {
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The source draft (${draft.id}) is ${current.status} now, so it can't be updated or validated. Run the command again to start from a new draft.`));
+      }
       throw callerFailure(new Error(
         `The source draft is ${current.status}; start a new workflow for the next change.`,
       ));
@@ -2838,18 +2981,24 @@ dev
           );
         }
         await run.markAttempted();
-        const created = (await settleStaleReleaseRefusal(run, context.control.call(
-          "startDevSession",
-          {
-            appId,
-            draftId: synchronized.draftId,
-            body: {
-              apply: false,
-              ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+        const created = (await withStaleReleaseHint(
+          context.control,
+          appId,
+          String(directory),
+          settleStaleReleaseRefusal(run, context.control.call(
+            "startDevSession",
+            {
+              appId,
+              draftId: synchronized.draftId,
+              body: {
+                apply: false,
+                ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+              },
             },
-          },
-          { idempotencyKey: childIdempotencyKey(run, "dev-start") },
-        ))) as DevSessionWire;
+            { idempotencyKey: childIdempotencyKey(run, "dev-start") },
+          )),
+          "dev-start",
+        )) as DevSessionWire;
         if (
           created.appId !== appId ||
           created.draftId !== synchronized.draftId ||
@@ -3866,12 +4015,18 @@ dev
           return;
         }
 
-        const deploymentOperation = await followDurableOperation(
-          context.control,
-          promotionOperation.id,
-          intervalMs,
-          timeoutMs,
-        );
+        let deploymentOperation: NonNullable<ReturnType<typeof operationFrom>>;
+        try {
+          deploymentOperation = await followDurableOperation(
+            context.control,
+            promotionOperation.id,
+            intervalMs,
+            timeoutMs,
+          );
+        } catch (error) {
+          if (error instanceof OperationTerminalError) await run.complete();
+          throw error;
+        }
         await run.checkpointStage({
           stage: "promoted",
           artifactSha256: bundle.sha256,
@@ -3957,9 +4112,8 @@ dev
             "VERIFICATION_FAILED",
             "Production verification failed; dev remains available for repair",
           );
-          // An app that failed its checks is the caller's to repair; anything else is a fault.
-          throw finalVerification.state === "failed" &&
-            finalVerification.deploymentId === result.deployment.id
+          // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+          throw isCallerVerificationFailure(finalVerification, undefined, result.deployment.id)
             ? callerFailure(failure)
             : failure;
         }
@@ -4333,7 +4487,7 @@ addOperationOptions(
         });
         started = response;
       }
-      const completed = await followOperation({
+      const completed = await followJournaledOperation(run, {
         client: context.control,
         started,
         options,
@@ -4354,12 +4508,13 @@ addOperationOptions(
         verificationId,
       });
       if (result.state !== "passed") {
+        await run.complete();
         const failure = new CliContractError(
           "VERIFICATION_FAILED",
           `OpenCloud verification ${result.id} finished in state ${result.state}`,
         );
-        // An app that failed its checks is the caller's to repair; anything else is a fault.
-        throw result.state === "failed" ? callerFailure(failure) : failure;
+        // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+        throw isCallerVerificationFailure(result) ? callerFailure(failure) : failure;
       }
       await outputAsync({
         ...(completed as Record<string, unknown>),
@@ -5115,7 +5270,8 @@ addOperationOptions(
     .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(
   async (directory, options: OperationOptions & { force?: boolean; verify?: boolean }) => {
-    const since = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const since = new Date(startedAtMs).toISOString();
     const sourceRoot = callerPath(directory);
     const bundle = await localBundle(sourceRoot);
     process.stderr.write(
@@ -5233,10 +5389,12 @@ addOperationOptions(
         }
         // The deploy is done; its verification is reported on its own.
         await run.complete();
-        const deployed = (started as { deployment?: { id?: unknown } }).deployment?.id;
-        const verification = live && options.verify !== false
+        const deployed =
+          (started as { deployment?: { id?: unknown } }).deployment?.id ??
+          operationFrom(completed)?.deploymentId;
+        const verification = live && options.follow !== false && options.verify !== false
           ? await verifyLiveRelease(context.control, {
-            appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
+            appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
             deploymentId: typeof deployed === "string" ? deployed : null,
             previousDeploymentId: expectedActiveDeploymentId ?? null,
           })
@@ -5626,7 +5784,8 @@ addOperationOptions(
     .argument("<deployment-id>")
     .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(async (appId, deploymentId, options: OperationOptions & { verify?: boolean }) => {
-  const since = new Date().toISOString();
+  const startedAtMs = Date.now();
+  const since = new Date(startedAtMs).toISOString();
   await outputDurableMutation(
     {
       commandId: "opencloud deployment rollback",
@@ -5646,7 +5805,7 @@ addOperationOptions(
     async (completed, control, run) => {
       if (options.follow === false || options.verify === false || operationFrom(completed)?.state !== "succeeded") return completed;
       const verification = await verifyLiveRelease(control, {
-        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
+        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
         deploymentId: String(deploymentId), previousDeploymentId: null,
       });
       return completed && typeof completed === "object" && !Array.isArray(completed) ? { ...completed, verification } : completed;

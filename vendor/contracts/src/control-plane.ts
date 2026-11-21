@@ -1242,6 +1242,8 @@ const agentFeedSignalOutput = z
       "mixed",
       "none",
     ]),
+    /** A custom metric's newest sample in its window, or null with none. */
+    lastSampleAt: z.string().nullable().optional(),
   })
   .passthrough();
 

@@ -14,7 +14,7 @@ export * from "@opencloud/bundler";
 
 /**
  * The vendored bundler's buildBundle, with the CLI choosing the SDK version a
- * manifest that pins none gets: CLI 3.20's default, or 2.8.0 when it declares
+ * manifest that pins none gets: CLI 3.20's default, or 2.9.0 when it declares
  * containers (see ./sdk-version.ts). A pinned version is never changed.
  */
 export async function buildBundle(directory: string, options: BundleOptions = {}): Promise<BuiltBundle> {
@@ -45,13 +45,13 @@ async function declaresContainers(root: string): Promise<boolean> {
 
 /** A warning this CLI adds to the bundler's, in the same shape. */
 export interface CliBundleWarning {
-  code: "CONTAINERS_NEED_SDK_2_8";
+  code: "CONTAINERS_NEED_SDK_2_9";
   path: string;
   message: string;
 }
 
 /**
- * A manifest that declares containers but pins an SDK older than 2.8.0, the
+ * A manifest that declares containers but pins an SDK older than 2.9.0, the
  * first whose Functions can call them (and what an unpinned one with
  * containers gets). OpenCloud accepts it, so this warns and names the fix.
  */
@@ -61,7 +61,7 @@ export function cliBundleWarnings(bundle: BuiltBundle): CliBundleWarning[] {
   const version = manifest.runtime.sdk.version;
   if (sdkVersionAtLeast(version, CONTAINER_SDK_VERSION)) return [];
   return [{
-    code: "CONTAINERS_NEED_SDK_2_8",
+    code: "CONTAINERS_NEED_SDK_2_9",
     path: bundle.sourceManifest,
     message: `${bundle.sourceManifest} declares containers but pins runtime SDK ${version}; Functions can call containers only from SDK ${CONTAINER_SDK_VERSION}. Set runtime.sdk.version: ${CONTAINER_SDK_VERSION} in ${bundle.sourceManifest}.`,
   }];

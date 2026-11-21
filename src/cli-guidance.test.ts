@@ -185,8 +185,8 @@ describe("validate", spawning, () => {
     ]);
     // init pins SDK 2.3.0; containers added to it are told which SDK they need.
     expect(summary.warnings).toContainEqual({
-      code: "CONTAINERS_NEED_SDK_2_8", path: "opencloud.yaml",
-      message: "opencloud.yaml declares containers but pins runtime SDK 2.3.0; Functions can call containers only from SDK 2.8.0. Set runtime.sdk.version: 2.8.0 in opencloud.yaml.",
+      code: "CONTAINERS_NEED_SDK_2_9", path: "opencloud.yaml",
+      message: "opencloud.yaml declares containers but pins runtime SDK 2.3.0; Functions can call containers only from SDK 2.9.0. Set runtime.sdk.version: 2.9.0 in opencloud.yaml.",
     });
   });
 
@@ -417,5 +417,608 @@ describe("app connect", spawning, () => {
     );
     expect(connected.stdout).not.toContain("synthetic-guidance-workspace");
     expect(JSON.parse(await readFile(path.join(context.folder, ".opencloud", "app.json"), "utf8"))).toMatchObject({ appId });
+  });
+});
+
+describe("cross-app operation get inside a connected folder", spawning, () => {
+  const otherAppId = "40000000-0000-4000-8000-000000000002";
+  const operationId = "40000000-0000-4000-8000-0000000000bb";
+
+  async function connectFolder(context: { home: string; folder: string }, token = "synthetic-app-a-workspace") {
+    responder = (request) =>
+      request.method === "POST" && request.path === `/v1/apps/${appId}/cli-connection`
+        ? {
+            status: 200,
+            body: {
+              app: { id: appId, name: "AppA", appUrl: "https://appa.example.test" },
+              credential: { token, expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+            },
+          }
+        : undefined;
+    const connected = await run(["app", "connect", appId], context);
+    expect(connected.status, connected.stderr).toBe(0);
+    requests = [];
+  }
+
+  it("prefers the account login for operation get inside another connected app folder", async () => {
+    const context = await workspace("cross-app-op-get", { signedIn: true });
+    await connectFolder(context);
+    const op = {
+      id: operationId, appId: otherAppId, deploymentId: null, type: "deploy", state: "succeeded",
+      actorType: "user", actorId: appId, idempotencyKey: "server-redacted", error: null,
+      createdAt: "2026-11-20T05:00:00.000Z", updatedAt: "2026-11-20T05:01:00.000Z",
+    };
+    responder = (request) =>
+      request.path === `/v1/operations/${operationId}`
+        ? (request.headers.authorization === "Bearer synthetic-guidance-access"
+          ? { status: 200, body: op }
+          : { status: 403, body: { code: "FORBIDDEN", message: "Credential is not authorized for this app" } })
+        : undefined;
+    const got = await run(["operation", "get", operationId], context);
+    expect(got.status, got.stderr).toBe(0);
+    expect(JSON.parse(got.stdout)).toMatchObject({ id: operationId, appId: otherAppId });
+    expect(requests.map((r) => r.headers.authorization)).toEqual(["Bearer synthetic-guidance-access"]);
+  });
+
+  it("falls back to the connected folder credential for operation get when no account login exists", async () => {
+    const context = await workspace("op-get-workspace-fallback", { signedIn: true });
+    await connectFolder(context, "synthetic-only-workspace");
+    // Remove account login file so only workspace binding + credential remains.
+    const configDirectory =
+      process.platform === "darwin"
+        ? path.join(context.home, "Library", "Application Support", "OpenCloud")
+        : path.join(context.home, "opencloud");
+    const account = `account-${createHash("sha256").update(apiUrl).digest("hex")}`;
+    await rm(path.join(configDirectory, "credentials", `${account}.json`));
+    const op = {
+      id: operationId, appId, deploymentId: null, type: "deploy", state: "succeeded",
+      actorType: "user", actorId: appId, idempotencyKey: "server-redacted", error: null,
+      createdAt: "2026-11-20T05:00:00.000Z", updatedAt: "2026-11-20T05:01:00.000Z",
+    };
+    responder = (request) => request.path === `/v1/operations/${operationId}` ? { status: 200, body: op } : undefined;
+    const got = await run(["operation", "get", operationId], context);
+    expect(got.status, got.stderr).toBe(0);
+    expect(requests.map((r) => r.headers.authorization)).toEqual(["Bearer synthetic-only-workspace"]);
+  });
+});
+
+describe("live release verification, journal settlement, rejoin dead-ends, and dev start hints", spawning, () => {
+  const now = "2026-11-21T12:00:00.000Z";
+  const actorId = "40000000-0000-4000-8000-000000000009";
+  const baseDeploymentId = "40000000-0000-4000-8000-000000000010";
+  const deployedId = "40000000-0000-4000-8000-000000000011";
+  const otherDeploymentId = "40000000-0000-4000-8000-000000000012";
+  const draftId = "40000000-0000-4000-8000-000000000020";
+  const deployOpId = "40000000-0000-4000-8000-000000000030";
+  const verifyId1 = "40000000-0000-4000-8000-000000000041";
+  const verifyOpId1 = "40000000-0000-4000-8000-000000000042";
+  const verifyId2 = "40000000-0000-4000-8000-000000000043";
+  const verifyOpId2 = "40000000-0000-4000-8000-000000000044";
+  const devSessionId = "40000000-0000-4000-8000-000000000050";
+
+  function baseVersion() {
+    return {
+      version: "9.9.9", commit: "test", builtAt: now, releaseId: "platform-v9.9.9",
+      contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 },
+    };
+  }
+
+  function validationPayload(id: string, dId: string, revision: number, digest: string) {
+    return {
+      id, draftId: dId, revision, passed: true, artifactSha256: digest,
+      manifest: null, canonicalSourceManifest: "opencloud.yaml", sourceManifest: null,
+      sourceFiles: [], artifactFiles: [], diagnostics: [],
+      nextAction: "Deploy the validated draft.", createdAt: now,
+    };
+  }
+
+  function devSessionPayload(status: string, revId: string, receiptId: string, digest: string) {
+    return {
+      id: devSessionId, appId, draftId, status, baseDeploymentId: null,
+      previewUrl: "https://dev.example.test", browserPreviewUrl: "https://preview.example.test",
+      activeRevision: { id: revId, draftRevision: 2, artifactSha256: digest, migrationDigest: "b".repeat(64) },
+      verification: { receiptId, revisionId: revId, expiresAt: "2026-12-01T12:00:00.000Z" },
+      capabilities: {
+        frontend: true, database: true, functions: true, jobs: true, files: true,
+        productionSecrets: false, cron: false, syntheticAuth: true,
+        emailCapture: true, emailInboundInjection: true, notificationCapture: true,
+      },
+      createdAt: now, updatedAt: now, lastActivityAt: now, expiresAt: "2026-12-01T12:00:00.000Z",
+    };
+  }
+
+  function makeDeployResponder(options: {
+    verifyResponse: (req: Recorded) => { status: number; body: unknown };
+    verificationRecord?: () => unknown;
+    verifyOp?: () => unknown;
+    localDigest: string;
+    reports?: Recorded[];
+  }): Responder {
+    let draftRevision = 1;
+    const files = new Map<string, { sha256: string }>();
+    return (request) => {
+      if (request.path === "/v1/platform-errors/reports") {
+        options.reports?.push(request);
+        return { status: 202, body: { accepted: true } };
+      }
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.path === "/v1/installation") return { status: 404, body: { code: "NOT_FOUND", message: "not found" } };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts`) {
+        draftRevision = 1;
+        files.clear();
+        return { status: 201, body: { id: draftId, appId, baseDeploymentId: null, name: "CLI", status: "open", revision: 1, createdAt: now, updatedAt: now, deployedAt: null } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}`) {
+        return { status: 200, body: { id: draftId, appId, baseDeploymentId: null, name: "CLI", status: "open", revision: draftRevision, createdAt: now, updatedAt: now, deployedAt: null } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}/files`) {
+        return { status: 200, body: [...files].map(([p, v]) => ({ path: p, sha256: v.sha256, baseSha256: null, sizeBytes: 1, deleted: false, updatedAt: now })) };
+      }
+      if (request.method === "PATCH" && request.path === `/v1/apps/${appId}/drafts/${draftId}/files`) {
+        const body = JSON.parse(request.body) as { changes: Array<{ path: string; contentBase64?: string; delete?: boolean }> };
+        for (const c of body.changes) {
+          if (c.delete) files.delete(c.path);
+          else files.set(c.path, { sha256: createHash("sha256").update(Buffer.from(c.contentBase64!, "base64")).digest("hex") });
+        }
+        draftRevision += 1;
+        return { status: 200, body: { draft: { id: draftId, appId, baseDeploymentId: null, name: "CLI", status: "open", revision: draftRevision, createdAt: now, updatedAt: now, deployedAt: null }, files: [] } };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts/${draftId}/validate`) {
+        return { status: 200, body: validationPayload("40000000-0000-4000-8000-000000000060", draftId, draftRevision, options.localDigest) };
+      }
+      if (request.method === "POST" && request.path.startsWith(`/v1/apps/${appId}/drafts/${draftId}/deploy`)) {
+        return {
+          status: 201,
+          body: {
+            draft: { id: draftId, appId, baseDeploymentId: null, name: "CLI", status: "deployed", revision: draftRevision, createdAt: now, updatedAt: now, deployedAt: now },
+            deployment: { id: deployedId, appId, version: "app-20261121-1", artifactSha256: options.localDigest, sdkVersion: "2.3.0", manifest: {}, state: "active", rollbackOfDeploymentId: null, error: null, createdAt: now, activatedAt: now, source: null },
+            operation: { id: deployOpId, appId, deploymentId: deployedId, type: "deploy", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        return options.verifyResponse(request);
+      }
+      if (request.method === "GET" && request.path === `/v1/operations/${verifyOpId1}`) {
+        return { status: 200, body: options.verifyOp?.() };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId1}`) {
+        return { status: 200, body: options.verificationRecord?.() };
+      }
+      return undefined;
+    };
+  }
+
+  it("skips verifyLiveRelease on deploy --no-follow, and skips non-fatally when credential lacks app:observe on deploy and rollback", async () => {
+    const context = await workspace("deploy-verify-edge");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+
+    // 1. deploy --no-follow must NOT call verifyApp even when deploy operation is already succeeded.
+    responder = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => ({ status: 500, body: { code: "SHOULD_NOT_BE_CALLED" } }),
+    });
+    const noFollow = await run(["--token", "synthetic-deploy-only", "deploy", directory, "--no-follow"], context);
+    expect(noFollow.status, noFollow.stderr).toBe(0);
+    expect(requests.some((r) => r.path === `/v1/apps/${appId}/verifications`)).toBe(false);
+    expect("verification" in JSON.parse(noFollow.stdout)).toBe(false);
+
+    // 2. Least-privilege credential (app:deploy without app:observe -> 403): deploy succeeds with verification skipped!
+    requests = [];
+    responder = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => ({ status: 403, body: { statusCode: 403, message: "Credential is not authorized for this app" } }),
+    });
+    const deploySkipped = await run(["--token", "synthetic-deploy-only", "deploy", directory, "--force"], context);
+    expect(deploySkipped.status, deploySkipped.stderr).toBe(0);
+    expect(deploySkipped.stderr).toContain("app:observe");
+    expect(JSON.parse(deploySkipped.stdout)).toMatchObject({
+      verification: { state: "skipped", reason: "MISSING_OBSERVE_SCOPE" },
+    });
+
+    // 3. Same for deployment rollback with app:rollback token lacking app:observe.
+    requests = [];
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/deployments/${deployedId}/rollback`) {
+        return {
+          status: 201,
+          body: {
+            operation: { id: deployOpId, appId, deploymentId: deployedId, type: "rollback", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        return { status: 403, body: { code: "INSUFFICIENT_SCOPE", message: "app:observe required" } };
+      }
+      return undefined;
+    };
+    const rollbackSkipped = await run(["--token", "synthetic-rollback-only", "deployment", "rollback", appId, deployedId], context);
+    expect(rollbackSkipped.status, rollbackSkipped.stderr).toBe(0);
+    expect(rollbackSkipped.stderr).toContain("app:observe");
+    expect(JSON.parse(rollbackSkipped.stdout)).toMatchObject({
+      verification: { state: "skipped", reason: "MISSING_OBSERVE_SCOPE" },
+    });
+
+    // 4. A non-scope 403 (e.g. COMPUTE_NOT_ENABLED) is NOT swallowed as missing scope.
+    requests = [];
+    responder = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => ({ status: 403, body: { statusCode: 403, code: "COMPUTE_NOT_ENABLED", message: "Container compute is not enabled for this account." } }),
+    });
+    const nonScope403 = await run(["--token", "synthetic-deploy-only", "deploy", directory, "--force"], context);
+    expect(nonScope403.status).toBe(1);
+    expect(JSON.parse(nonScope403.stderr.trim().split("\n").at(-1)!).error.code).toBe("COMPUTE_NOT_ENABLED");
+  });
+
+  it("rejects mismatched verification deploymentId, handles empty terminal operation error, and reports platform faults but not app faults", async () => {
+    const context = await workspace("deploy-verify-classification");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+
+    // 1. Mismatched deploymentId even when verification passed -> VERIFICATION_FAILED (reported as platform fault).
+    const mismatchReports: Recorded[] = [];
+    responder = makeDeployResponder({
+      localDigest,
+      reports: mismatchReports,
+      verifyResponse: () => ({
+        status: 201,
+        body: {
+          verification: { id: verifyId1, appId, deploymentId: otherDeploymentId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+          operation: { id: verifyOpId1, appId, deploymentId: otherDeploymentId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+        },
+      }),
+      verificationRecord: () => ({ id: verifyId1, appId, deploymentId: otherDeploymentId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now }),
+    });
+    const mismatch = await run(["--token", "synthetic-token", "deploy", directory, "--force"], context, { OPENCLOUD_TELEMETRY: "1" });
+    expect(mismatch.status).toBe(1);
+    expect(JSON.parse(mismatch.stderr.trim().split("\n").at(-1)!).error).toMatchObject({
+      code: "VERIFICATION_FAILED",
+      verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH",
+      deploymentId: deployedId,
+      verifiedDeploymentId: otherDeploymentId,
+    });
+    expect(mismatchReports.length).toBe(1);
+
+    // 2. Terminal verify_app failure with empty error: {} must still fail (not treat as passed!).
+    responder = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => ({
+        status: 201,
+        body: {
+          verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+          operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "failed", actorType: "user", actorId, idempotencyKey: "server-redacted", error: {}, createdAt: now, updatedAt: now },
+        },
+      }),
+      verificationRecord: () => ({ id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now }),
+    });
+    const emptyOpErr = await run(["--token", "synthetic-token", "deploy", directory, "--force"], context);
+    expect(emptyOpErr.status).toBe(1);
+    expect(JSON.parse(emptyOpErr.stderr.trim().split("\n").at(-1)!).error).toMatchObject({
+      code: "VERIFICATION_FAILED",
+      deploymentId: deployedId,
+    });
+
+    // 3. Platform fault (ARTIFACT_INTEGRITY_FAILED) is reported; app fault (COMPUTE_CRASH_LOOP) is NOT reported.
+    const platformReports: Recorded[] = [];
+    responder = makeDeployResponder({
+      localDigest,
+      reports: platformReports,
+      verifyResponse: () => ({
+        status: 201,
+        body: {
+          verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code: "ARTIFACT_INTEGRITY_FAILED", message: "missing object" }], startedAt: now, finishedAt: now, createdAt: now },
+          operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "failed", actorType: "user", actorId, idempotencyKey: "server-redacted", error: { code: "ARTIFACT_INTEGRITY_FAILED", message: "missing object" }, createdAt: now, updatedAt: now },
+        },
+      }),
+      verificationRecord: () => ({ id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code: "ARTIFACT_INTEGRITY_FAILED", message: "missing object" }], startedAt: now, finishedAt: now, createdAt: now }),
+    });
+    const platformFail = await run(["--token", "synthetic-token", "deploy", directory, "--force"], context, { OPENCLOUD_TELEMETRY: "1" });
+    expect(platformFail.status).toBe(1);
+    expect(platformReports.length).toBe(1);
+
+    const appReports: Recorded[] = [];
+    responder = makeDeployResponder({
+      localDigest,
+      reports: appReports,
+      verifyResponse: () => ({
+        status: 201,
+        body: {
+          verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code: "COMPUTE_CRASH_LOOP", message: "worker crashed" }], startedAt: now, finishedAt: now, createdAt: now },
+          operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "failed", actorType: "user", actorId, idempotencyKey: "server-redacted", error: { code: "COMPUTE_CRASH_LOOP", message: "worker crashed" }, createdAt: now, updatedAt: now },
+        },
+      }),
+      verificationRecord: () => ({ id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code: "COMPUTE_CRASH_LOOP", message: "worker crashed" }], startedAt: now, finishedAt: now, createdAt: now }),
+    });
+    const appFail = await run(["--token", "synthetic-token", "deploy", directory, "--force"], context, { OPENCLOUD_TELEMETRY: "1" });
+    expect(appFail.status).toBe(1);
+    expect(appReports.length).toBe(0);
+  });
+
+  it("settles opencloud app verify journal on failure so re-running starts a fresh verification", async () => {
+    const context = await workspace("app-verify-settles");
+    let attempt = 0;
+    const keys: string[] = [];
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        attempt += 1;
+        keys.push(String(request.headers["idempotency-key"]));
+        if (attempt === 1) {
+          return {
+            status: 201,
+            body: {
+              verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code: "COMPUTE_CRASH_LOOP", message: "worker crashed" }], startedAt: now, finishedAt: now, createdAt: now },
+              operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "failed", actorType: "user", actorId, idempotencyKey: "server-redacted", error: { code: "COMPUTE_CRASH_LOOP", message: "worker crashed" }, createdAt: now, updatedAt: now },
+            },
+          };
+        }
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId2, appId, deploymentId: deployedId, operationId: verifyOpId2, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+            operation: { id: verifyOpId2, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId2}`) {
+        return { status: 200, body: { id: verifyId2, appId, deploymentId: deployedId, operationId: verifyOpId2, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now } };
+      }
+      return undefined;
+    };
+    const first = await run(["--token", "synthetic-token", "app", "verify", appId], context);
+    expect(first.status).toBe(1);
+    const second = await run(["--token", "synthetic-token", "app", "verify", appId], context);
+    expect(second.status, second.stderr).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({ verification: { id: verifyId2, state: "passed" } });
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("settles app dev promote journal when promotion deployment fails so the next promote is not wedged", async () => {
+    const context = await workspace("dev-promote-settles");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    await mkdir(path.join(directory, ".opencloud"), { recursive: true });
+    await writeFile(path.join(directory, ".opencloud", "dev.json"), JSON.stringify({
+      schemaVersion: 1, appId, draftId, sessionId: devSessionId, artifactSha256: localDigest, updatedAt: now,
+    }));
+    const revId = "40000000-0000-4000-8000-000000000070";
+    const receiptId = "40000000-0000-4000-8000-000000000071";
+    const promoteOp1 = "40000000-0000-4000-8000-000000000072";
+    const promoteOp2 = "40000000-0000-4000-8000-000000000073";
+    let promoteAttempt = 0;
+    const promoteKeys: string[] = [];
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/dev-sessions/${devSessionId}`) {
+        return {
+          status: 200,
+          body: devSessionPayload("running", revId, receiptId, localDigest),
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/dev-sessions/${devSessionId}/promote`) {
+        promoteAttempt += 1;
+        promoteKeys.push(String(request.headers["idempotency-key"]));
+        const opId = promoteAttempt === 1 ? promoteOp1 : promoteOp2;
+        return {
+          status: 201,
+          body: {
+            draft: { id: draftId, appId, baseDeploymentId: null, name: "Dev", status: "deploying", revision: 2, createdAt: now, updatedAt: now, deployedAt: null },
+            deployment: { id: deployedId, appId, version: "app-20261121-1", artifactSha256: localDigest, sdkVersion: "2.3.0", manifest: {}, state: "deploying", rollbackOfDeploymentId: null, error: null, createdAt: now, activatedAt: null, source: null },
+            operation: { id: opId, appId, deploymentId: deployedId, type: "deploy", state: "queued", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/operations/${promoteOp1}`) {
+        return {
+          status: 200,
+          body: {
+            id: promoteOp1, appId, deploymentId: deployedId, type: "deploy", state: "failed", actorType: "user", actorId,
+            idempotencyKey: "server-redacted", error: { code: "DEPLOYMENT_COMPENSATED", message: "compensated" }, createdAt: now, updatedAt: now,
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/deployments/${deployedId}`) {
+        return {
+          status: 200,
+          body: { id: deployedId, appId, version: "app-20261121-1", artifactSha256: localDigest, sdkVersion: "2.3.0", manifest: {}, state: "failed", rollbackOfDeploymentId: null, error: null, createdAt: now, activatedAt: null, source: null },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/operations/${promoteOp2}`) {
+        return {
+          status: 200,
+          body: {
+            id: promoteOp2, appId, deploymentId: deployedId, type: "deploy", state: "succeeded", actorType: "user", actorId,
+            idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now,
+          },
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+            operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/operations/${verifyOpId1}`) {
+        return { status: 200, body: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId1}`) {
+        return { status: 200, body: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}`) {
+        return { status: 200, body: { id: appId, identityStatus: "assigned", name: "App", slug: "app", appUrl: "https://app.example.test", authUrl: "https://auth.example.test", apiUrl: "https://api.example.test", visibility: "private", aiCredentialSource: "owner", state: "active", ownerUserId: actorId, desiredDeploymentId: deployedId, activeDeploymentId: deployedId, createdAt: now, updatedAt: now } };
+      }
+      if (request.method === "DELETE" && request.path.startsWith(`/v1/apps/${appId}/dev-sessions/${devSessionId}`)) {
+        return { status: 200, body: devSessionPayload("stopped", revId, receiptId, localDigest) };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}/files`) {
+        return { status: 200, body: [] };
+      }
+      return undefined;
+    };
+    const first = await run(["--token", "synthetic-token", "app", "dev", "promote", directory, "--interval", "0.05", "--timeout", "5"], context);
+    expect(first.status).toBe(1);
+    const second = await run(["--token", "synthetic-token", "app", "dev", "promote", directory, "--interval", "0.05", "--timeout", "5"], context);
+    expect(second.status, second.stderr).toBe(0);
+    expect(promoteKeys).toHaveLength(2);
+    expect(promoteKeys[0]).not.toBe(promoteKeys[1]);
+  });
+
+  it("settles F2 rejoin dead-ends when the kept draft returns 404 or becomes closed mid-sync", async () => {
+    const context = await workspace("rejoin-dead-ends");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    const draft1 = "40000000-0000-4000-8000-000000000081";
+    const draft2 = "40000000-0000-4000-8000-000000000082";
+    let createdCount = 0;
+    let draft1Missing = false;
+    let draft1ClosedInLoop = false;
+    const draftMap = new Map<string, { revision: number; files: Map<string, string> }>();
+    let firstValidateDropped = false;
+
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.path === "/v1/installation") return { status: 404, body: { code: "NOT_FOUND", message: "not found" } };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts`) {
+        createdCount += 1;
+        const id = createdCount === 1 ? draft1 : draft2;
+        draftMap.set(id, { revision: 1, files: new Map() });
+        return { status: 201, body: { id, appId, baseDeploymentId: null, name: "CLI", status: "open", revision: 1, createdAt: now, updatedAt: now, deployedAt: null } };
+      }
+      const draftMatch = /^\/v1\/apps\/[^/]+\/drafts\/([^/]+)(\/.*)?$/.exec(request.path);
+      if (draftMatch) {
+        const id = draftMatch[1]!;
+        const rest = draftMatch[2] ?? "";
+        if (id === draft1 && draft1Missing) return { status: 404, body: { code: "NOT_FOUND", message: "draft not found" } };
+        const entry = draftMap.get(id);
+        if (!entry) return { status: 404, body: { code: "NOT_FOUND", message: "draft not found" } };
+        if (rest === "" && request.method === "GET") {
+          const status = id === draft1 && draft1ClosedInLoop ? "discarded" : "open";
+          return { status: 200, body: { id, appId, baseDeploymentId: null, name: "CLI", status, revision: entry.revision, createdAt: now, updatedAt: now, deployedAt: null } };
+        }
+        if (rest === "/files" && request.method === "GET") {
+          return { status: 200, body: [...entry.files].map(([p, sha]) => ({ path: p, sha256: sha, baseSha256: null, sizeBytes: 1, deleted: false, updatedAt: now })) };
+        }
+        if (rest === "/files" && request.method === "PATCH") {
+          const body = JSON.parse(request.body) as { changes: Array<{ path: string; contentBase64?: string; delete?: boolean }> };
+          for (const c of body.changes) {
+            if (c.delete) entry.files.delete(c.path);
+            else entry.files.set(c.path, createHash("sha256").update(Buffer.from(c.contentBase64!, "base64")).digest("hex"));
+          }
+          entry.revision += 1;
+          return { status: 200, body: { draft: { id, appId, baseDeploymentId: null, name: "CLI", status: "open", revision: entry.revision, createdAt: now, updatedAt: now, deployedAt: null }, files: [] } };
+        }
+        if (rest === "/validate" && request.method === "POST") {
+          if (!firstValidateDropped) {
+            firstValidateDropped = true;
+            return { status: 502, body: { code: "BAD_GATEWAY", message: "proxy lost reply" } };
+          }
+          return { status: 200, body: validationPayload("40000000-0000-4000-8000-000000000060", id, entry.revision, localDigest) };
+        }
+        if (rest.startsWith("/deploy") && request.method === "POST") {
+          return {
+            status: 201,
+            body: {
+              draft: { id, appId, baseDeploymentId: null, name: "CLI", status: "deployed", revision: entry.revision, createdAt: now, updatedAt: now, deployedAt: now },
+              deployment: { id: deployedId, appId, version: "app-20261121-1", artifactSha256: localDigest, sdkVersion: "2.3.0", manifest: {}, state: "active", rollbackOfDeploymentId: null, error: null, createdAt: now, activatedAt: now, source: null },
+              operation: { id: deployOpId, appId, deploymentId: deployedId, type: "deploy", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+            },
+          };
+        }
+      }
+      return undefined;
+    };
+
+    // First deploy gets 502 during validation -> settles as validation_waiting on draft1.
+    const first = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify"], context);
+    expect(first.status).toBe(1);
+    // Draft1 disappears (404) before rejoin -> settles refused with DRAFT_NOT_OPEN.
+    draft1Missing = true;
+    const rejoined404 = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify"], context);
+    expect(rejoined404.status).toBe(1);
+    expect(JSON.parse(rejoined404.stderr.trim().split("\n").at(-1)!).error.code).toBe("DRAFT_NOT_OPEN");
+    // Next deploy starts fresh on draft2 and succeeds!
+    const recovered = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify"], context);
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(createdCount).toBe(2);
+
+    // Also verify mid-loop closure on a fresh deploy settles as DRAFT_NOT_OPEN.
+    const context2 = await workspace("mid-loop-closed");
+    const directory2 = await app(context2);
+    createdCount = 0;
+    draft1Missing = false;
+    draft1ClosedInLoop = true;
+    const closedInLoop = await run(["--token", "synthetic-token", "deploy", directory2, "--no-verify"], context2);
+    expect(closedInLoop.status).toBe(1);
+    expect(JSON.parse(closedInLoop.stderr.trim().split("\n").at(-1)!).error.code).toBe("DRAFT_NOT_OPEN");
+    draft1ClosedInLoop = false;
+    firstValidateDropped = true;
+    const freshAfterClose = await run(["--token", "synthetic-token", "deploy", directory2, "--no-verify"], context2);
+    expect(freshAfterClose.status, freshAfterClose.stderr).toBe(0);
+    expect(createdCount).toBe(2);
+  });
+
+  it("adds the stale release hint when app dev start is refused with ACTIVE_DEPLOYMENT_CHANGED", async () => {
+    const context = await workspace("dev-start-stale-hint");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    await mkdir(path.join(directory, ".opencloud"), { recursive: true });
+    await writeFile(path.join(directory, ".opencloud", "base.json"), JSON.stringify({
+      schemaVersion: 1, apiUrl, appId, deploymentId: baseDeploymentId, version: "app-20261121-1",
+      artifactSha256: localDigest, sourceSha256: null, files: {}, recordedAt: now,
+    }));
+    let rev = 1;
+    const files = new Map<string, string>();
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.path === "/v1/installation") return { status: 404, body: { code: "NOT_FOUND", message: "not found" } };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts`) {
+        return { status: 201, body: { id: draftId, appId, baseDeploymentId: null, name: "Dev", status: "open", revision: 1, createdAt: now, updatedAt: now, deployedAt: null } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}`) {
+        return { status: 200, body: { id: draftId, appId, baseDeploymentId: null, name: "Dev", status: "open", revision: rev, createdAt: now, updatedAt: now, deployedAt: null } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}/files`) {
+        return { status: 200, body: [...files].map(([p, sha]) => ({ path: p, sha256: sha, baseSha256: null, sizeBytes: 1, deleted: false, updatedAt: now })) };
+      }
+      if (request.method === "PATCH" && request.path === `/v1/apps/${appId}/drafts/${draftId}/files`) {
+        const body = JSON.parse(request.body) as { changes: Array<{ path: string; contentBase64?: string; delete?: boolean }> };
+        for (const c of body.changes) {
+          if (c.delete) files.delete(c.path);
+          else files.set(c.path, createHash("sha256").update(Buffer.from(c.contentBase64!, "base64")).digest("hex"));
+        }
+        rev += 1;
+        return { status: 200, body: { draft: { id: draftId, appId, baseDeploymentId: null, name: "Dev", status: "open", revision: rev, createdAt: now, updatedAt: now, deployedAt: null }, files: [] } };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts/${draftId}/validate`) {
+        return { status: 200, body: validationPayload("40000000-0000-4000-8000-000000000060", draftId, rev, localDigest) };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts/${draftId}/dev-sessions`) {
+        return {
+          status: 409,
+          body: {
+            statusCode: 409,
+            code: "ACTIVE_DEPLOYMENT_CHANGED",
+            message: "Another deployment became active",
+            details: { expectedActiveDeploymentId: baseDeploymentId, latestDeploymentId: otherDeploymentId, latestVersion: "app-20261121-2" },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/deployments/${baseDeploymentId}`) {
+        return { status: 200, body: { id: baseDeploymentId, state: "superseded" } };
+      }
+      return undefined;
+    };
+    const started = await run(["--token", "synthetic-token", "app", "dev", "start", directory], context);
+    expect(started.status).toBe(1);
+    const error = JSON.parse(started.stderr.trim().split("\n").at(-1)!).error as { code: string; hint?: string };
+    expect(error.code).toBe("ACTIVE_DEPLOYMENT_CHANGED");
+    expect(error.hint).toContain(`opencloud pull ${directory}`);
+    expect(error.hint).toContain(`--deployment ${otherDeploymentId} --merged`);
   });
 });

@@ -80,10 +80,10 @@ containers:
     const archived = await readArchivedManifest(root, bundle.archive);
     expect(archived.frontend).toEqual({ container: "web" });
     expect(bundle.manifest.containers?.[0]?.name).toBe("web");
-    expect(bundle.manifest.runtime.sdk.version).toBe("2.8.0");
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.9.0");
     expect(bundle.files).toEqual(["opencloud.json"]);
   });
-  it("gives a manifest that pins no SDK 3.20's default, or 2.8.0 when it declares containers, and keeps a pin", async () => {
+  it("gives a manifest that pins no SDK 3.20's default, or 2.9.0 when it declares containers, and keeps a pin", async () => {
     const plain = await temporaryDirectory();
     await mkdir(path.join(plain, "frontend"));
     await writeFile(path.join(plain, "frontend", "index.html"), "hello");
@@ -113,14 +113,14 @@ ${pin}containers:
       buildBundle(plain), buildBundle(containers, { platformFrontend: true }),
     ]);
     expect(plainBundle.manifest.runtime.sdk.version).toBe("2.3.0");
-    expect(containerBundle.manifest.runtime.sdk.version).toBe("2.8.0");
-    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest("runtime:\n  sdk:\n    version: 2.7.0\n"));
+    expect(containerBundle.manifest.runtime.sdk.version).toBe("2.9.0");
+    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest("runtime:\n  sdk:\n    version: 2.8.0\n"));
     const pinnedOlder = await buildBundle(containers, { platformFrontend: true });
-    expect(pinnedOlder.manifest.runtime.sdk.version).toBe("2.7.0");
+    expect(pinnedOlder.manifest.runtime.sdk.version).toBe("2.8.0");
     // OpenCloud accepts it, so it is a warning that names the fix.
     expect(cliBundleWarnings(pinnedOlder)).toEqual([{
-      code: "CONTAINERS_NEED_SDK_2_8", path: "opencloud.yaml",
-      message: "opencloud.yaml declares containers but pins runtime SDK 2.7.0; Functions can call containers only from SDK 2.8.0. Set runtime.sdk.version: 2.8.0 in opencloud.yaml.",
+      code: "CONTAINERS_NEED_SDK_2_9", path: "opencloud.yaml",
+      message: "opencloud.yaml declares containers but pins runtime SDK 2.8.0; Functions can call containers only from SDK 2.9.0. Set runtime.sdk.version: 2.9.0 in opencloud.yaml.",
     }]);
     expect(cliBundleWarnings(containerBundle)).toEqual([]);
     expect(cliBundleWarnings(plainBundle)).toEqual([]);
@@ -129,11 +129,11 @@ schemaVersion: 3
 appId: aeea1c71-72a3-4b1d-a32e-213900735091
 runtime:
   sdk:
-    version: 2.8.0
+    version: 2.9.0
 frontend:
   directory: frontend
 `);
-    expect((await buildBundle(plain)).manifest.runtime.sdk.version).toBe("2.8.0");
+    expect((await buildBundle(plain)).manifest.runtime.sdk.version).toBe("2.9.0");
   });
 
   it("omits empty directories so file-only draft reconstruction is byte-identical", async () => {

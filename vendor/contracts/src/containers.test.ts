@@ -159,12 +159,14 @@ describe("compute API errors and money", () => {
     const { waitReason: _omitted, ...withoutReason } = execution;
     expect(computeExecutionSchema.safeParse(withoutReason).success).toBe(false);
   });
-  it("says a waiting job was cancelled because another release replaced its own, before it started", () => {
+  it("says another release replaced this one: a waiting job was cancelled, a stopping copy's Function call refused", () => {
     expect(classifyComputeError("COMPUTE_RELEASE_REPLACED")).toMatchObject({
       statusCode: 409,
       details: { category: "configuration", origin: "policy", phase: "admission", retryable: false, billingDisposition: "none" },
     });
-    expect(classifyComputeError("COMPUTE_RELEASE_REPLACED").message).toMatch(/replaced the one this job was accepted for/);
+    const message = classifyComputeError("COMPUTE_RELEASE_REPLACED").message;
+    expect(message).toMatch(/replaced this one\. A job still waiting to start on it was cancelled/);
+    expect(message).toMatch(/copy of it is stopping and can no longer call Functions/);
     // The customer's own release change: never a platform fault.
     expect(isExpectedComputeError("COMPUTE_RELEASE_REPLACED")).toBe(true);
   });

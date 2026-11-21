@@ -152,15 +152,16 @@ export const computeErrorCatalog = Object.freeze({
   COMPUTE_UNSUPPORTED_IMAGE: error(422, "image", "app", "image", "none", "none", "The image is not supported by this runtime."),
   COMPUTE_IMAGE_TOO_LARGE: error(422, "image", "app", "image", "none", "none", "The image exceeds the supported size limit."),
   COMPUTE_REVISION_UNAVAILABLE: error(409, "authority", "policy", "admission", "none", "none", "The pinned container revision is no longer eligible."),
-  COMPUTE_RELEASE_REPLACED: error(409, "configuration", "policy", "admission", "none", "none", "Another release (a deploy, rollback or dev sync) replaced the one this job was accepted for, so the waiting job was cancelled. Start it again to run it on the current release."),
+  COMPUTE_RELEASE_REPLACED: error(409, "configuration", "policy", "admission", "none", "none", "Another release (a deploy, rollback or dev sync) replaced this one. A job still waiting to start on it was cancelled: start it again to run it on the current release. A worker or service copy of it is stopping and can no longer call Functions: save progress as you go, so the new release's copies carry on from there."),
   COMPUTE_REVISION_CONFLICT: error(409, "configuration", "policy", "admission", "none", "none", "The workload changed. Refresh its control generation."),
   COMPUTE_IDEMPOTENCY_CONFLICT: error(409, "configuration", "app", "admission", "none", "none", "The idempotency key was already used for a different request."),
   COMPUTE_AUTHORITY_REVOKED: error(403, "authority", "policy", "running", "none", "confirmed_usage", "The workload's execution authority was revoked."),
   COMPUTE_CAPABILITY_INVALID: error(401, "authority", "app", "running", "request", "none", "The container capability is missing, malformed or no longer current. Read OPENCLOUD_CONTAINER_CAPABILITY_FILE again for every call."),
   COMPUTE_NOT_LIVE: error(503, "authority", "policy", "startup", "request", "none", "This copy isn't serving yet: its release goes live when the deploy or sync switches to it. Retry shortly.", true),
-  COMPUTE_METRIC_INVALID: error(422, "configuration", "app", "running", "none", "none", "The container recorded a metric it may not record, or one that doesn't match its declaration: declare it in observability.metrics and the container's permissions.metrics, use only declared dimension values, and never record a negative counter increment."),
+  COMPUTE_METRIC_INVALID: error(422, "configuration", "app", "running", "none", "none", "The container recorded a metric it may not record, or a measurement that isn't valid: record each value as a finite number, declare the metric in observability.metrics and the container's permissions.metrics, use only declared dimension values, and never record a negative counter increment. details.field names a malformed field."),
   COMPUTE_METRIC_LIMIT: error(429, "capacity", "policy", "running", "request", "none", "The app reached its custom metric limits (1,200 measurements a minute, 100,000 kept). Record fewer measurements, or retry later.", true),
   COMPUTE_NOT_FOUND: error(404, "authority", "policy", "admission", "none", "none", "The container resource was not found."),
+  COMPUTE_CANCEL_PRODUCER_ONLY: error(403, "authority", "app", "admission", "none", "none", "Only the Function that started this execution can cancel it. Cancel it from that Function, or start and cancel the job in the same Function."),
   COMPUTE_PROTOCOL_UNSUPPORTED: error(422, "configuration", "app", "validation", "none", "none", "This protocol is not supported."),
   COMPUTE_IMAGE_NOT_FOUND: error(422, "image", "app", "image", "none", "none", "The requested container image was not found."),
   COMPUTE_IMAGE_ACCESS_DENIED: error(422, "image", "app", "image", "none", "none", "The registry connection cannot read this image."),
@@ -223,6 +224,8 @@ export const computeErrorDetailsSchema = z.object({
   signal: z.string().regex(/^SIG[A-Z0-9]{1,20}$/).optional(),
   /** The HTTP status a Function answered a container's call with. */
   upstreamStatus: z.number().int().min(100).max(599).optional(),
+  /** The request field a malformed request got wrong, such as `measurements.0.value`. */
+  field: z.string().regex(/^[A-Za-z0-9_.]{1,100}$/).optional(),
 }).strict();
 export const computeErrorSchema = z.object({
   statusCode: z.number().int().min(400).max(599),

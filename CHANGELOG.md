@@ -128,8 +128,8 @@
   grants an account login only `app:read`; `WORKSPACE_NOT_CONNECTED` now says
   so to a signed-in person.
 - `validate`, and `deploy` and `app dev start` or `sync` before uploading,
-  warn with `CONTAINERS_NEED_SDK_2_8` when a manifest declares containers but
-  pins an SDK older than 2.8.0, naming the fix (`runtime.sdk.version: 2.8.0`).
+  warn with `CONTAINERS_NEED_SDK_2_9` when a manifest declares containers but
+  pins an SDK older than 2.9.0, naming the fix (`runtime.sdk.version: 2.9.0`).
   `init` still pins 2.3.0.
 - A manifest with containers, or a container frontend, fails with
   `COMPUTE_NOT_OFFERED` ("This installation doesn't run containers") before
@@ -147,7 +147,7 @@
 - Accept container frontends and routes. A manifest that pins no SDK keeps
   CLI 3.20's default, 2.3.0, which every supported OpenCloud installs, so an
   unpinned app never moves to another SDK on its next deploy; one that
-  declares containers gets 2.8.0, whose Functions can call them. `init`
+  declares containers gets 2.9.0, whose Functions can call them. `init`
   still pins 2.3.0. Pinned SDK versions and static frontends are unchanged.
 - Refresh the shared compute schemas, preserving exact 413/431 request-size
   diagnostics and their no-replay policy, and container metric provenance in

@@ -16,11 +16,11 @@ export * from "../vendor/browser-client/src/index.js";
 export const DEFAULT_SDK_VERSION = "2.3.0";
 
 /**
- * What a manifest that pins no SDK but declares containers gets: SDK 2.8.0,
+ * What a manifest that pins no SDK but declares containers gets: SDK 2.9.0,
  * whose Functions can call the app's containers. OpenCloud releases without
  * containers refuse such a manifest anyway.
  */
-export const CONTAINER_SDK_VERSION = "2.8.0";
+export const CONTAINER_SDK_VERSION = "2.9.0";
 
 /**
  * A live binding the vendored bundler reads while it builds a bundle. Change

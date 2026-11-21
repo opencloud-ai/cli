@@ -138,6 +138,12 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
         if (validation.draftId !== input.draftId || validation.revision !== input.revision) throw new Error("Validation returned a different draft revision");
         await input.journal.checkpointValidation({ ...coordinates, state: "result", validationId: validation.id,
           passed: validation.passed, artifactSha256: validation.artifactSha256 });
+        if (signal.aborted) {
+          const settled = await input.journal.settleValidation("refused");
+          throw new MutationJournalError("VALIDATION_INTERRUPTED",
+            `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}.`,
+            true, settled);
+        }
         return result;
       } catch (caught) {
         if (!(caught instanceof ApiError)) throw caught;
@@ -193,17 +199,25 @@ async function settleEndedValidation(input: ValidationInput, error: unknown, sig
   if (validation?.state === "result" || error instanceof MutationJournalError || error instanceof CliContractError) throw error;
   if (signal.aborted) {
     // Ctrl-C: whatever the abandoned request said, nothing is held back.
-    const settled = await input.journal.settleValidation("waiting");
+    // If OpenCloud had already refused admission (such as APP_LOCK_BUSY) and
+    // this run was only sleeping before trying again, nothing started there.
+    const outcome = validation?.state === "refused" ? "refused" : "waiting";
+    const settled = await input.journal.settleValidation(outcome);
     throw new MutationJournalError("VALIDATION_INTERRUPTED",
-      `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}. OpenCloud may still be validating it; this did not cancel it.`,
+      outcome === "refused"
+        ? `Interrupted while waiting to start validation of draft ${input.draftId}, revision ${input.revision}; nothing started.`
+        : `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}. OpenCloud may still be validating it; this did not cancel it.`,
       true, settled);
   }
-  if (validation?.state === "refused" && error instanceof ApiError && !admissionBusy(error)) {
+  if (validation?.state === "refused" && error instanceof ApiError) {
     await input.journal.settleValidation("refused");
+    if (admissionBusy(error)) {
+      withHint(error, `OpenCloud was too busy to start validating draft ${input.draftId}, revision ${input.revision}, so nothing started. Run the same command again shortly.`);
+    }
     throw error;
   }
-  // OpenCloud may still be validating (or its admission stayed busy): this
-  // run stops waiting, and the same request run again rejoins it.
+  // OpenCloud may still be validating: this run stops waiting, and the same
+  // request run again rejoins it.
   const settled = await input.journal.settleValidation("waiting");
   if (error instanceof DraftValidationWaitTimeoutError) {
     throw new MutationJournalError("DRAFT_VALIDATION_WAIT_TIMEOUT",
@@ -248,6 +262,12 @@ async function validateUnpinned(control: OpenCloudClient, input: ValidationInput
         }
         await input.journal.checkpointValidation({ ...coordinates, state: "result", validationId: result.id,
           passed: result.passed, artifactSha256: result.artifactSha256 });
+        if (signal.aborted) {
+          const settled = await input.journal.settleValidation("refused");
+          throw new MutationJournalError("VALIDATION_INTERRUPTED",
+            `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}.`,
+            true, settled);
+        }
         return result;
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
