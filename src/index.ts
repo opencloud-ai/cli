@@ -431,6 +431,32 @@ async function appReadClient(appId?: string): Promise<OpenCloudClient> {
 }
 
 /**
+ * `operation get` names no app, so the folder's own credential (or --token,
+ * or an Agent session) reads the operation first, as 3.21 did: an expired
+ * account login never stands in its way, and MUTATION_IN_PROGRESS hints
+ * point here. Only when OpenCloud refuses the folder's credential (403 or
+ * 404: another app's operation) does the account login read it, and a
+ * folder that is not connected uses the login directly.
+ */
+async function readOperation(operationId: string): Promise<{ control: OpenCloudClient; started: unknown }> {
+  const route = `/v1/operations/${encoded(operationId)}`;
+  if (program.opts<{ token?: string }>().token || availableSession()?.state === "ready" || !availableWorkspace()) {
+    const control = await appReadClient();
+    return { control, started: await control.get(route) };
+  }
+  const own = client();
+  try {
+    return { control: own, started: await own.get(route) };
+  } catch (error) {
+    if (!(error instanceof ApiError) || (error.status !== 403 && error.status !== 404)) throw error;
+    // The folder's refusal says more than a login that can't be used.
+    const login = await ownerAccountLogin().catch(() => null);
+    if (!login) throw error;
+    return { control: login.control, started: await login.control.get(route) };
+  }
+}
+
+/**
  * A connected directory's own credential, or otherwise the account login, so
  * a person can pull an app into a new directory before connecting it.
  */
@@ -5700,8 +5726,7 @@ operation
   .option("--interval <seconds>", "poll interval", "2")
   .option("--timeout <seconds>", "maximum follow time", "900")
   .action(async (operationId, options) => {
-    const control = await appReadClient();
-    const started = await control.get(`/v1/operations/${encoded(operationId)}`);
+    const { control, started } = await readOperation(String(operationId));
     output(
       await followOperation({
         client: control,

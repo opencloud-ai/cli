@@ -467,7 +467,15 @@ describe("cross-app operation get inside a connected folder", spawning, () => {
     requests = [];
   }
 
-  it("prefers the account login for operation get inside another connected app folder", async () => {
+  function accountFile(context: { home: string }) {
+    const configDirectory =
+      process.platform === "darwin"
+        ? path.join(context.home, "Library", "Application Support", "OpenCloud")
+        : path.join(context.home, "opencloud");
+    return path.join(configDirectory, "credentials", `account-${createHash("sha256").update(apiUrl).digest("hex")}.json`);
+  }
+
+  it("reads another app's operation with the account login once OpenCloud refuses the folder's credential", async () => {
     const context = await workspace("cross-app-op-get", { signedIn: true });
     await connectFolder(context);
     const op = {
@@ -484,19 +492,35 @@ describe("cross-app operation get inside a connected folder", spawning, () => {
     const got = await run(["operation", "get", operationId], context);
     expect(got.status, got.stderr).toBe(0);
     expect(JSON.parse(got.stdout)).toMatchObject({ id: operationId, appId: otherAppId });
-    expect(requests.map((r) => r.headers.authorization)).toEqual(["Bearer synthetic-guidance-access"]);
+    expect(requests.map((r) => r.headers.authorization)).toEqual(["Bearer synthetic-app-a-workspace", "Bearer synthetic-guidance-access"]);
   });
 
-  it("falls back to the connected folder credential for operation get when no account login exists", async () => {
+  it("reads the folder's own operation with its credential while the account login has expired", async () => {
+    const context = await workspace("op-get-expired-login", { signedIn: true });
+    await connectFolder(context);
+    const stored = JSON.parse(await readFile(accountFile(context), "utf8")) as Record<string, unknown>;
+    await writeFile(accountFile(context), JSON.stringify({
+      ...stored,
+      accessExpiresAt: new Date(Date.now() - 900_000).toISOString(),
+      refreshExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+    }), { mode: 0o600 });
+    const op = {
+      id: operationId, appId, deploymentId: null, type: "deploy", state: "succeeded",
+      actorType: "user", actorId: appId, idempotencyKey: "server-redacted", error: null,
+      createdAt: "2026-11-20T05:00:00.000Z", updatedAt: "2026-11-20T05:01:00.000Z",
+    };
+    responder = (request) => request.path === `/v1/operations/${operationId}` ? { status: 200, body: op } : undefined;
+    const got = await run(["operation", "get", operationId], context);
+    expect(got.status, got.stderr).toBe(0);
+    expect(JSON.parse(got.stdout)).toMatchObject({ id: operationId, appId });
+    expect(requests.map((r) => r.headers.authorization)).toEqual(["Bearer synthetic-app-a-workspace"]);
+  });
+
+  it("uses the connected folder credential for operation get when no account login exists", async () => {
     const context = await workspace("op-get-workspace-fallback", { signedIn: true });
     await connectFolder(context, "synthetic-only-workspace");
     // Remove account login file so only workspace binding + credential remains.
-    const configDirectory =
-      process.platform === "darwin"
-        ? path.join(context.home, "Library", "Application Support", "OpenCloud")
-        : path.join(context.home, "opencloud");
-    const account = `account-${createHash("sha256").update(apiUrl).digest("hex")}`;
-    await rm(path.join(configDirectory, "credentials", `${account}.json`));
+    await rm(accountFile(context));
     const op = {
       id: operationId, appId, deploymentId: null, type: "deploy", state: "succeeded",
       actorType: "user", actorId: appId, idempotencyKey: "server-redacted", error: null,
