@@ -1036,7 +1036,12 @@ async function outputDurableMutation(
     control: OpenCloudClient,
     idempotencyKey: string,
   ) => Promise<unknown>,
-  /** After the operation succeeded and its entry settled: what to print instead. */
+  /**
+   * After the operation succeeded, before its entry is settled: what to print
+   * instead. The entry settles once this returns or fails with a definite
+   * verification outcome; a timeout or a lost reply leaves it open, so the
+   * same command run again replays the operation and rejoins this step.
+   */
   finish?: (completed: unknown, control: OpenCloudClient, run: MutationRun) => Promise<unknown>,
 ): Promise<void> {
   const context = input.ownerAccountLogin === true

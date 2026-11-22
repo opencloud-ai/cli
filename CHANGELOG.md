@@ -10,7 +10,28 @@
   character that is not a letter or digit: `s5-otherdesk-deploy-001` and
   `s5-task-abcdefghij` held `sk-` and ten more characters and were refused.
   The refusal now names the kind of credential the key looks like, without
-  repeating it, and says not to put credentials in idempotency keys.
+  repeating it, and says not to put credentials in idempotency keys. A CLI
+  login's access token (`oc_cli_…`), its refresh token (`oc_refresh_…`) and
+  a device code (`oc_device_…`) count as credentials too.
+- Accept SDK 2.9.0 pins. Server SDK 2.9.0 lets a Function call the app's
+  containers. Deploying a 2.9.0 pin needs a platform release that installs
+  it. SDK 2.3.0 remains the default for new and unpinned apps without
+  containers.
+- A failure to reach OpenCloud (a refused or reset connection, a timeout, or
+  `fetch failed`) prints `retryable: true`. A host name DNS can't find
+  (`ENOTFOUND`, usually a mistyped `--api-url`) prints `retryable: false`,
+  as a retry won't find it either.
+- A deploy whose reply was lost (a timeout, a reset connection) or that was
+  killed before it saved the operation is not sent twice. Run again, it sends
+  the deploy again with the same key while its draft still holds the
+  validated revision, waits while OpenCloud is still deploying that draft,
+  and follows the release it started, then verifies it and records it in
+  `.opencloud/base.json`. 3.21 found the draft deployed and stopped with
+  "The source draft is deployed", every time, holding later deploys behind
+  that entry. Refused again with
+  `ACTIVE_DEPLOYMENT_CHANGED` while the draft never deployed, it is settled
+  as any stale copy is; a deployed draft OpenCloud refuses to answer for ends
+  as `DEPLOY_OUTCOME_UNKNOWN`, which says what to check.
 - Validation waits on the in-progress answer OpenCloud actually sends: its
   error filter drops the body's `retryable` flag, which the contract requires,
   so the first "still running" answer used to end the wait with
@@ -45,7 +66,11 @@
   canonical `opencloud.json` (a second validation stopped) is rejoined as it
   is; one whose draft was deployed or discarded elsewhere fails with
   `DRAFT_NOT_OPEN`, sends nothing, and the next run starts from a new draft.
-  `APP_LOCK_BUSY` (nothing started) is sent again while the window lasts. Apps without containers or a frontend build wait at least 90
+  `APP_LOCK_BUSY` (nothing started) is sent again while the window lasts;
+  once OpenCloud said the validation is running (or an earlier run's request
+  may have started it), a wait that ends on `APP_LOCK_BUSY` is settled as
+  waiting, rejoined by the same command, not as "nothing started". Apps
+  without containers or a frontend build wait at least 90
   seconds, not 30, and `DRAFT_VALIDATION_WAIT_TIMEOUT` names the entry and the
   command that rejoins it.
 - Add production and isolated development container commands for jobs, HTTP
@@ -104,7 +129,24 @@
   as `COMPUTE_CRASH_LOOP`) and reason, `verificationId` and `deploymentId`,
   and a hint naming the logs command, `app verify` and the rollback to the
   earlier release; the release stays live. `--no-verify` skips it, and
-  `--no-follow` waits for neither.
+  `--no-follow` waits for neither. A credential without `app:observe` can't
+  run it: the command succeeds and prints `verification: {"state":
+  "skipped", "reason": "MISSING_OBSERVE_SCOPE", "message": …}`.
+  Verification gets its own `--timeout`, counted from when it starts, so an
+  upload, validation or container build before it never uses it up. One
+  still running when that ends fails with `OPERATION_WAIT_TIMEOUT`
+  (retryable, with `operationId`, `verificationId` and `deploymentId`); the
+  release is live and the entry stays open, and the hint gives the same
+  command with its idempotency key, which rejoins that verification and, for
+  a deploy, records the release in `.opencloud/base.json`. A failure the app
+  caused (its containers, or a public app's own answer to `HEAD /`,
+  "returned HTTP 405") is not sent as an error report; a platform fault (no
+  answer to `HEAD /`, a missing artifact) is. A release another deploy, a
+  rollback or a pause replaced before it was verified fails with
+  `VERIFICATION_FAILED` and `verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH"`
+  as the caller's conflict, not an error report; its hint names
+  `deployment list` (and `pull`), and `.opencloud/base.json` keeps the
+  release the copy was based on.
 - A deploy or rollback OpenCloud compensated, which used to print only
   `OPERATION_FAILED` and `DEPLOYMENT_COMPENSATED`, now prints the operation's
   own message and the failed release: `deploymentId` and `deploymentError`
@@ -123,7 +165,10 @@
   either way, or `--force`.
 - `deployment list`, `deployment get`, `operation get` and `operation list`
   work from the app ID alone with the account login when the folder isn't
-  connected (or is connected to another app). Container, log and metric reads
+  connected (or is connected to another app). `operation get`, which names
+  no app, reads with a connected folder's own credential first, as 3.21 did,
+  and uses the account login only when OpenCloud refuses that credential (403
+  or 404), so an expired login doesn't stop it. Container, log and metric reads
   and every change still need the app's connected folder, because OpenCloud
   grants an account login only `app:read`; `WORKSPACE_NOT_CONNECTED` now says
   so to a signed-in person.

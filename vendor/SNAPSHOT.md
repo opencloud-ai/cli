@@ -1,18 +1,19 @@
 # Public platform snapshots
 
-## CLI 3.21.0 container compute
+## CLI 3.22.0 container compute
 
 Public Contracts and control-plane client files needed by this release are
 verbatim snapshots from accepted platform commit `f7249b1c`; the compute price
 catalog, settings projection and installed SDK test are from `0f8cb1b0`.
 The bundler and compute-protocol files are from `78d17bf5`. Browser and Function
-SDK source/tests are from `68650784` (SDK 2.8.0); immutable older SDK artifacts
+SDK source/tests were from `68650784` (SDK 2.8.0), and are now SDK 2.9.0 (see
+the 3.22.0 refreshes at the end of this section); immutable older SDK artifacts
 are untouched. The CLI does not take its default SDK from this snapshot:
 `@opencloud/js` resolves to the CLI-owned `src/sdk-version.ts`, which
 re-exports the vendored browser client but sets `OPEN_CLOUD_SDK_VERSION`, the
 version the vendored bundler gives an unpinned manifest, per manifest: 2.3.0
 (CLI 3.20's default, which every supported OpenCloud installs, and what
-`init` pins), or 2.8.0 when the manifest declares containers.
+`init` pins), or 2.9.0 when the manifest declares containers.
 Unrelated brand and installer snapshots retain their previous provenance.
 
 The final candidate refresh takes `contracts/src/containers.ts` and its tests
@@ -101,6 +102,20 @@ keep the optional `fields` a Function logged. The same files bring the
 platform's compute-off operation views (used by MCP only), Agent Feed v2
 schemas factored into named parts with unchanged shapes, and its current
 draft validation descriptions; no parsed shape the CLI reads changes.
+
+For 3.22.0, after the merge of 3.21.0, `contracts/src/{manifest.ts,manifest.test.ts}`
+add SDK 2.9.0 to the installed manifest versions, and
+`contracts/src/{api.ts,containers.ts,containers.test.ts,control-plane.ts}` and
+`server/src/index.ts` follow the platform's container compute fixes. The
+bundler, `compute-protocol/src/{index.ts,index.test.ts}`,
+`contracts/src/ai-capacity.ts`, the browser client (SDK 2.9.0) and the
+Function SDK (`server/src`, SDK 2.9.0) are then refreshed verbatim from platform
+`2214629ca` (`feat/container-runtime-exploration`), and `server/src/index.ts`
+and its tests again from `4f4d1e023`, whose `decodeBase64` takes linear time.
+Platform `b3c1aaa18` changes none of these files: every file this release
+changed under `vendor/` is byte-identical to that commit. The trimmed
+`package.json` stubs and the brand and installer snapshots keep their earlier
+provenance.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
 `identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from
