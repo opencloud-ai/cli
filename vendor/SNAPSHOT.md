@@ -113,7 +113,7 @@ Function SDK (`server/src`, SDK 2.9.0) are then refreshed verbatim from platform
 `2214629ca` (`feat/container-runtime-exploration`), and `server/src/index.ts`
 and its tests again from `4f4d1e023`, whose `decodeBase64` takes linear time.
 Platform `b3c1aaa18` changes none of these files: every file this release
-changed under `vendor/` is byte-identical to that commit. The trimmed
+changed under `vendor/` is byte-identical to that commit. The bundler (`bundler/src/{index.ts,index.test.ts}`) is then refreshed verbatim from platform `46e12328d`, whose E2E test check reads regular expressions the way JavaScript does; every other vendored file is unchanged from `b3c1aaa18`. The trimmed
 `package.json` stubs and the brand and installer snapshots keep their earlier
 provenance.
 

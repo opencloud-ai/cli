@@ -538,6 +538,22 @@ test("shows live ticks", async ({ ownerPage }) => {
     ["use after an await regex containing a quote", `await /'/; new WebSocket("wss://evil");`, "WebSocket"],
     ["use inside a template after an if-header regex containing a closing brace", 'const s = `${(() => { if (1) /}/ })() || new WebSocket("wss://evil")}`;', "WebSocket"],
     ["use between an object-literal division and another division", 'const a = { n: 1 } / 2; new WebSocket("wss://evil"); const b = 4 / 2;', "WebSocket"],
+    ["use between divisions after an arrow returning a function", 'const f = () => function () {} / 2; new WebSocket("wss://evil"); const z = 1 / 1;', "WebSocket"],
+    ["use between divisions after an arrow returning a class", 'const f = () => class {} / 2; new WebSocket("wss://evil"); const z = 1 / 1;', "WebSocket"],
+    ["use between divisions after an arrow returning an async function", 'const f = () => async function () {} / 2; new WebSocket("wss://evil"); const z = 1 / 1;', "WebSocket"],
+    ["use between divisions after a function with a function default parameter", 'const f = function (a = function () {}) {} / 2; new WebSocket("wss://evil"); 1 / 1;', "WebSocket"],
+    ["use between divisions after a class extending a function", 'const C = class extends function () {} {} / 2; new WebSocket("wss://evil"); 1 / 1;', "WebSocket"],
+    ["use between divisions after a class extending an object literal's member", 'const C = class extends {}.constructor {} / 2; new WebSocket("wss://evil"); 1 / 1;', "WebSocket"],
+    ["use between divisions after a function in a case", 'switch (1) { case function () {} / 2: new WebSocket("wss://evil"); 1 / 1; }', "WebSocket"],
+    ["use between divisions after a function in a for condition", 'for (; function () {} / 2; ); new WebSocket("wss://evil"); 1 / 1;', "WebSocket"],
+    ["use between divisions of a variable named of in a for header", 'const of = 4; for (let i = of / 2; i < 3; i++) { new WebSocket("wss://evil") } 1 / 1;', "WebSocket"],
+    ["use between divisions after ?. before a digit", 'const ok = 1; ok?.5:{} / 2; new WebSocket("wss://evil"); 1/1;', "WebSocket"],
+    ["use after a labelled block's regex containing a quote in a function expression", 'const f = function () { found: { } /\'/; new WebSocket("wss://evil"); //\'\n};', "WebSocket"],
+    ["use after a block on the line after return", 'if (ownerPage) return\n{ } /\'/; new WebSocket("wss://evil"); //\'\n', "WebSocket"],
+    ["use after a function declaration on the line after async", 'const async = 1; const x = async\nfunction g() {} /\'/; new WebSocket("wss://evil"); //\'\n', "WebSocket"],
+    ["use after a U+2028 line terminator after return", 'if (ownerPage) return\u2028/\'/; new WebSocket("wss://evil"); //\'\n', "WebSocket"],
+    ["use after an HTML-like open comment", "ownerPage <!-- '\nnew WebSocket(\"wss://evil\");\n// '\n", "WebSocket"],
+    ["use after an HTML-like close comment", "\n--> '\nnew WebSocket(\"wss://evil\");\n// '\n", "WebSocket"],
   ])("refuses %s, naming the network API", async (_label, statement, name) => {
     const directory = await e2eFixture(
       `import { test, expect } from "@opencloud/test";\ntest("flow", async ({ ownerPage }) => { ${statement} expect(ownerPage); });\n`,
@@ -546,6 +562,85 @@ test("shows live ticks", async ({ ownerPage }) => {
     await expect(buildBundle(directory)).rejects.toThrow(
       `OpenCloud E2E test cannot use ${name}, a direct network API`,
     );
+  });
+
+  it.each([
+    // The runner compiles the test as a strict-mode function body, where
+    // `await` outside an async function is a name.
+    [
+      "a division of a variable named await",
+      'const await = 4;\nconst half = await / 2; new WebSocket("wss://evil"); const one = 1 / 1;\n',
+      /a "\/" straight after await/,
+    ],
+    [
+      "a regular expression after await",
+      'test("flow", async ({ ownerPage }) => { await /x/; expect(ownerPage); });\n',
+      /a "\/" straight after await/,
+    ],
+    [
+      "a block on the line after await",
+      'const await = 4;\nawait\n{ } /\'/; new WebSocket("wss://evil"); //\'\n',
+      /a line ending in await followed by "\{"/,
+    ],
+    [
+      "a quoted string that runs past its line",
+      "const label = 'first\nsecond';\n",
+      /a quoted string runs past the end of its line/,
+    ],
+  ])("refuses %s, which it can't read one way", async (_label, code, message) => {
+    const directory = await e2eFixture(
+      `import { test, expect } from "@opencloud/test";\n${code}test("required", async () => expect(true));\n`,
+    );
+
+    await expect(buildBundle(directory)).rejects.toThrow(
+      /OpenCloud E2E test cannot be checked: /,
+    );
+    await expect(buildBundle(directory)).rejects.toThrow(message);
+  });
+
+  it("accepts regular expressions naming network APIs wherever a statement or expression can start", async () => {
+    const source = `import { test, expect } from "@opencloud/test";
+
+class Feed {}
+/WebSocket/.test("after a class declaration");
+function later() { return /EventSource/; }
+/WebSocket/.test("after a function declaration");
+const make = () => class { static pattern = /WebSocket/; };
+test("names network APIs only in page text", async ({ ownerPage }) => {
+  const text = "it's an EventSource";
+  if (text) /WebSocket/.test(text); else /EventSource/.test(text);
+  switch (text) { case /WebSocket/.source: /XMLHttpRequest/.test(text); break; default: /WebSocket/.test(text); }
+  do /WebSocket/.test(text); while (false) /EventSource/.test(text);
+  const kind = typeof /WebSocket/;
+  const label = \`\${text ? /WebSocket/.source : ""} \${(() => { if (text) return /EventSource/.source; })()}\`;
+  // a comment ended by a carriage return\r/WebSocket/.test(text);
+  for (const of of /WebSocket/.exec(text) ?? []) expect(of);
+  const check = function () { found: { } /WebSocket/.test(text); };
+  const ratio = text ?.5 : /EventSource/.source.length;
+  if (!text) return
+  /WebSocket/.test(text);
+  ownerPage <!-- an old-style comment naming WebSocket
+  await expect(ownerPage.getByText(/WebSocket tick/)).toBeVisible();
+  expect([kind, label, check, ratio, make, later, Feed].length).toBe(7);
+});
+`;
+    const directory = await e2eFixture(source);
+
+    await expect(buildBundle(directory)).resolves.toMatchObject({
+      e2eTest: { source },
+    });
+  });
+
+  it("checks a worst-case 64 KB spec in linear time", async () => {
+    const head = 'import { test, expect } from "@opencloud/test";\ntest("flow", async () => expect(true));\n';
+    // Each "/" tries the longest regular expression literal before it gives up.
+    const source = head + "/[".repeat((OPEN_CLOUD_E2E_TEST_MAX_BYTES - head.length) / 2);
+    const directory = await e2eFixture(source);
+
+    const started = performance.now();
+    await expect(buildBundle(directory)).resolves.toBeDefined();
+    // About 0.2 s; quadratic work on 64 KB would take minutes.
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
 
