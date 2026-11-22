@@ -798,6 +798,13 @@ function isCallerVerificationFailure(
   return true;
 }
 
+function isTerminalVerificationOutcome(error: unknown): boolean {
+  return (
+    (error instanceof CliContractError && error.code === "VERIFICATION_FAILED") ||
+    isDefiniteRefusal(error)
+  );
+}
+
 /**
  * Runs OpenCloud's production verification (verify_app) on a release that
  * just went live, as `app dev promote` does. A worker starts only after the
@@ -815,9 +822,14 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   /** When the command started, for the logs window and timeout budget. */
   since: string;
   startedAtMs: number;
+  /** Active journal run, so verification coordinates survive interruption. */
+  run?: MutationRun | undefined;
 }): Promise<unknown> {
   const { appId } = input;
   const totalBudgetMs = parseBoundedNumber(input.options.timeout, "--timeout", 1, 1_800, false) * 1_000;
+  // Keep the verifyApp request timeout deterministic from --timeout rather than
+  // elapsed wall-clock time; local followOperation still enforces the remaining budget.
+  const verifyRequestTimeoutMs = Math.min(120_000, Math.round(totalBudgetMs));
   const deadlineMs = input.startedAtMs + totalBudgetMs;
   const remainingBeforeStartMs = deadlineMs - Date.now();
   if (remainingBeforeStartMs <= 0) {
@@ -836,19 +848,36 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
     reason: "MISSING_OBSERVE_SCOPE" as const,
     message: "Production verification was skipped because this credential does not have the app:observe scope. Grant app:observe or pass --no-verify.",
   };
-  let started;
-  try {
-    started = await control.call(
-      "verifyApp",
-      { appId },
-      { idempotencyKey: input.idempotencyKey, timeoutMs: Math.min(120_000, remainingBeforeStartMs) },
-    );
-  } catch (error) {
-    if (isObserveScopeDenial(error)) {
-      process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
-      return skippedVerification;
+  let verificationId = input.run?.checkpoint?.verificationId;
+  const checkpointOperationId = input.run?.checkpoint?.verificationOperationId;
+  let started: unknown;
+  if (verificationId && checkpointOperationId) {
+    started = await control.get(`/v1/operations/${encoded(checkpointOperationId)}`);
+  } else {
+    let created;
+    try {
+      created = await control.call(
+        "verifyApp",
+        { appId },
+        { idempotencyKey: input.idempotencyKey, timeoutMs: verifyRequestTimeoutMs },
+      );
+    } catch (error) {
+      if (isObserveScopeDenial(error)) {
+        process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
+        return skippedVerification;
+      }
+      throw error;
     }
-    throw error;
+    verificationId = created.verification.id;
+    started = created;
+    if (input.run && created.operation?.id) {
+      await input.run.checkpointStage({
+        ...(input.run.checkpoint ?? {}),
+        stage: "verifying_production",
+        verificationId,
+        verificationOperationId: created.operation.id,
+      });
+    }
   }
   const remainingForFollowMs = deadlineMs - Date.now();
   const startedOperation = operationFrom(started);
@@ -876,7 +905,7 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   }
   let verification;
   try {
-    verification = await control.call("getVerification", { appId, verificationId: started.verification.id });
+    verification = await control.call("getVerification", { appId, verificationId });
   } catch (error) {
     if (isObserveScopeDenial(error)) {
       process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
@@ -985,8 +1014,15 @@ async function outputDurableMutation(
       options,
     });
     if (finish) {
+      let finished: unknown;
+      try {
+        finished = await finish(completed, context.control, run);
+      } catch (error) {
+        if (isTerminalVerificationOutcome(error)) await run.complete();
+        throw error;
+      }
       await run.complete();
-      await outputAsync(await finish(completed, context.control, run));
+      await outputAsync(finished);
       return;
     }
     await outputAsync(completed);
@@ -5378,27 +5414,41 @@ addOperationOptions(
           options,
         });
         const live = operationFrom(completed)?.state === "succeeded";
-        if (live && draftId) {
-          await recordReleaseBase(
-            context.control,
-            sourceRoot,
-            appId,
-            draftId,
-            (started as { deployment?: unknown }).deployment,
-          );
-        }
-        // The deploy is done; its verification is reported on its own.
-        await run.complete();
+        const settleDeployedRelease = async () => {
+          if (live && draftId) {
+            await recordReleaseBase(
+              context.control,
+              sourceRoot,
+              appId,
+              draftId,
+              (started as { deployment?: unknown }).deployment,
+            );
+          }
+          await run.complete();
+        };
         const deployed =
           (started as { deployment?: { id?: unknown } }).deployment?.id ??
           operationFrom(completed)?.deploymentId;
-        const verification = live && options.follow !== false && options.verify !== false
-          ? await verifyLiveRelease(context.control, {
-            appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
-            deploymentId: typeof deployed === "string" ? deployed : null,
-            previousDeploymentId: expectedActiveDeploymentId ?? null,
-          })
-          : undefined;
+        let verification: unknown;
+        if (live && options.follow !== false && options.verify !== false) {
+          try {
+            verification = await verifyLiveRelease(context.control, {
+              appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
+              deploymentId: typeof deployed === "string" ? deployed : null,
+              previousDeploymentId: expectedActiveDeploymentId ?? null,
+              run,
+            });
+          } catch (error) {
+            // The release is already live; settle base.json and the journal once
+            // verification reaches a definite outcome, while leaving them unsettled
+            // across timeouts, transport failures, or SIGKILL so replay rejoins cleanly.
+            if (isTerminalVerificationOutcome(error)) {
+              await settleDeployedRelease();
+            }
+            throw error;
+          }
+        }
+        await settleDeployedRelease();
         await outputAsync(
           completed && typeof completed === "object" && !Array.isArray(completed)
             ? { ...completed, ...sourceOnlyFields(upload), ...(verification ? { verification } : {}) }
@@ -5806,7 +5856,7 @@ addOperationOptions(
       if (options.follow === false || options.verify === false || operationFrom(completed)?.state !== "succeeded") return completed;
       const verification = await verifyLiveRelease(control, {
         appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
-        deploymentId: String(deploymentId), previousDeploymentId: null,
+        deploymentId: String(deploymentId), previousDeploymentId: null, run,
       });
       return completed && typeof completed === "object" && !Array.isArray(completed) ? { ...completed, verification } : completed;
     },
@@ -6726,7 +6776,7 @@ containers
   .argument("<name>")
   .option("--input <json>", "JSON input, at most 64 KiB", "{}")
   .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
-  .requiredOption("--idempotency-key <key>", "stable key for this logical submission")
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission (required)")
   .action(async (appId, name, options) => {
     const scope = { appId: String(appId) };
     const input = computeInput("submitContainerJob", { ...scope, name: String(name),
@@ -6917,7 +6967,7 @@ devContainers
   .argument("<name>")
   .option("--input <json>", "JSON input, at most 64 KiB", "{}")
   .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
-  .requiredOption("--idempotency-key <key>", "stable key for this logical submission")
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission (required)")
   .action(async (directory, name, options) => {
     const sourceRoot = callerPath(directory);
     const state = await requireDevState(sourceRoot);

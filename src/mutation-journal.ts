@@ -106,6 +106,8 @@ export interface PendingMutation {
   draftId?: string;
   revision?: number;
   sessionId?: string;
+  /** True when the reused key conflicts only because .opencloud/base.json moved to another release. */
+  baseDeploymentChanged?: boolean;
 }
 
 export class MutationJournalError extends Error {
@@ -139,7 +141,44 @@ function rejoinsValidation(entry: MutationJournalEntry, commandId: string, scope
     entry.commandId === commandId && entry.scopeDigest === scopeDigest && entry.requestDigest === requestDigest;
 }
 
-function pendingMutation(entry: MutationJournalEntry, appId: string): PendingMutation {
+function expectedActiveDeploymentIdOf(safeRequest: unknown): string | undefined {
+  if (!safeRequest || typeof safeRequest !== "object" || Array.isArray(safeRequest)) return undefined;
+  const value = (safeRequest as Record<string, unknown>).expectedActiveDeploymentId;
+  return typeof value === "string" && UUID.test(value) ? value : undefined;
+}
+
+/**
+ * True when an unfinished deploy or app dev start entry differs from the new
+ * request only because .opencloud/base.json advanced to another release.
+ */
+function differsOnlyByExpectedBaseDeployment(
+  entry: MutationJournalEntry,
+  spec: MutationIntentSpec,
+  scopeDigest: string,
+): boolean {
+  if (entry.state === "completed") return false;
+  if (entry.commandId !== spec.commandId || entry.scopeDigest !== scopeDigest) return false;
+  if (!spec.safeRequest || typeof spec.safeRequest !== "object" || Array.isArray(spec.safeRequest)) return false;
+  const currentRequest = spec.safeRequest as Record<string, unknown>;
+  const currentBase = expectedActiveDeploymentIdOf(currentRequest);
+  if (currentBase === undefined) return false;
+  const recordedBase = entry.checkpoint?.baseDeploymentId;
+  const rest: Record<string, unknown> = { ...currentRequest };
+  delete rest.expectedActiveDeploymentId;
+  if (typeof recordedBase === "string" && recordedBase !== currentBase) {
+    return mutationDigest({ ...rest, expectedActiveDeploymentId: recordedBase }) === entry.requestDigest;
+  }
+  if (recordedBase === undefined || recordedBase === null) {
+    return mutationDigest(rest) === entry.requestDigest;
+  }
+  return false;
+}
+
+function pendingMutation(
+  entry: MutationJournalEntry,
+  appId: string,
+  options: { baseDeploymentChanged?: boolean } = {},
+): PendingMutation {
   const checkpoint = entry.checkpoint;
   const operationId = entry.operationId ?? checkpoint?.deploymentOperationId ?? checkpoint?.operationId;
   const draftId = checkpoint?.draftId ?? checkpoint?.validation?.draftId;
@@ -155,6 +194,7 @@ function pendingMutation(entry: MutationJournalEntry, appId: string): PendingMut
     ...(draftId ? { draftId } : {}),
     ...(revision ? { revision } : {}),
     ...(checkpoint?.sessionId ? { sessionId: checkpoint.sessionId } : {}),
+    ...(options.baseDeploymentChanged ? { baseDeploymentChanged: true } : {}),
   };
 }
 
@@ -1283,8 +1323,14 @@ export class MutationRun {
   }
 
   async checkpointStage(checkpoint: SafeMutationCheckpoint): Promise<void> {
-    // Workflow stages cannot erase a validation dispatch/progress receipt.
-    await this.saveCheckpoint({ ...checkpoint, ...(this.checkpoint?.validation ? { validation: this.checkpoint.validation } : {}) });
+    // Workflow stages cannot erase a validation dispatch/progress receipt or initial base release.
+    await this.saveCheckpoint({
+      ...(this.checkpoint?.baseDeploymentId !== undefined
+        ? { baseDeploymentId: this.checkpoint.baseDeploymentId }
+        : {}),
+      ...checkpoint,
+      ...(this.checkpoint?.validation ? { validation: this.checkpoint.validation } : {}),
+    });
   }
 
   async checkpointValidation(validation: SafeValidationCheckpoint): Promise<void> {
@@ -2140,7 +2186,8 @@ export class MutationJournal {
         ) {
           // Name the request that holds this target, so it can be resumed with
           // its own key or checked; the CLI adds the exact commands.
-          const pending = pendingMutation(entry, this.binding.appId);
+          const baseDeploymentChanged = differsOnlyByExpectedBaseDeployment(entry, spec, scopeDigest);
+          const pending = pendingMutation(entry, this.binding.appId, { baseDeploymentChanged });
           const unknown = entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN";
           if (explicitKey !== null && entry.idempotencyKey === explicitKey) {
             // The given key already names another request. That never clears
@@ -2152,7 +2199,9 @@ export class MutationJournal {
                 ? `Idempotency key ${entry.idempotencyKey} was already used for a different \`${entry.commandId}\` request, which finished. No request was started.`
                 : entry.state === "unknown"
                   ? `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that may have taken effect (${unknown}). No request was started.`
-                  : `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that has not finished (state ${entry.state}). No request was started.`,
+                  : baseDeploymentChanged
+                    ? `Idempotency key ${entry.idempotencyKey} was recorded against an earlier workspace base release (.opencloud/base.json has since changed), so this \`${entry.commandId}\` request differs from it (state ${entry.state}). No request was started.`
+                    : `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that has not finished (state ${entry.state}). No request was started.`,
               false,
               pending,
             );
@@ -2174,6 +2223,7 @@ export class MutationJournal {
       } else {
         const now = this.timestamp();
         const entryId = randomUUID();
+        const initialBaseDeploymentId = expectedActiveDeploymentIdOf(spec.safeRequest);
         entry = {
           schemaVersion: 1,
           entryId,
@@ -2188,7 +2238,9 @@ export class MutationJournal {
           attemptCount: 0,
           attemptedAt: null,
           operationId: null,
-          checkpoint: null,
+          checkpoint: initialBaseDeploymentId
+            ? { stage: "prepared", baseDeploymentId: initialBaseDeploymentId }
+            : null,
           unknownCode: null,
           createdAt: now,
           updatedAt: now,

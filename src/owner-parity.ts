@@ -789,6 +789,32 @@ function deploymentErrorFields(deployment: { id: string; error: Record<string, u
   };
 }
 
+const RETRYABLE_NETWORK_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+function isNetworkTransportError(
+  error: unknown,
+  cause: { code: string; message: string | null } | null,
+): boolean {
+  if (cause && RETRYABLE_NETWORK_CODES.has(cause.code)) return true;
+  if (error && typeof error === "object") {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && RETRYABLE_NETWORK_CODES.has(code)) return true;
+  }
+  return error instanceof TypeError && error.message === "fetch failed";
+}
+
 function structuredFields(error: unknown): Record<string, unknown> {
   if (error instanceof ApiError) {
     return apiErrorFields(error);
@@ -834,10 +860,14 @@ function structuredFields(error: unknown): Record<string, unknown> {
     ? issueSummary("The input", issues)
     : error instanceof Error ? error.message : (candidate.message ?? error);
   const details = error instanceof CliContractError && error.details ? inputDetails(error.details) : null;
+  const retryable =
+    typeof candidate.retryable === "boolean"
+      ? candidate.retryable
+      : isNetworkTransportError(error, cause);
   return {
     code: safeCode(candidate.code, "CLI_ERROR"),
     message: redactMessage(message),
-    retryable: candidate.retryable === true,
+    retryable,
     ...(details ? { details } : {}),
     ...(issues?.length
       ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }

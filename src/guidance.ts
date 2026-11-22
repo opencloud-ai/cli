@@ -29,6 +29,7 @@ export interface PendingView {
   draftId?: string | undefined;
   revision?: number | undefined;
   sessionId?: string | undefined;
+  baseDeploymentChanged?: boolean | undefined;
 }
 
 /** The command that failed: its route below the program and its arguments in order. */
@@ -66,6 +67,15 @@ export function journalHint(code: string, pending: PendingView, running: Running
   if (code === "IDEMPOTENCY_KEY_REUSED") {
     // The key is taken whatever happened to its request: this one needs a new key.
     if (pending.state === "completed") return "Use a new --idempotency-key for this request.";
+    if (pending.baseDeploymentChanged) {
+      const list = quoted(commandLine(["deployment", "list"], [pending.appId]));
+      const directory = running.args.get("directory");
+      const pull = directory !== undefined ? quoted(commandLine(["pull"], [directory])) : "`opencloud pull <directory>`";
+      const followUp = pending.command === "opencloud app dev start"
+        ? "if you still want to start a development session"
+        : "if you still want to deploy a new release";
+      return `Another deployment updated this workspace's base release (.opencloud/base.json) since key ${pending.idempotencyKey} was recorded. Inspect live releases with ${list}, run ${pull} if needed, and use a new --idempotency-key ${followUp}.`;
+    }
     if (pending.state === "unknown") {
       return `Check whether that request took effect with ${check}. Use a new --idempotency-key for this request.`;
     }

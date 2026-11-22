@@ -1540,4 +1540,128 @@ describe("mutation journal", () => {
       }),
     ).rejects.toMatchObject({ code: "UNSAFE_MUTATION_JOURNAL_PATH" });
   });
+
+  it("flags baseDeploymentChanged when an unfinished deploy or app dev start key conflicts only on expectedActiveDeploymentId", async () => {
+    const directory = path.join(await temporaryDirectory(), "base-changed");
+    const journal = await MutationJournal.open({
+      directory,
+      apiUrl: API_URL,
+      appId: APP_ID,
+    });
+    const base1 = "11111111-1111-4111-8111-1111111111a1";
+    const base2 = "11111111-1111-4111-8111-1111111111a2";
+    const artifactSha256 = "a".repeat(64);
+    const otherArtifactSha256 = "b".repeat(64);
+
+    // 1. Base moved from base1 -> base2 after an interrupted deploy with checkpoint updates.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base1 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async (run) => {
+          await run.checkpointStage({ stage: "draft_ready", artifactSha256, draftId: OTHER_APP_ID });
+          throw new Error("simulated crash");
+        },
+      ),
+    ).rejects.toThrow("simulated crash");
+
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      pending: expect.objectContaining({
+        command: "opencloud deploy",
+        idempotencyKey: "deploy-base-move-1",
+        baseDeploymentChanged: true,
+      }),
+    });
+
+    // If the artifact ALSO changed, it is not solely a base-release change.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256: otherArtifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toSatisfy((error: MutationJournalError) =>
+      error.code === "IDEMPOTENCY_KEY_REUSED" && error.pending?.baseDeploymentChanged !== true,
+    );
+
+    // 2. Base moved from absent (no .opencloud/base.json) -> base2 on app dev start.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud app dev start",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "dev-start", artifactSha256 },
+          explicitIdempotencyKey: "dev-start-base-move-1",
+        },
+        async (run) => {
+          await run.markAttempted();
+          throw new Error("simulated crash");
+        },
+      ),
+    ).rejects.toThrow("simulated crash");
+
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud app dev start",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "dev-start", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "dev-start-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      pending: expect.objectContaining({
+        command: "opencloud app dev start",
+        idempotencyKey: "dev-start-base-move-1",
+        baseDeploymentChanged: true,
+      }),
+    });
+
+    // 3. A completed deploy does NOT set baseDeploymentChanged when re-run after advancing base.json.
+    await journal.run(
+      {
+        commandId: "opencloud deploy",
+        safeScope: { appId: APP_ID },
+        safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base1 },
+        explicitIdempotencyKey: "deploy-base-done-1",
+      },
+      async (run) => run.complete(),
+    );
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-done-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toSatisfy((error: MutationJournalError) =>
+      error.code === "IDEMPOTENCY_KEY_REUSED" &&
+      error.pending?.state === "completed" &&
+      error.pending?.baseDeploymentChanged !== true,
+    );
+  });
 });

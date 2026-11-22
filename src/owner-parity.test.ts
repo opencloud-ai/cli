@@ -544,7 +544,7 @@ describe("owner-parity CLI helpers", () => {
     expect(output.error).toMatchObject({
       code: "CLI_ERROR",
       message: "fetch failed",
-      retryable: false,
+      retryable: true,
       cause: {
         code: "ECONNREFUSED",
         message: "connect ECONNREFUSED 127.0.0.1:4010 [REDACTED]",
@@ -564,5 +564,35 @@ describe("owner-parity CLI helpers", () => {
       message: "plain",
       retryable: false,
     });
+  });
+
+  it("marks network transport failures retryable and leaves non-transport CLI errors non-retryable", () => {
+    expect(structuredCliError(new TypeError("fetch failed")).error.retryable).toBe(true);
+    for (const code of [
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "ENOTFOUND",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT",
+    ]) {
+      const wrapped = new TypeError("fetch failed", {
+        cause: Object.assign(new Error(`transport ${code}`), { code }),
+      });
+      expect(structuredCliError(wrapped).error.retryable, `wrapped ${code}`).toBe(true);
+      const direct = Object.assign(new Error(`direct ${code}`), { code });
+      expect(structuredCliError(direct).error.retryable, `direct ${code}`).toBe(true);
+    }
+    expect(structuredCliError(new TypeError("Cannot read properties of undefined")).error.retryable).toBe(false);
+    expect(
+      structuredCliError(new CliContractError("DOWNLOAD_INTEGRITY_FAILED", "mismatch", {
+        cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+      })).error.retryable,
+    ).toBe(false);
   });
 });

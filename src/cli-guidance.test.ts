@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -101,11 +101,36 @@ async function workspace(name: string, options: { signedIn?: boolean } = {}) {
   return { home, folder };
 }
 
+/** Simulates 60s passing after SIGKILL so proper-lockfile reclaims the crashed process's lock immediately. */
+async function ageJournalLocks(roots: string[]): Promise<void> {
+  const past = new Date(Date.now() - 60_000);
+  const visit = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.endsWith(".lock")) {
+          await utimes(full, past, past);
+        } else {
+          await visit(full);
+        }
+      }
+    }
+  };
+  for (const rootDir of roots) await visit(rootDir);
+}
+
 async function run(
   args: string[],
   context: { home: string; folder: string },
   env: Record<string, string> = {},
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  onChild?: (child: ReturnType<typeof spawn>) => void,
+): Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (!name.startsWith("OPENCLOUD_") && !["INIT_CWD", "DO_NOT_TRACK"].includes(name)) {
@@ -120,15 +145,16 @@ async function run(
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  onChild?.(child);
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-  const status = await new Promise<number | null>((resolve, reject) => {
+  const outcome = await new Promise<{ status: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", resolve);
+    child.once("close", (status, signal) => resolve({ status, signal }));
   });
-  return { status, stdout, stderr };
+  return { ...outcome, stdout, stderr };
 }
 
 /**
@@ -1020,5 +1046,276 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     expect(error.code).toBe("ACTIVE_DEPLOYMENT_CHANGED");
     expect(error.hint).toContain(`opencloud pull ${directory}`);
     expect(error.hint).toContain(`--deployment ${otherDeploymentId} --merged`);
+  });
+
+  it("replays deployment rollback cleanly when killed mid-verify_app or after a transient verifyApp failure", async () => {
+    const context = await workspace("rollback-verify-kill-replay");
+    const rollbackKey = "rollback-verify-replay-k1";
+    const rollbackOpId = "40000000-0000-4000-8000-000000000091";
+    let verifyPostCount = 0;
+    let verifyOpState: "running" | "succeeded" = "running";
+    let currentChild: ReturnType<typeof spawn> | null = null;
+    let killOnVerifyPoll = true;
+    const rollbackKeys: string[] = [];
+
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/deployments/${deployedId}/rollback`) {
+        rollbackKeys.push(String(request.headers["idempotency-key"]));
+        return {
+          status: 201,
+          body: {
+            operation: { id: rollbackOpId, appId, deploymentId: deployedId, type: "rollback", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        verifyPostCount += 1;
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "queued", phases: [], diagnostics: [], startedAt: now, finishedAt: null, createdAt: now },
+            operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "running", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/operations/${verifyOpId1}`) {
+        if (killOnVerifyPoll) {
+          killOnVerifyPoll = false;
+          currentChild?.kill("SIGKILL");
+        }
+        return {
+          status: 200,
+          body: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: verifyOpState, actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId1}`) {
+        return {
+          status: 200,
+          body: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+        };
+      }
+      return undefined;
+    };
+
+    // First run gets SIGKILL while polling verify_app.
+    const killed = await run(
+      ["--token", "synthetic-token", "deployment", "rollback", appId, deployedId, "--idempotency-key", rollbackKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+      {},
+      (child) => { currentChild = child; },
+    );
+    expect(killed.signal).toBe("SIGKILL");
+    expect(verifyPostCount).toBe(1);
+    await ageJournalLocks([context.home, context.folder]);
+
+    // Re-running the exact same rollback command replays rollback and joins the checkpointed verify_app op cleanly.
+    verifyOpState = "succeeded";
+    const replayed = await run(
+      ["--token", "synthetic-token", "deployment", "rollback", appId, deployedId, "--idempotency-key", rollbackKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+    );
+    expect(replayed.status, replayed.stderr).toBe(0);
+    expect(rollbackKeys).toEqual([rollbackKey, rollbackKey]);
+    expect(verifyPostCount).toBe(1);
+    expect(JSON.parse(replayed.stdout)).toMatchObject({
+      operation: { id: rollbackOpId, state: "succeeded" },
+      verification: { id: verifyId1, state: "passed" },
+    });
+
+    // Also verify replay when verifyApp failed with a transient 502 before checkpointing:
+    // the second attempt sends the exact same child idempotency-key and succeeds cleanly.
+    const transientKey = "rollback-verify-transient-k2";
+    const transientVerifyKeys: string[] = [];
+    let transientVerifyAttempts = 0;
+    responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/deployments/${deployedId}/rollback`) {
+        return {
+          status: 201,
+          body: {
+            operation: { id: rollbackOpId, appId, deploymentId: deployedId, type: "rollback", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        transientVerifyAttempts += 1;
+        transientVerifyKeys.push(String(request.headers["idempotency-key"]));
+        if (transientVerifyAttempts === 1) {
+          return { status: 502, body: { code: "BAD_GATEWAY", message: "transient upstream error" } };
+        }
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId2, appId, deploymentId: deployedId, operationId: verifyOpId2, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+            operation: { id: verifyOpId2, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId2}`) {
+        return {
+          status: 200,
+          body: { id: verifyId2, appId, deploymentId: deployedId, operationId: verifyOpId2, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+        };
+      }
+      return undefined;
+    };
+    const transientFirst = await run(
+      ["--token", "synthetic-token", "deployment", "rollback", appId, deployedId, "--idempotency-key", transientKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+    );
+    expect(transientFirst.status).toBe(1);
+    const transientRetry = await run(
+      ["--token", "synthetic-token", "deployment", "rollback", appId, deployedId, "--idempotency-key", transientKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+    );
+    expect(transientRetry.status, transientRetry.stderr).toBe(0);
+    expect(transientVerifyKeys).toHaveLength(2);
+    expect(transientVerifyKeys[0]).toBe(transientVerifyKeys[1]);
+  });
+
+  it("defers base.json and journal completion until after verify_app so SIGKILL during verify_app replays without IDEMPOTENCY_KEY_REUSED", async () => {
+    const context = await workspace("deploy-verify-kill-replay");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    await mkdir(path.join(directory, ".opencloud"), { recursive: true });
+    const baseFile = path.join(directory, ".opencloud", "base.json");
+    await writeFile(baseFile, JSON.stringify({
+      schemaVersion: 1, apiUrl, appId, deploymentId: baseDeploymentId, version: "app-20261121-0",
+      artifactSha256: localDigest, sourceSha256: null, files: {}, recordedAt: now,
+    }));
+
+    const deployKey = "deploy-verify-kill-k1";
+    let currentChild: ReturnType<typeof spawn> | null = null;
+    let killOnVerifyPoll = true;
+    let verifyOpState: "running" | "succeeded" = "running";
+    let draftCreateCount = 0;
+    let verifyPostCount = 0;
+    const deployKeys: string[] = [];
+
+    const inner = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => {
+        verifyPostCount += 1;
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "queued", phases: [], diagnostics: [], startedAt: now, finishedAt: null, createdAt: now },
+            operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "running", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      },
+      verifyOp: () => {
+        if (killOnVerifyPoll) {
+          killOnVerifyPoll = false;
+          currentChild?.kill("SIGKILL");
+        }
+        return { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: verifyOpState, actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now };
+      },
+      verificationRecord: () => ({
+        id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now,
+      }),
+    });
+    responder = (request) => {
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts`) draftCreateCount += 1;
+      if (request.method === "POST" && request.path.startsWith(`/v1/apps/${appId}/drafts/${draftId}/deploy`)) {
+        deployKeys.push(String(request.headers["idempotency-key"]));
+      }
+      return inner(request);
+    };
+
+    const killed = await run(
+      ["--token", "synthetic-token", "deploy", directory, "--idempotency-key", deployKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+      {},
+      (child) => { currentChild = child; },
+    );
+    expect(killed.signal).toBe("SIGKILL");
+    // .opencloud/base.json must still name the old baseDeploymentId before verify_app finishes.
+    expect((JSON.parse(await readFile(baseFile, "utf8")) as { deploymentId: string }).deploymentId).toBe(baseDeploymentId);
+    await ageJournalLocks([context.home, context.folder]);
+
+    // Re-running the exact same deploy command replays cleanly with zero IDEMPOTENCY_KEY_REUSED.
+    verifyOpState = "succeeded";
+    const replayed = await run(
+      ["--token", "synthetic-token", "deploy", directory, "--idempotency-key", deployKey, "--interval", "0.05", "--timeout", "10"],
+      context,
+    );
+    expect(replayed.status, replayed.stderr).toBe(0);
+    expect(replayed.stderr).not.toContain("IDEMPOTENCY_KEY_REUSED");
+    expect(draftCreateCount).toBe(1);
+    expect(verifyPostCount).toBe(1);
+    expect(deployKeys).toHaveLength(2);
+    expect(deployKeys[0]).toBe(deployKeys[1]);
+    expect(JSON.parse(replayed.stdout)).toMatchObject({
+      deployment: { id: deployedId },
+      verification: { id: verifyId1, state: "passed" },
+    });
+    // Now .opencloud/base.json reflects the live deployed release.
+    expect((JSON.parse(await readFile(baseFile, "utf8")) as { deploymentId: string }).deploymentId).toBe(deployedId);
+  });
+
+  it("explains that another deployment updated .opencloud/base.json instead of printing a self-contradictory IDEMPOTENCY_KEY_REUSED hint", async () => {
+    const context = await workspace("deploy-base-moved-hint");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    await mkdir(path.join(directory, ".opencloud"), { recursive: true });
+    const baseFile = path.join(directory, ".opencloud", "base.json");
+    await writeFile(baseFile, JSON.stringify({
+      schemaVersion: 1, apiUrl, appId, deploymentId: baseDeploymentId, version: "app-20261121-0",
+      artifactSha256: localDigest, sourceSha256: null, files: {}, recordedAt: now,
+    }));
+
+    // Terminal 1 is interrupted mid-deploy after creating the draft with baseDeploymentId.
+    const inner = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => ({
+        status: 201,
+        body: {
+          verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now },
+          operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+        },
+      }),
+      verificationRecord: () => ({
+        id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now,
+      }),
+    });
+    let failFirstDeploy = true;
+    responder = (request) => {
+      if (failFirstDeploy && request.method === "POST" && request.path.startsWith(`/v1/apps/${appId}/drafts/${draftId}/deploy`)) {
+        failFirstDeploy = false;
+        return { status: 502, body: { code: "BAD_GATEWAY", message: "interrupted" } };
+      }
+      return inner(request);
+    };
+    const terminal1 = await run(["--token", "synthetic-token", "deploy", directory, "--idempotency-key", "deploy-t1-k1"], context);
+    expect(terminal1.status).toBe(1);
+
+    // Terminal 2 completes another deploy in the same workspace, advancing .opencloud/base.json to deployedId.
+    const terminal2 = await run(["--token", "synthetic-token", "deploy", directory, "--idempotency-key", "deploy-t2-k2"], context);
+    expect(terminal2.status, terminal2.stderr).toBe(0);
+    expect((JSON.parse(await readFile(baseFile, "utf8")) as { deploymentId: string }).deploymentId).toBe(deployedId);
+
+    // Re-running Terminal 1's command now gets an accurate hint (not "run it again with the input it had").
+    const retryT1 = await run(["--token", "synthetic-token", "deploy", directory, "--idempotency-key", "deploy-t1-k1"], context);
+    expect(retryT1.status).toBe(1);
+    const error = JSON.parse(retryT1.stderr.trim().split("\n").at(-1)!).error as { code: string; hint?: string };
+    expect(error.code).toBe("IDEMPOTENCY_KEY_REUSED");
+    expect(error.hint).toContain(".opencloud/base.json");
+    expect(error.hint).toContain(`opencloud deployment list ${appId}`);
+    expect(error.hint).toContain(`opencloud pull ${directory}`);
+    expect(error.hint).toContain("--idempotency-key");
+    expect(error.hint).not.toContain("To finish that request, run it again");
+  });
+
+  it("marks --idempotency-key as required in containers run --help and app dev containers run --help", async () => {
+    const context = await workspace("containers-run-help");
+    const prodHelp = await run(["containers", "run", "--help"], context);
+    expect(prodHelp.status, prodHelp.stderr).toBe(0);
+    expect(prodHelp.stdout).toMatch(/--idempotency-key <key>.*\(required\)/);
+
+    const devHelp = await run(["app", "dev", "containers", "run", "--help"], context);
+    expect(devHelp.status, devHelp.stderr).toBe(0);
+    expect(devHelp.stdout).toMatch(/--idempotency-key <key>.*\(required\)/);
   });
 });

@@ -40,6 +40,36 @@ describe("what to run after the mutation journal stopped a command", () => {
     expect(journalHint("IDEMPOTENCY_KEY_REUSED", { ...job, state: "unknown" }, run)).toBe(
       `Check whether that request took effect with \`opencloud operation list ${appId}\`. Use a new --idempotency-key for this request.`,
     );
+    expect(
+      journalHint(
+        "IDEMPOTENCY_KEY_REUSED",
+        { command: "opencloud deploy", idempotencyKey: "deploy-k1", state: "attempted", appId, baseDeploymentChanged: true },
+        { route: ["deploy"], args: new Map([["directory", "./my app"]]) },
+      ),
+    ).toBe(
+      `Another deployment updated this workspace's base release (.opencloud/base.json) since key deploy-k1 was recorded. ` +
+      `Inspect live releases with \`opencloud deployment list ${appId}\`, run \`opencloud pull './my app'\` if needed, ` +
+      "and use a new --idempotency-key if you still want to deploy a new release.",
+    );
+    expect(
+      journalHint(
+        "IDEMPOTENCY_KEY_REUSED",
+        { command: "opencloud app dev start", idempotencyKey: "dev-start-k1", state: "prepared", appId, baseDeploymentChanged: true },
+        devStart,
+      ),
+    ).toBe(
+      `Another deployment updated this workspace's base release (.opencloud/base.json) since key dev-start-k1 was recorded. ` +
+      `Inspect live releases with \`opencloud deployment list ${appId}\`, run \`opencloud pull 'my app'\` if needed, ` +
+      "and use a new --idempotency-key if you still want to start a development session.",
+    );
+    // A completed entry still reports the standard completed hint even if baseDeploymentChanged is set.
+    expect(
+      journalHint(
+        "IDEMPOTENCY_KEY_REUSED",
+        { command: "opencloud deploy", idempotencyKey: "deploy-k1", state: "completed", appId, baseDeploymentChanged: true },
+        { route: ["deploy"], args: new Map([["directory", "."]]) },
+      ),
+    ).toBe("Use a new --idempotency-key for this request.");
   });
 
   it("says how to find out whether an unconfirmed apply or validation took effect", () => {
