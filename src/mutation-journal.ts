@@ -41,8 +41,12 @@ const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 const CREDENTIAL_SHAPES: ReadonlyArray<readonly [kind: string, shape: RegExp]> = [
   ["an OpenCloud app-owner credential (oc_owner_…)", /oc_owner_[A-Za-z0-9_-]{8,}/],
   [
-    "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_platform_cli_…, or oc_run_…)",
-    /(?<![A-Za-z0-9])oc_(?:app|agent|oauth|provisional|platform_cli|run)_[A-Za-z0-9_-]{16,}/,
+    "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_cli_…, oc_platform_cli_…, or oc_run_…)",
+    /(?<![A-Za-z0-9])oc_(?:app|agent|oauth|provisional|cli|platform_cli|run)_[A-Za-z0-9_-]{16,}/,
+  ],
+  [
+    "an OpenCloud refresh token or device code (oc_refresh_… or oc_device_…)",
+    /(?<![A-Za-z0-9])oc_(?:refresh|device)_[A-Za-z0-9_-]{16,}/,
   ],
   ["an API secret key (sk-…)", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}/],
   ["a Stripe secret key", /(?<![A-Za-z0-9])[rs]k_(?:live|test)_[A-Za-z0-9]{24,}/],

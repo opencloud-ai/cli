@@ -1270,7 +1270,8 @@ describe("mutation journal", () => {
     // Built from parts, so no complete synthetic secret sits in the source.
     const synthetic = "Synthetic0123456789".repeat(3);
     const openCloudAccessKind =
-      "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_platform_cli_…, or oc_run_…)";
+      "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_cli_…, oc_platform_cli_…, or oc_run_…)";
+    const openCloudSignInKind = "an OpenCloud refresh token or device code (oc_refresh_… or oc_device_…)";
     for (const [key, kind] of [
       [`s${"k-"}proj-${synthetic}`, "an API secret key (sk-…)"],
       [`deploy:s${"k-"}${synthetic}`, "an API secret key (sk-…)"],
@@ -1279,8 +1280,12 @@ describe("mutation journal", () => {
       [`oc_${"agent_"}${synthetic}`, openCloudAccessKind],
       [`oc_${"oauth_"}${synthetic}`, openCloudAccessKind],
       [`oc_${"provisional_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"cli_"}${synthetic}`, openCloudAccessKind],
+      [`retry:oc_${"cli_"}${synthetic}`, openCloudAccessKind],
       [`oc_${"platform_cli_"}${synthetic}`, openCloudAccessKind],
       [`oc_${"run_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"refresh_"}${synthetic}`, openCloudSignInKind],
+      [`oc_${"device_"}${synthetic}`, openCloudSignInKind],
       [`s${"k_"}live_${synthetic}`, "a Stripe secret key"],
       [`gh${"p_"}${"A1".repeat(18)}`, "a GitHub token"],
       [`ey${"J"}hbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl`, "a JSON Web Token"],
