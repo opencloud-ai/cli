@@ -171,7 +171,13 @@ rollback`) runs OpenCloud's production verification and prints it as
 whether the release runs. A failed verification exits non-zero with
 `VERIFICATION_FAILED`, its code (such as `COMPUTE_CRASH_LOOP`) and reason,
 and a hint naming the logs, `app verify` and the rollback; the release stays
-live. `--no-verify` skips it. For normal agent work, prefer the isolated development and
+live. `--no-verify` skips it. Verification has its own `--timeout`, counted
+from when it starts; one still running then fails with
+`OPERATION_WAIT_TIMEOUT`, and the same command run again (the hint gives it
+with its idempotency key) rejoins it and records the release in
+`.opencloud/base.json`. A deploy interrupted after it was sent (a lost reply,
+a killed process) is followed, not sent again, when the same command runs
+again. For normal agent work, prefer the isolated development and
 verified-promotion flow below.
 
 New projects use manifest schema 3 and omit a top-level release version;
