@@ -120,9 +120,13 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
   const deadline = Number.isFinite(kept) && kept - Date.now() >= MINIMUM_REMAINING_MS
     ? Math.min(kept, Date.now() + timeoutMs)
     : Date.now() + timeoutMs;
+  // Whether OpenCloud may be running this validation: it said so, or an
+  // earlier run's request may have started it. APP_LOCK_BUSY then says only
+  // that the latest request started nothing, not that nothing is running.
+  let mayBeRunning = pending !== null;
   if (pending?.state === "progress") {
     const delayMs = Math.max(0, Date.parse(pending.retryNotBefore) - Date.now());
-    if (delayMs) await sleep(delayMs, signal).catch((error: unknown) => settleEndedValidation(input, error, signal));
+    if (delayMs) await sleep(delayMs, signal).catch((error: unknown) => settleEndedValidation(input, error, signal, mayBeRunning));
   }
   const coordinates = { draftId: input.draftId, revision: input.revision, requestSha256, deadline: new Date(deadline).toISOString() };
   const journaled: Pick<OpenCloudClient, "call"> = { call: async (operation, request, options) => {
@@ -151,6 +155,7 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
         const parsed = error.status === 429 && error.retryable ? draftValidationInProgressSchema.safeParse(error.body) : null;
         if (parsed?.success && parsed.data.details.appId === input.appId && parsed.data.details.draftId === input.draftId &&
             parsed.data.details.revision === input.revision) {
+          mayBeRunning = true;
           await input.journal.checkpointValidation({ ...coordinates, state: "progress",
             retryNotBefore: new Date(Date.now() + parsed.data.details.retryAfterSeconds * 1_000).toISOString() });
         } else if (admissionBusy(error)) {
@@ -184,7 +189,7 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
       },
     });
   } catch (error) {
-    return settleEndedValidation(input, error, signal);
+    return settleEndedValidation(input, error, signal, mayBeRunning);
   }
 }
 
@@ -192,8 +197,10 @@ async function validatePinned(control: OpenCloudClient, input: ValidationInput, 
  * Settles a validation this run stopped waiting for, then rethrows: refused
  * when OpenCloud answered (the next run starts afresh), otherwise waiting
  * (the same request rejoins it), with the next step as the error's hint.
+ * After a validation may have started (mayBeRunning), APP_LOCK_BUSY is a
+ * wait like any other, never "nothing started".
  */
-async function settleEndedValidation(input: ValidationInput, error: unknown, signal: AbortSignal): Promise<never> {
+async function settleEndedValidation(input: ValidationInput, error: unknown, signal: AbortSignal, mayBeRunning = false): Promise<never> {
   const validation = input.journal.checkpoint?.validation;
   // The journal's own refusals, and anything after the result, settle nothing.
   if (validation?.state === "result" || error instanceof MutationJournalError || error instanceof CliContractError) throw error;
@@ -201,7 +208,7 @@ async function settleEndedValidation(input: ValidationInput, error: unknown, sig
     // Ctrl-C: whatever the abandoned request said, nothing is held back.
     // If OpenCloud had already refused admission (such as APP_LOCK_BUSY) and
     // this run was only sleeping before trying again, nothing started there.
-    const outcome = validation?.state === "refused" ? "refused" : "waiting";
+    const outcome = validation?.state === "refused" && !mayBeRunning ? "refused" : "waiting";
     const settled = await input.journal.settleValidation(outcome);
     throw new MutationJournalError("VALIDATION_INTERRUPTED",
       outcome === "refused"
@@ -209,7 +216,8 @@ async function settleEndedValidation(input: ValidationInput, error: unknown, sig
         : `Interrupted while waiting for the validation of draft ${input.draftId}, revision ${input.revision}. OpenCloud may still be validating it; this did not cancel it.`,
       true, settled);
   }
-  if (validation?.state === "refused" && error instanceof ApiError) {
+  const busyWhileRunning = mayBeRunning && error instanceof ApiError && admissionBusy(error);
+  if (validation?.state === "refused" && error instanceof ApiError && !busyWhileRunning) {
     await input.journal.settleValidation("refused");
     if (admissionBusy(error)) {
       withHint(error, `OpenCloud was too busy to start validating draft ${input.draftId}, revision ${input.revision}, so nothing started. Run the same command again shortly.`);
@@ -224,7 +232,7 @@ async function settleEndedValidation(input: ValidationInput, error: unknown, sig
       `OpenCloud is still validating draft ${input.draftId}, revision ${input.revision}; this did not cancel it, and this command stopped waiting.`,
       true, settled);
   }
-  if (error instanceof ApiError && admissionBusy(error)) {
+  if (error instanceof ApiError && admissionBusy(error) && !busyWhileRunning) {
     withHint(error, `OpenCloud was too busy to start validating draft ${input.draftId}, revision ${input.revision}, so nothing started. Run the same command again shortly.`);
   } else if (error instanceof Error) {
     withHint(error, `OpenCloud may still be validating draft ${input.draftId}, revision ${input.revision}. Run the same command again: it validates that revision again and waits for the result.`);

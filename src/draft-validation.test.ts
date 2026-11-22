@@ -210,6 +210,29 @@ describe("CLI authoritative validation", () => {
     expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("refused");
   });
 
+  it("settles as waiting when APP_LOCK_BUSY follows a validation OpenCloud said is running", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    // The first request started the validation; later ones find admission busy.
+    const stuck = input(plain), call = vi.fn().mockRejectedValueOnce(busy).mockRejectedValue(admissionBusy);
+    const ended = validateDraftWithProgress({ call } as unknown as OpenCloudClient, stuck).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(await ended).toBe(admissionBusy);
+    expect(call.mock.calls.length).toBeGreaterThan(2);
+    expect(stuck.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+    expect(hintOf(admissionBusy)).toMatch(/^OpenCloud may still be validating draft/);
+    // So does an earlier run's request whose reply never came.
+    const lost = input(plain);
+    await validateDraftWithProgress({ call: vi.fn().mockRejectedValue(new TypeError("fetch failed")) } as unknown as OpenCloudClient, lost)
+      .catch(() => undefined);
+    const resumed = { ...lost, journal: reopen(lost.journal) };
+    const ended2 = validateDraftWithProgress({ call: vi.fn().mockRejectedValue(admissionBusy) } as unknown as OpenCloudClient, resumed)
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(await ended2).toBe(admissionBusy);
+    expect(resumed.journal.settleValidation).toHaveBeenCalledExactlyOnceWith("waiting");
+  });
+
   it("settles as refused when Ctrl-C interrupts APP_LOCK_BUSY backoff sleep", async () => {
     vi.useFakeTimers();
     const request = input(plain);
