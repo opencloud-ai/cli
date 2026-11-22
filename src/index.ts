@@ -871,8 +871,8 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   // Keep the verifyApp request timeout deterministic from --timeout rather than
   // elapsed wall-clock time; local followOperation still enforces the remaining budget.
   const verifyRequestTimeoutMs = Math.min(120_000, Math.round(totalBudgetMs));
-  // Verification gets its own --timeout, as the deploy's wait did: an upload,
-  // a validation or a container build before it never leaves it no time.
+  // Verification gets its own --timeout, as the deploy's wait did, so an
+  // upload, a validation or a container build before it can't use it up.
   const deadlineMs = Date.now() + totalBudgetMs;
   const skippedVerification = {
     state: "skipped" as const,
