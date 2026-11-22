@@ -794,7 +794,6 @@ const RETRYABLE_NETWORK_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
   "EAI_AGAIN",
-  "ENOTFOUND",
   "EHOSTUNREACH",
   "ENETUNREACH",
   "UND_ERR_CONNECT_TIMEOUT",
@@ -807,11 +806,13 @@ function isNetworkTransportError(
   error: unknown,
   cause: { code: string; message: string | null } | null,
 ): boolean {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  // DNS says the host doesn't exist, usually a mistyped --api-url: trying
+  // again finds it no more. EAI_AGAIN, a resolver that didn't answer, stays
+  // retryable.
+  if (cause?.code === "ENOTFOUND" || code === "ENOTFOUND") return false;
   if (cause && RETRYABLE_NETWORK_CODES.has(cause.code)) return true;
-  if (error && typeof error === "object") {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === "string" && RETRYABLE_NETWORK_CODES.has(code)) return true;
-  }
+  if (typeof code === "string" && RETRYABLE_NETWORK_CODES.has(code)) return true;
   return error instanceof TypeError && error.message === "fetch failed";
 }
 

@@ -573,7 +573,6 @@ describe("owner-parity CLI helpers", () => {
       "ECONNRESET",
       "ETIMEDOUT",
       "EAI_AGAIN",
-      "ENOTFOUND",
       "EHOSTUNREACH",
       "ENETUNREACH",
       "UND_ERR_CONNECT_TIMEOUT",
@@ -588,6 +587,12 @@ describe("owner-parity CLI helpers", () => {
       const direct = Object.assign(new Error(`direct ${code}`), { code });
       expect(structuredCliError(direct).error.retryable, `direct ${code}`).toBe(true);
     }
+    // A host DNS says doesn't exist, such as a mistyped --api-url, is no nearer on a retry.
+    const notFound = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.opencluod.example"), { code: "ENOTFOUND" }),
+    });
+    expect(structuredCliError(notFound).error).toMatchObject({ retryable: false, cause: { code: "ENOTFOUND" } });
+    expect(structuredCliError(Object.assign(new Error("direct ENOTFOUND"), { code: "ENOTFOUND" })).error.retryable).toBe(false);
     expect(structuredCliError(new TypeError("Cannot read properties of undefined")).error.retryable).toBe(false);
     expect(
       structuredCliError(new CliContractError("DOWNLOAD_INTEGRITY_FAILED", "mismatch", {
