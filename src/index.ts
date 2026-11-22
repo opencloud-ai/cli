@@ -787,11 +787,9 @@ async function outputReplayMutation<T>(
 }
 
 const PLATFORM_VERIFICATION_FAILURE_CODES = new Set([
-  "ACTIVE_DEPLOYMENT_MISMATCH",
   "APP_EXECUTION_AUTHORITY_REVOKED",
   "APP_VERIFICATION_FAILED",
   "ARTIFACT_INTEGRITY_FAILED",
-  "CANONICAL_HEAD_FAILED",
   "RUNTIME_SDK_MISMATCH",
   "RUNTIME_SDK_MISSING",
 ]);
@@ -810,15 +808,25 @@ function isCallerVerificationFailure(
   verification: {
     state: string;
     deploymentId?: string | null;
-    diagnostics?: ReadonlyArray<{ level: string; code?: string | undefined }>;
+    diagnostics?: ReadonlyArray<{ level: string; code?: string | undefined; message?: string | undefined }>;
   },
   operationError?: Record<string, unknown>,
   expectedDeploymentId?: string | null,
 ): boolean {
+  // Another release (or a rollback, or a pause) replaced this one before it
+  // was verified: a conflict the caller sees, not a platform fault.
+  if (expectedDeploymentId && verification.deploymentId !== expectedDeploymentId) return true;
   if (verification.state !== "failed") return false;
-  if (expectedDeploymentId && verification.deploymentId !== expectedDeploymentId) return false;
-  const diagnosticCode = verification.diagnostics?.find((item) => item.level === "error")?.code;
-  const code = diagnosticCode ?? (typeof operationError?.code === "string" ? operationError.code : null);
+  const diagnostic = verification.diagnostics?.find((item) => item.level === "error");
+  const code = diagnostic?.code ?? (typeof operationError?.code === "string" ? operationError.code : null);
+  if (code === "ACTIVE_DEPLOYMENT_MISMATCH") return true;
+  if (code === "CANONICAL_HEAD_FAILED") {
+    // The app answered HEAD / itself, such as a container frontend's 404, 405
+    // or 500; no answer at all (a timeout, a refused connection, a missing
+    // Auth redirect) is the platform's.
+    const message = diagnostic?.message ?? operationError?.message;
+    return typeof message === "string" && /\breturned HTTP \d{3}\b/.test(message);
+  }
   if (!code || PLATFORM_VERIFICATION_FAILURE_CODES.has(code)) return false;
   if (code.startsWith("COMPUTE_")) return isExpectedComputeError(code);
   return true;
@@ -829,6 +837,12 @@ function isTerminalVerificationOutcome(error: unknown): boolean {
     (error instanceof CliContractError && error.code === "VERIFICATION_FAILED") ||
     isDefiniteRefusal(error)
   );
+}
+
+/** A verification that found another release live in place of this one. */
+function isReplacedRelease(error: unknown): boolean {
+  return error instanceof CliContractError && error.code === "VERIFICATION_FAILED" &&
+    error.fields?.verificationCode === "ACTIVE_DEPLOYMENT_MISMATCH";
 }
 
 /**
@@ -950,21 +964,6 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   }
   const deploymentMismatch = Boolean(input.deploymentId && verification.deploymentId !== input.deploymentId);
   if (!terminalError && !deploymentMismatch && verification.state === "passed") return verification;
-  if (deploymentMismatch) {
-    throw new CliContractError(
-      "VERIFICATION_FAILED",
-      `The release went live, but OpenCloud verified deployment ${verification.deploymentId ?? "none"} instead of ${input.deploymentId}.`,
-      {
-        fields: {
-          verificationId: verification.id,
-          verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH",
-          deploymentId: input.deploymentId!,
-          ...(verification.deploymentId ? { verifiedDeploymentId: verification.deploymentId } : {}),
-        },
-        hint: `Run \`opencloud app verify ${appId}\` to verify the active release.`,
-      },
-    );
-  }
   const operationError = (terminalError?.operation.error && typeof terminalError.operation.error === "object"
     ? terminalError.operation.error
     : {}) as Record<string, unknown>;
@@ -972,6 +971,30 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   const code = diagnostic?.code ?? (typeof operationError.code === "string" ? operationError.code : "APP_VERIFICATION_FAILED");
   const reason = diagnostic?.message ?? (typeof operationError.message === "string" ? operationError.message : `verification ${verification.state}`);
   const deploymentId = input.deploymentId ?? verification.deploymentId ?? null;
+  if (deploymentMismatch || code === "ACTIVE_DEPLOYMENT_MISMATCH") {
+    // Someone deployed, rolled back or paused the app in between: the
+    // caller's conflict to look at, and a release no longer live is not the
+    // copy's base (see isReplacedRelease).
+    const directory = runningCommand.args.get("directory");
+    throw callerFailure(new CliContractError(
+      "VERIFICATION_FAILED",
+      deploymentMismatch
+        ? `The release went live, but it was replaced before OpenCloud verified it: OpenCloud verified deployment ${verification.deploymentId ?? "none"} instead of ${input.deploymentId}.`
+        : `The release went live, but it was no longer the app's active release when OpenCloud verified it: ${reason}`,
+      {
+        fields: {
+          verificationId: verification.id,
+          verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH",
+          ...(deploymentId ? { deploymentId } : {}),
+          ...(deploymentMismatch && verification.deploymentId ? { verifiedDeploymentId: verification.deploymentId } : {}),
+        },
+        hint: `Another release, a rollback or a pause changed the app meanwhile. To see what is live, run \`opencloud deployment list ${appId}\`.` +
+          (input.recordsBase
+            ? ` This copy's base (.opencloud/base.json) still names the release it was based on; to bring in the live one before deploying again, run \`opencloud pull ${directory === undefined ? "<directory>" : shellArgument(directory)}\`.`
+            : ""),
+      },
+    ));
+  }
   const window = `--from ${input.since} --to ${new Date().toISOString()}`;
   const logs = code.startsWith("COMPUTE_")
     ? `\`opencloud logs ${appId} --page --surface container ${window}\``
@@ -5578,7 +5601,11 @@ addOperationOptions(
             // The release is already live; settle base.json and the journal once
             // verification reaches a definite outcome, while leaving them unsettled
             // across timeouts, transport failures, or SIGKILL so replay rejoins cleanly.
-            if (isTerminalVerificationOutcome(error)) {
+            if (isReplacedRelease(error)) {
+              // No longer live, so not this copy's base: the next deploy is
+              // refused as stale and says to pull the live release.
+              await run.complete();
+            } else if (isTerminalVerificationOutcome(error)) {
               await settleDeployedRelease();
             }
             throw error;

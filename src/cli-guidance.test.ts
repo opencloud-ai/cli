@@ -708,7 +708,8 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     const directory = await app(context);
     const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
 
-    // 1. Mismatched deploymentId even when verification passed -> VERIFICATION_FAILED (reported as platform fault).
+    // 1. Mismatched deploymentId even when verification passed -> VERIFICATION_FAILED, the caller's
+    // conflict (someone else deployed in between): not reported, and the replaced release is not the base.
     const mismatchReports: Recorded[] = [];
     responder = makeDeployResponder({
       localDigest,
@@ -730,7 +731,9 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
       deploymentId: deployedId,
       verifiedDeploymentId: otherDeploymentId,
     });
-    expect(mismatchReports.length).toBe(1);
+    expect(JSON.parse(mismatch.stderr.trim().split("\n").at(-1)!).error.hint).toContain(`opencloud deployment list ${appId}`);
+    expect(mismatchReports.length).toBe(0);
+    await expect(readFile(path.join(directory, ".opencloud", "base.json"), "utf8")).rejects.toThrow();
 
     // 2. Terminal verify_app failure with empty error: {} must still fail (not treat as passed!).
     responder = makeDeployResponder({
@@ -785,6 +788,55 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     const appFail = await run(["--token", "synthetic-token", "deploy", directory, "--force"], context, { OPENCLOUD_TELEMETRY: "1" });
     expect(appFail.status).toBe(1);
     expect(appReports.length).toBe(0);
+  });
+
+  it("reports a canonical HEAD with no answer, not the app's own HTTP status, and keeps a release no longer active out of base.json", async () => {
+    const context = await workspace("deploy-verify-head-and-replaced");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    const baseFile = path.join(directory, ".opencloud", "base.json");
+    const failing = (code: string, message: string, reports: Recorded[]) => {
+      const failed = { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "failed", phases: [], diagnostics: [{ level: "error", code, message }], startedAt: now, finishedAt: now, createdAt: now };
+      return makeDeployResponder({
+        localDigest,
+        reports,
+        verifyResponse: () => ({
+          status: 201,
+          body: {
+            verification: failed,
+            operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "failed", actorType: "user", actorId, idempotencyKey: "server-redacted", error: { code, message }, createdAt: now, updatedAt: now },
+          },
+        }),
+        verificationRecord: () => failed,
+      });
+    };
+    const deploy = () => run(["--token", "synthetic-token", "deploy", directory, "--force"], context, { OPENCLOUD_TELEMETRY: "1" });
+
+    // A public app whose container frontend answers HEAD / with 405 failed for its own reason.
+    const appReports: Recorded[] = [];
+    responder = failing("CANONICAL_HEAD_FAILED", "Canonical production HEAD returned HTTP 405", appReports);
+    const appHead = await deploy();
+    expect(appHead.status).toBe(1);
+    expect(JSON.parse(appHead.stderr.trim().split("\n").at(-1)!).error).toMatchObject({ code: "VERIFICATION_FAILED", verificationCode: "CANONICAL_HEAD_FAILED" });
+    expect(appReports.length).toBe(0);
+
+    // No answer at all is the platform's.
+    const platformReports: Recorded[] = [];
+    responder = failing("CANONICAL_HEAD_FAILED", "fetch failed", platformReports);
+    expect((await deploy()).status).toBe(1);
+    expect(platformReports.length).toBe(1);
+
+    // The release was no longer active when verified: the caller's conflict, and not the copy's base.
+    await rm(baseFile, { force: true });
+    const replacedReports: Recorded[] = [];
+    responder = failing("ACTIVE_DEPLOYMENT_MISMATCH", "The recorded deployment is no longer the exact active deployment", replacedReports);
+    const replaced = await deploy();
+    expect(replaced.status).toBe(1);
+    expect(JSON.parse(replaced.stderr.trim().split("\n").at(-1)!).error).toMatchObject({
+      code: "VERIFICATION_FAILED", verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH", deploymentId: deployedId,
+    });
+    expect(replacedReports.length).toBe(0);
+    await expect(readFile(baseFile, "utf8")).rejects.toThrow();
   });
 
   it("settles opencloud app verify journal on failure so re-running starts a fresh verification", async () => {
