@@ -21,7 +21,8 @@ interface Recorded {
   body: string;
 }
 
-type Responder = (request: Recorded) => { status: number; body: unknown } | undefined;
+type Answer = { status: number; body: unknown } | undefined;
+type Responder = (request: Recorded) => Answer | Promise<Answer>;
 
 let temporary: string;
 let binary: string;
@@ -55,7 +56,7 @@ beforeAll(async () => {
       body: Buffer.concat(chunks).toString("utf8"),
     };
     requests.push(recorded);
-    const answer = responder(recorded) ?? { status: 404, body: { code: "NOT_FOUND", message: recorded.path } };
+    const answer = (await responder(recorded)) ?? { status: 404, body: { code: "NOT_FOUND", message: recorded.path } };
     response.writeHead(answer.status, { "content-type": "application/json" });
     response.end(JSON.stringify(answer.body));
   });
@@ -1439,6 +1440,52 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     expect(mock.state.draftKeys.size).toBe(1);
     expect(new Set(mock.state.deployKeys).size).toBe(1);
     expect(mock.state.verifyPosts).toBe(1);
+  });
+
+  it("gives verification its own --timeout, and one still running says to run the same deploy again to finish", async () => {
+    const context = await workspace("deploy-verify-own-window");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    const baseFile = path.join(directory, ".opencloud", "base.json");
+    let verifyOpState: "running" | "succeeded" = "running";
+    let verifyPosts = 0;
+    const inner = makeDeployResponder({
+      localDigest,
+      verifyResponse: () => {
+        verifyPosts += 1;
+        return {
+          status: 201,
+          body: {
+            verification: { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "queued", phases: [], diagnostics: [], startedAt: now, finishedAt: null, createdAt: now },
+            operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "running", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+          },
+        };
+      },
+      verifyOp: () => ({ id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: verifyOpState, actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now }),
+      verificationRecord: () => ({ id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now }),
+    });
+    responder = async (request) => {
+      // Validation alone outlasts the whole --timeout.
+      if (request.method === "POST" && request.path.endsWith("/validate")) await new Promise((resolve) => setTimeout(resolve, 1_500));
+      return inner(request);
+    };
+    const args = ["--token", "synthetic-token", "deploy", directory, "--idempotency-key", "deploy-own-window-1", "--interval", "0.05", "--timeout", "1"];
+    const slow = await run(args, context);
+    expect(slow.status).toBe(1);
+    expect(verifyPosts).toBe(1);
+    const error = JSON.parse(slow.stderr.trim().split("\n").at(-1)!).error as Record<string, unknown> & { hint: string };
+    expect(error).toMatchObject({ code: "OPERATION_WAIT_TIMEOUT", retryable: true, operationId: verifyOpId1, verificationId: verifyId1, deploymentId: deployedId });
+    expect(error.hint).toContain(`opencloud deploy ${directory} --idempotency-key deploy-own-window-1`);
+    expect(error.hint).toContain(".opencloud/base.json");
+    await expect(readFile(baseFile, "utf8")).rejects.toThrow();
+
+    // The same command again rejoins the verification, then records the release.
+    verifyOpState = "succeeded";
+    const finished = await run(args, context);
+    expect(finished.status, finished.stderr).toBe(0);
+    expect(JSON.parse(finished.stdout)).toMatchObject({ verification: { id: verifyId1, state: "passed" } });
+    expect(verifyPosts).toBe(1);
+    expect((JSON.parse(await readFile(baseFile, "utf8")) as { deploymentId: string }).deploymentId).toBe(deployedId);
   });
 
   it("marks --idempotency-key as required in containers run --help and app dev containers run --help", async () => {

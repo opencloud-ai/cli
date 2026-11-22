@@ -819,30 +819,21 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
   deploymentId: string | null;
   /** The release to go back to, when this command knows it. */
   previousDeploymentId: string | null;
-  /** When the command started, for the logs window and timeout budget. */
+  /** When the command started, for the logs window. */
   since: string;
-  startedAtMs: number;
   /** Active journal run, so verification coordinates survive interruption. */
   run?: MutationRun | undefined;
+  /** The command records the release as its copy's base once verified (deploy). */
+  recordsBase?: boolean | undefined;
 }): Promise<unknown> {
   const { appId } = input;
   const totalBudgetMs = parseBoundedNumber(input.options.timeout, "--timeout", 1, 1_800, false) * 1_000;
   // Keep the verifyApp request timeout deterministic from --timeout rather than
   // elapsed wall-clock time; local followOperation still enforces the remaining budget.
   const verifyRequestTimeoutMs = Math.min(120_000, Math.round(totalBudgetMs));
-  const deadlineMs = input.startedAtMs + totalBudgetMs;
-  const remainingBeforeStartMs = deadlineMs - Date.now();
-  if (remainingBeforeStartMs <= 0) {
-    throw new CliContractError(
-      "OPERATION_WAIT_TIMEOUT",
-      "The release went live, but --timeout elapsed before production verification could start.",
-      {
-        retryable: true,
-        fields: { ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}) },
-        hint: `The release is live. Run \`opencloud app verify ${appId}\` to verify it.`,
-      },
-    );
-  }
+  // Verification gets its own --timeout, as the deploy's wait did: an upload,
+  // a validation or a container build before it never leaves it no time.
+  const deadlineMs = Date.now() + totalBudgetMs;
   const skippedVerification = {
     state: "skipped" as const,
     reason: "MISSING_OBSERVE_SCOPE" as const,
@@ -879,6 +870,23 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
       });
     }
   }
+  /**
+   * The release is live and OpenCloud goes on verifying it. The journal entry
+   * stays open, so the same command run again rejoins this verification and
+   * then settles: for a deploy, it also records the release as the copy's base.
+   */
+  const stillVerifying = (operation: { id: string }) => new CliContractError("OPERATION_WAIT_TIMEOUT",
+    `The release is live, but OpenCloud's verification of it (operation ${operation.id}) did not finish within --timeout.`, {
+      retryable: true,
+      fields: {
+        operationId: operation.id,
+        ...(verificationId ? { verificationId } : {}),
+        ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}),
+      },
+      hint: input.run
+        ? `To finish waiting for it${input.recordsBase ? " and record the release as this copy's base (.opencloud/base.json)" : ""}, run ${rerunCommand(input.run)} again: it rejoins this verification and sends nothing twice.`
+        : `To keep waiting for it, run \`opencloud operation get ${operation.id} --follow\`.`,
+    });
   const remainingForFollowMs = deadlineMs - Date.now();
   const startedOperation = operationFrom(started);
   if (
@@ -886,7 +894,7 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
     !["succeeded", "failed", "cancelled"].includes(startedOperation.state) &&
     remainingForFollowMs <= 0
   ) {
-    throw new OperationWaitTimeoutError(startedOperation);
+    throw stillVerifying(startedOperation);
   }
   let terminalError: OperationTerminalError | null = null;
   try {
@@ -900,6 +908,7 @@ async function verifyLiveRelease(control: OpenCloudClient, input: {
       },
     });
   } catch (error) {
+    if (error instanceof OperationWaitTimeoutError) throw stillVerifying(error.operation);
     if (!(error instanceof OperationTerminalError)) throw error;
     terminalError = error;
   }
@@ -5402,8 +5411,7 @@ addOperationOptions(
     .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(
   async (directory, options: OperationOptions & { force?: boolean; verify?: boolean }) => {
-    const startedAtMs = Date.now();
-    const since = new Date(startedAtMs).toISOString();
+    const since = new Date().toISOString();
     const sourceRoot = callerPath(directory);
     const bundle = await localBundle(sourceRoot);
     process.stderr.write(
@@ -5535,7 +5543,7 @@ addOperationOptions(
         if (live && options.follow !== false && options.verify !== false) {
           try {
             verification = await verifyLiveRelease(context.control, {
-              appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
+              appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, recordsBase: true,
               deploymentId: typeof deployed === "string" ? deployed : null,
               previousDeploymentId: expectedActiveDeploymentId ?? null,
               run,
@@ -5936,8 +5944,7 @@ addOperationOptions(
     .argument("<deployment-id>")
     .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(async (appId, deploymentId, options: OperationOptions & { verify?: boolean }) => {
-  const startedAtMs = Date.now();
-  const since = new Date(startedAtMs).toISOString();
+  const since = new Date().toISOString();
   await outputDurableMutation(
     {
       commandId: "opencloud deployment rollback",
@@ -5957,7 +5964,7 @@ addOperationOptions(
     async (completed, control, run) => {
       if (options.follow === false || options.verify === false || operationFrom(completed)?.state !== "succeeded") return completed;
       const verification = await verifyLiveRelease(control, {
-        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, startedAtMs,
+        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
         deploymentId: String(deploymentId), previousDeploymentId: null, run,
       });
       return completed && typeof completed === "object" && !Array.isArray(completed) ? { ...completed, verification } : completed;
