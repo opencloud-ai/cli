@@ -1518,6 +1518,69 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     expect(mock.state.verifyPosts).toBe(1);
   });
 
+  it("settles a resent deploy refused twice as stale while its draft never deployed", async () => {
+    const context = await workspace("deploy-resend-stale");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    const mock = sentDeployResponder(localDigest, () => "deployed");
+    let deploySends = 0;
+    responder = (request) => {
+      if (request.method === "POST" && request.path.startsWith(`/v1/apps/${appId}/drafts/${draftId}/deploy`)) {
+        deploySends += 1;
+        // The first never arrived; then someone else's release is the latest.
+        return deploySends === 1
+          ? { status: 502, body: { code: "BAD_GATEWAY", message: "lost before it arrived" } }
+          : { status: 409, body: { statusCode: 409, code: "ACTIVE_DEPLOYMENT_CHANGED", message: "Another release is the latest", details: { latestDeploymentId: otherDeploymentId } } };
+      }
+      return mock.responder(request);
+    };
+    const args = ["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"];
+    expect((await run(args, context)).status).toBe(1);
+    const stale = await run(args, context);
+    expect(stale.status).toBe(1);
+    expect(JSON.parse(stale.stderr.trim().split("\n").at(-1)!).error).toMatchObject({ code: "ACTIVE_DEPLOYMENT_CHANGED" });
+    expect(deploySends).toBe(3);
+    expect(mock.state.draftKeys.size).toBe(1);
+    // Nothing deployed, so the entry is settled and the next deploy is a new request.
+    const next = await run(args, context);
+    expect(next.stderr).not.toContain("MUTATION_IN_PROGRESS");
+    expect(mock.state.draftKeys.size).toBe(2);
+  });
+
+  it("ends a resent deploy whose deployed draft OpenCloud won't answer for as an unknown outcome, sent no more", async () => {
+    const context = await workspace("deploy-resend-unknown");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    const mock = sentDeployResponder(localDigest, () => "deployed");
+    let deploySends = 0;
+    responder = (request) => {
+      if (request.method === "POST" && request.path.startsWith(`/v1/apps/${appId}/drafts/${draftId}/deploy`)) {
+        deploySends += 1;
+        // The first deployed the draft, but its reply was lost; the resend is refused.
+        if (deploySends === 1) {
+          mock.responder(request);
+          return { status: 502, body: { code: "BAD_GATEWAY", message: "reply lost" } };
+        }
+        return { status: 409, body: { statusCode: 409, code: "DEPLOYMENT_REPLAY_CONFLICT", message: "Deployment version or artifact already exists for this app" } };
+      }
+      return mock.responder(request);
+    };
+    const args = ["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"];
+    expect((await run(args, context)).status).toBe(1);
+    expect(mock.state.draftStatus).toBe("deployed");
+    const unknown = await run(args, context);
+    expect(unknown.status).toBe(1);
+    expect(JSON.parse(unknown.stderr.trim().split("\n").at(-1)!).error).toMatchObject({
+      code: "DEPLOY_OUTCOME_UNKNOWN", pending: { command: "opencloud deploy", state: "unknown", draftId },
+    });
+    expect(deploySends).toBe(2);
+    // Run again, it sends nothing and says the same.
+    const again = await run(args, context);
+    expect(JSON.parse(again.stderr.trim().split("\n").at(-1)!).error.code).toBe("DEPLOY_OUTCOME_UNKNOWN");
+    expect(deploySends).toBe(2);
+    expect(mock.state.draftKeys.size).toBe(1);
+  });
+
   it("gives verification its own --timeout, and one still running says to run the same deploy again to finish", async () => {
     const context = await workspace("deploy-verify-own-window");
     const directory = await app(context);
