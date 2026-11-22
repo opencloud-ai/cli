@@ -1308,6 +1308,139 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     expect(error.hint).not.toContain("To finish that request, run it again");
   });
 
+  /**
+   * A control plane that, like OpenCloud, replays createDraft and deployDraft
+   * for a key it has seen: the same draft in its current state, and the same
+   * release and operation. `onDeploy` decides how the first deploy's reply
+   * is lost.
+   */
+  function sentDeployResponder(localDigest: string, onDeploy: () => { status: number; body: unknown } | "deployed") {
+    const state = {
+      draftStatus: "open" as "open" | "validated" | "deploying" | "deployed",
+      draftRevision: 1,
+      files: new Map<string, string>(),
+      draftKeys: new Set<string>(),
+      operationKeys: new Set<string>(),
+      deployKeys: [] as string[],
+      verifyPosts: 0,
+    };
+    const draft = () => ({
+      id: draftId, appId, baseDeploymentId: null, name: "CLI", status: state.draftStatus, revision: state.draftRevision,
+      createdAt: now, updatedAt: now, deployedAt: state.draftStatus === "deployed" ? now : null,
+    });
+    const started = () => ({
+      draft: draft(),
+      deployment: { id: deployedId, appId, version: "app-20261122-1", artifactSha256: localDigest, sdkVersion: "2.3.0", manifest: {}, state: "active", rollbackOfDeploymentId: null, error: null, createdAt: now, activatedAt: now, source: null },
+      operation: { id: deployOpId, appId, deploymentId: deployedId, type: "deploy", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now },
+    });
+    const verification = { id: verifyId1, appId, deploymentId: deployedId, operationId: verifyOpId1, state: "passed", phases: [], diagnostics: [], startedAt: now, finishedAt: now, createdAt: now };
+    const responder: Responder = (request) => {
+      if (request.path === "/version") return { status: 200, body: baseVersion() };
+      if (request.path === "/v1/installation") return { status: 404, body: { code: "NOT_FOUND", message: "not found" } };
+      const draftPath = `/v1/apps/${appId}/drafts/${draftId}`;
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/drafts`) {
+        state.draftKeys.add(String(request.headers["idempotency-key"]));
+        return { status: 201, body: draft() };
+      }
+      if (request.method === "GET" && request.path === draftPath) return { status: 200, body: draft() };
+      if (request.method === "GET" && request.path === `${draftPath}/files`) {
+        return { status: 200, body: [...state.files].map(([file, sha256]) => ({ path: file, sha256, baseSha256: null, sizeBytes: 1, deleted: false, updatedAt: now })) };
+      }
+      if (request.method === "PATCH" && request.path === `${draftPath}/files`) {
+        if (!["open", "validated"].includes(state.draftStatus)) return { status: 409, body: { statusCode: 409, message: "Draft is not open" } };
+        const body = JSON.parse(request.body) as { changes: Array<{ path: string; contentBase64?: string; delete?: boolean }> };
+        for (const change of body.changes) {
+          if (change.delete) state.files.delete(change.path);
+          else state.files.set(change.path, createHash("sha256").update(Buffer.from(change.contentBase64!, "base64")).digest("hex"));
+        }
+        state.draftRevision += 1;
+        state.draftStatus = "open";
+        return { status: 200, body: { draft: draft(), files: [] } };
+      }
+      if (request.method === "POST" && request.path === `${draftPath}/validate`) {
+        state.draftStatus = "validated";
+        return { status: 200, body: validationPayload("40000000-0000-4000-8000-000000000060", draftId, state.draftRevision, localDigest) };
+      }
+      if (request.method === "POST" && request.path.startsWith(`${draftPath}/deploy`)) {
+        const key = String(request.headers["idempotency-key"]);
+        state.deployKeys.push(key);
+        if (state.operationKeys.has(key)) {
+          // OpenCloud refuses a draft while it is deploying; this one finishes meanwhile.
+          if (state.draftStatus === "deploying") {
+            state.draftStatus = "deployed";
+            return { status: 409, body: { statusCode: 409, message: "Draft must pass authoritative validation before use", error: "Conflict" } };
+          }
+          return { status: 201, body: started() };
+        }
+        if (state.draftStatus !== "validated") return { status: 409, body: { statusCode: 409, message: "Draft must pass authoritative validation before use", error: "Conflict" } };
+        state.operationKeys.add(key);
+        const answer = onDeploy();
+        if (answer === "deployed") {
+          state.draftStatus = "deployed";
+          return { status: 201, body: started() };
+        }
+        state.draftStatus = "deploying";
+        return answer;
+      }
+      if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
+        state.verifyPosts += 1;
+        return { status: 201, body: { verification, operation: { id: verifyOpId1, appId, deploymentId: deployedId, type: "verify_app", state: "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted", error: null, createdAt: now, updatedAt: now } } };
+      }
+      if (request.method === "GET" && request.path === `/v1/apps/${appId}/verifications/${verifyId1}`) return { status: 200, body: verification };
+      return undefined;
+    };
+    return { state, responder };
+  }
+
+  it("follows a deploy whose reply was lost, without deploying again, while its draft is deploying and then deployed", async () => {
+    const context = await workspace("deploy-lost-reply");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    // OpenCloud started the release, but the reply was lost on the way back.
+    const mock = sentDeployResponder(localDigest, () => ({ status: 502, body: { code: "BAD_GATEWAY", message: "upstream reset" } }));
+    responder = mock.responder;
+    const lost = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"], context);
+    expect(lost.status).toBe(1);
+    expect(mock.state.draftStatus).toBe("deploying");
+
+    const resumed = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"], context);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toMatchObject({ operation: { id: deployOpId, state: "succeeded" }, deployment: { id: deployedId } });
+    expect(mock.state.operationKeys.size).toBe(1);
+    expect(mock.state.draftKeys.size).toBe(1);
+    expect(new Set(mock.state.deployKeys).size).toBe(1);
+    expect(mock.state.deployKeys.length).toBeGreaterThanOrEqual(2);
+    expect((JSON.parse(await readFile(path.join(directory, ".opencloud", "base.json"), "utf8")) as { deploymentId: string }).deploymentId).toBe(deployedId);
+
+    // The entry is settled: the next deploy is a new request, held behind nothing.
+    requests = [];
+    const next = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"], context);
+    expect(next.stderr).not.toContain("MUTATION_IN_PROGRESS");
+  });
+
+  it("finishes a deploy killed before its operation was saved, verifying the one release it started", async () => {
+    const context = await workspace("deploy-killed-after-send");
+    const directory = await app(context);
+    const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+    let child: ReturnType<typeof spawn> | null = null;
+    const mock = sentDeployResponder(localDigest, () => {
+      child?.kill("SIGKILL");
+      return "deployed";
+    });
+    responder = mock.responder;
+    const killed = await run(["--token", "synthetic-token", "deploy", directory, "--interval", "0.05"], context, {}, (spawned) => { child = spawned; });
+    expect(killed.signal).toBe("SIGKILL");
+    await ageJournalLocks([context.home, context.folder]);
+
+    const resumed = await run(["--token", "synthetic-token", "deploy", directory, "--interval", "0.05"], context);
+    expect(resumed.status, resumed.stderr).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toMatchObject({ operation: { id: deployOpId }, verification: { id: verifyId1, state: "passed" } });
+    expect(mock.state.operationKeys.size).toBe(1);
+    expect(mock.state.draftKeys.size).toBe(1);
+    expect(new Set(mock.state.deployKeys).size).toBe(1);
+    expect(mock.state.verifyPosts).toBe(1);
+  });
+
   it("marks --idempotency-key as required in containers run --help and app dev containers run --help", async () => {
     const context = await workspace("containers-run-help");
     const prodHelp = await run(["containers", "run", "--help"], context);
