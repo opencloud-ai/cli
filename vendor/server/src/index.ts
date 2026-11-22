@@ -3201,7 +3201,7 @@ function containersClient(bindings: RuntimeBindings, requestId: string): OpenClo
         || Object.values(result.headers).some(value => typeof value !== "string")
         || typeof result.bodyBase64 !== "string" || result.bodyBase64.length > 44_739_244) badResponse();
       let body: Uint8Array;
-      try { body = Uint8Array.from(atob(result.bodyBase64), char => char.charCodeAt(0)); }
+      try { body = decodeBase64(result.bodyBase64); }
       catch { return badResponse(); }
       if (body.byteLength > 32 * 1024 * 1024) badResponse();
       return { status: result.status, headers: result.headers, body };
@@ -4888,6 +4888,69 @@ function encodeBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
   }
   return btoa(binary);
+}
+
+const BASE64_DECODE = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < 26; i++) {
+    table[65 + i] = i; // A-Z
+    table[97 + i] = 26 + i; // a-z
+  }
+  for (let i = 0; i < 10; i++) table[48 + i] = 52 + i; // 0-9
+  table[43] = 62; // +
+  table[47] = 63; // /
+  return table;
+})();
+
+function decodeBase64(input: string): Uint8Array {
+  const len = input.length;
+  if (len === 0) return new Uint8Array(0);
+  if ((len & 3) !== 0) throw new Error("Invalid base64 length");
+  const pad = input.charCodeAt(len - 1) === 61
+    ? (input.charCodeAt(len - 2) === 61 ? 2 : 1)
+    : 0;
+  const out = new Uint8Array((len >>> 2) * 3 - pad);
+  const fullEnd = pad > 0 ? len - 4 : len;
+  let outPos = 0;
+  for (let i = 0; i < fullEnd; i += 4) {
+    const c0 = input.charCodeAt(i);
+    const c1 = input.charCodeAt(i + 1);
+    const c2 = input.charCodeAt(i + 2);
+    const c3 = input.charCodeAt(i + 3);
+    if ((c0 | c1 | c2 | c3) > 127) throw new Error("Invalid base64 character");
+    const v0 = BASE64_DECODE[c0]!;
+    const v1 = BASE64_DECODE[c1]!;
+    const v2 = BASE64_DECODE[c2]!;
+    const v3 = BASE64_DECODE[c3]!;
+    if ((v0 | v1 | v2 | v3) < 0) throw new Error("Invalid base64 character");
+    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
+    out[outPos++] = (triple >>> 16) & 0xff;
+    out[outPos++] = (triple >>> 8) & 0xff;
+    out[outPos++] = triple & 0xff;
+  }
+  if (pad === 1) {
+    const c0 = input.charCodeAt(fullEnd);
+    const c1 = input.charCodeAt(fullEnd + 1);
+    const c2 = input.charCodeAt(fullEnd + 2);
+    if ((c0 | c1 | c2) > 127) throw new Error("Invalid base64 character");
+    const v0 = BASE64_DECODE[c0]!;
+    const v1 = BASE64_DECODE[c1]!;
+    const v2 = BASE64_DECODE[c2]!;
+    if ((v0 | v1 | v2) < 0 || (v2 & 0x3) !== 0) throw new Error("Invalid base64 padding");
+    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6);
+    out[outPos++] = (triple >>> 16) & 0xff;
+    out[outPos++] = (triple >>> 8) & 0xff;
+  } else if (pad === 2) {
+    const c0 = input.charCodeAt(fullEnd);
+    const c1 = input.charCodeAt(fullEnd + 1);
+    if ((c0 | c1) > 127) throw new Error("Invalid base64 character");
+    const v0 = BASE64_DECODE[c0]!;
+    const v1 = BASE64_DECODE[c1]!;
+    if ((v0 | v1) < 0 || (v1 & 0xf) !== 0) throw new Error("Invalid base64 padding");
+    const triple = (v0 << 18) | (v1 << 12);
+    out[outPos++] = (triple >>> 16) & 0xff;
+  }
+  return out;
 }
 
 function normalizeGenerateImageInput(

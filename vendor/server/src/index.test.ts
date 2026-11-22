@@ -99,6 +99,82 @@ describe("container Function client", () => {
     expect((await largest.invoke()).status).toBe(200);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
+
+  it("decodes large binary service responses quickly and rejects invalid base64", async () => {
+    const size = 16 * 1024 * 1024 + 2; // 16 MiB + 2 bytes (tests 1-byte padding too)
+    const expected = new Uint8Array(size);
+    for (let i = 0; i < size; i++) expected[i] = (i * 31 + 17) & 0xff;
+    const encoded = Buffer.from(expected).toString("base64");
+
+    const large = scoped();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+          bodyBase64: encoded,
+        }),
+      ),
+    );
+    let decoded: Uint8Array | undefined;
+    defineFunction({
+      input: schema.object({}),
+      handler: async ({ containers }) => {
+        const result = await containers.request("image-api", { path: "/large" });
+        decoded = result.body;
+        return { length: result.body.byteLength };
+      },
+    });
+    const started = performance.now();
+    const response = await large.invoke();
+    const elapsedMs = performance.now() - started;
+    expect(response.status).toBe(200);
+    expect(decoded?.byteLength).toBe(size);
+    expect(Buffer.compare(Buffer.from(decoded!), Buffer.from(expected))).toBe(0);
+    expect(elapsedMs).toBeLessThan(2_000);
+
+    // Also verify 1-byte (==) and 2-byte (=) padded responses.
+    for (const sample of [new Uint8Array([0xab]), new Uint8Array([0xab, 0xcd])]) {
+      const padded = scoped();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          Response.json({
+            status: 200,
+            headers: {},
+            bodyBase64: Buffer.from(sample).toString("base64"),
+          }),
+        ),
+      );
+      defineFunction({
+        input: schema.object({}),
+        handler: async ({ containers }) => {
+          const result = await containers.request("image-api", { path: "/padded" });
+          return { bytes: [...result.body] };
+        },
+      });
+      await expect((await padded.invoke()).json()).resolves.toEqual({ bytes: [...sample] });
+    }
+
+    // Invalid base64 payloads must fail with 502 PLATFORM_INVALID_RESPONSE.
+    for (const bad of ["ABC", "A===", "====", "AB=C", "!!!!", "AB==", "ABC=", "AB\u0100D"]) {
+      const invalid = scoped();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json({ status: 200, headers: {}, bodyBase64: bad })),
+      );
+      defineFunction({
+        input: schema.object({}),
+        handler: async ({ containers }) => containers.request("image-api", { path: "/bad" }),
+      });
+      const res = await invalid.invoke();
+      expect(res.status).toBe(502);
+      await expect(res.json()).resolves.toMatchObject({
+        error: { code: "PLATFORM_INVALID_RESPONSE" },
+      });
+    }
+  });
 });
 
 describe("resumable managed File inputs", () => {
