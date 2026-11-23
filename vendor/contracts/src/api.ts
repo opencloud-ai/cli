@@ -192,18 +192,53 @@ export interface AppDeploymentTruth {
   } | null;
 }
 
+/**
+ * Why a scheduled run didn't happen. A schedule runs only at its configured
+ * time, so a run OpenCloud couldn't start then is skipped, never run later.
+ */
+export type CronSkipReason =
+  /** OpenCloud couldn't start it within 5 minutes of its time, for example during an update or an outage. */
+  | "missed"
+  /** It hadn't started when the next run was due. */
+  | "superseded"
+  /** It waited a day without starting. */
+  | "expired"
+  /** The schedule was turned off before it started. */
+  | "disabled"
+  /** The schedule changed before it started. */
+  | "schedule_changed"
+  /** The schedule was removed before it started. */
+  | "removed"
+  /** It was no longer due when it could start. */
+  | "no_longer_due";
+
+export interface CronSkippedRun {
+  reason: CronSkipReason;
+  /** The reason in plain words. */
+  message: string;
+  /**
+   * Set when the row stands for every scheduled run from this time to
+   * `scheduledAt`, after a gap too long to list run by run.
+   */
+  since: string | null;
+}
+
 export interface CronInvocationRecord {
   id: string;
   appId: string;
   deploymentId: string;
   cronName: string;
   functionName: string;
-  state: "running" | "succeeded" | "failed";
+  /** `skipped`: a scheduled run that didn't happen; see `skipped`. */
+  state: "running" | "succeeded" | "failed" | "skipped";
   scheduledAt: string;
-  startedAt: string;
+  /** Null for a skipped run, which never started. */
+  startedAt: string | null;
   finishedAt: string | null;
   responseStatus: number | null;
   error: Record<string, unknown> | null;
+  /** Set when `state` is `skipped`. */
+  skipped?: CronSkippedRun;
 }
 
 export interface CronInvocationsPage {

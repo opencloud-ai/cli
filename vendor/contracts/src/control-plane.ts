@@ -1383,6 +1383,18 @@ export const agentFeedAnyVersionOutput = agentFeedV1Output.extend({
   computeSources: computeSourceFreshnessSetSchema.optional(),
 });
 
+export const cronSkipReasonSchema = z.enum([
+  "missed",
+  "superseded",
+  "expired",
+  "disabled",
+  "schedule_changed",
+  "removed",
+  "no_longer_due",
+]);
+
+const cronInvocationStateSchema = z.enum(["running", "succeeded", "failed", "skipped"]);
+
 const cronInvocationOutput = z
   .object({
     id: uuid,
@@ -1390,12 +1402,20 @@ const cronInvocationOutput = z
     deploymentId: uuid,
     cronName: z.string(),
     functionName: z.string(),
-    state: z.enum(["running", "succeeded", "failed"]),
+    state: cronInvocationStateSchema,
     scheduledAt: z.string(),
-    startedAt: z.string(),
+    startedAt: z.string().nullable(),
     finishedAt: z.string().nullable(),
     responseStatus: z.number().int().nullable(),
     error: jsonObject.nullable(),
+    // A scheduled run that didn't happen: a schedule runs only at its time.
+    skipped: z
+      .object({
+        reason: cronSkipReasonSchema,
+        message: z.string(),
+        since: z.string().nullable(),
+      })
+      .optional(),
   })
   .passthrough();
 
@@ -4900,14 +4920,15 @@ getAiConnectionModels: operation({
     method: "GET",
     path: "/v1/apps/{appId}/cron/invocations",
     summary: "List cron invocations",
-    description: "Lists scheduled function invocation history.",
+    description:
+      "Lists scheduled function run history, newest first: runs, and scheduled runs that were skipped (state skipped, with the reason in skipped). A run starts at its time, or within 5 minutes if OpenCloud is briefly busy; one that can't, for example during an outage, is skipped rather than run later. The after filter compares a run's start, and a skipped run's scheduled time.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({
       query: z
         .object({
           name: z.string().optional(),
-          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          state: cronInvocationStateSchema.optional(),
           after: z.iso.datetime({ offset: true }).optional(),
           cursor: z.string().max(512).optional(),
           limit: z.number().int().min(1).max(200).default(50),
@@ -4920,7 +4941,8 @@ getAiConnectionModels: operation({
     mcp: {
       toolName: "list_cron_invocations",
       title: "List cron invocations",
-      description: "Inspect cron execution history.",
+      description:
+        "Inspect cron run history, including scheduled runs that were skipped because OpenCloud couldn't start them within 5 minutes of their time (state skipped, with the reason). Check it after an outage: if a skipped run still matters, the person can run the schedule now with Run now on the app's Scheduled jobs page; MCP can't run it.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -4932,14 +4954,14 @@ getAiConnectionModels: operation({
     path: "/v1/apps/{appId}/cron/invocations/page",
     summary: "List a cron invocation page",
     description:
-      "Returns a stable, newest-first keyset page of app-scoped cron invocation history. Continue with nextCursor using the same filters and page size.",
+      "Returns a stable, newest-first keyset page of app-scoped cron run history, including skipped scheduled runs (state skipped). Continue with nextCursor using the same filters and page size. The after filter compares a run's start, and a skipped run's scheduled time.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({
       query: z
         .object({
           name: z.string().optional(),
-          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          state: cronInvocationStateSchema.optional(),
           after: z.iso.datetime({ offset: true }).optional(),
           cursor: z.string().max(2_048).optional(),
           limit: z.coerce.number().int().min(1).max(200).default(50),

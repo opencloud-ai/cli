@@ -2,6 +2,10 @@
 
 ## 3.22.0
 
+- `cron history` lists skipped scheduled runs too: `--state skipped` selects
+  them, and `--after` compares a skipped run's scheduled time. OpenCloud starts
+  a scheduled run only within 5 minutes of its time and records any it couldn't
+  start as skipped, with the reason.
 - `app request --access-token-env` takes any variable name, `OC_FOO`
   included; it refuses only a name shaped like a token itself (`oc_app_…` at
   a token's length, or another credential), still without repeating it.

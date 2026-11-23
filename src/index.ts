@@ -6071,8 +6071,8 @@ cron
   .command("history")
   .argument("<app-id>")
   .option("--name <name>")
-  .option("--state <state>", "running, succeeded, or failed")
-  .option("--after <iso>", "only invocations started at or after this time")
+  .option("--state <state>", "running, succeeded, failed, or skipped")
+  .option("--after <iso>", "only runs started, and skipped runs scheduled, at or after this time")
   .option("--limit <number>", "result limit", "50")
   .action(async (appId, options) => {
     const query = new URLSearchParams({

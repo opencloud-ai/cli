@@ -130,8 +130,10 @@ platform `bbc9f77e1`: `containers.request` reads the service's answer as raw
 bytes rather than Base64 inside JSON. `contracts/src/{containers.ts,containers.test.ts}`
 are then refreshed verbatim from platform `83c445952`, which adds the plain
 refusal page a visitor's browser gets, and again from `ddac0e8df`, whose page
-says plainly whether to wait. Every file this release changed under `vendor/`
-is byte-identical to platform `ddac0e8df`.
+says plainly whether to wait. `contracts/src/{api.ts,control-plane.ts}` are then
+refreshed verbatim from platform `a6bb20216`, whose cron run history lists
+skipped runs. Every file this release changed under `vendor/` is byte-identical
+to platform `a6bb20216`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 
