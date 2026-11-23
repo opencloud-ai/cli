@@ -21,6 +21,11 @@
   `fetch failed`) prints `retryable: true`. A host name DNS can't find
   (`ENOTFOUND`, usually a mistyped `--api-url`) prints `retryable: false`,
   as a retry won't find it either.
+- `app dev start` and `sync` in a folder whose development draft a promotion
+  deployed (one whose release then failed and was undone too) or that was
+  discarded fail with `DEV_DRAFT_CLOSED` and the commands that work: `app dev
+  stop <dir>`, then `app dev start <dir>`. They used to say "start a new dev
+  session for the next change", which `app dev start` had just refused.
 - A deploy whose reply was lost (a timeout, a reset connection) or that was
   killed before it saved the operation is not sent twice. Run again, it sends
   the deploy again with the same key while its draft still holds the

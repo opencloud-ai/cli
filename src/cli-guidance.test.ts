@@ -1100,6 +1100,45 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     expect(createdCount).toBe(2);
   });
 
+  it("names app dev stop, then app dev start, when the folder's dev draft was deployed or discarded", async () => {
+    for (const status of ["deployed", "discarded"] as const) {
+      const context = await workspace(`dev-draft-${status}`);
+      const directory = await app(context);
+      const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
+      await mkdir(path.join(directory, ".opencloud"), { recursive: true });
+      await writeFile(path.join(directory, ".opencloud", "dev.json"), JSON.stringify({
+        schemaVersion: 1, appId, draftId, sessionId: devSessionId, artifactSha256: localDigest, updatedAt: now,
+      }));
+      const reports: Recorded[] = [];
+      // A promotion OpenCloud compensated still leaves its draft deployed.
+      responder = (request) => {
+        if (request.path === "/v1/platform-errors/reports") {
+          reports.push(request);
+          return { status: 202, body: { accepted: true } };
+        }
+        if (request.path === "/version") return { status: 200, body: baseVersion() };
+        if (request.path === "/v1/installation") return { status: 404, body: { code: "NOT_FOUND", message: "not found" } };
+        if (request.method === "GET" && request.path === `/v1/apps/${appId}/drafts/${draftId}`) {
+          return { status: 200, body: { id: draftId, appId, baseDeploymentId: null, name: "Dev", status, revision: 2, createdAt: now, updatedAt: now, deployedAt: status === "deployed" ? now : null } };
+        }
+        if (request.method === "GET" && request.path === `/v1/apps/${appId}/dev-sessions/${devSessionId}`) {
+          return { status: 200, body: devSessionPayload("verified", "40000000-0000-4000-8000-000000000070", "40000000-0000-4000-8000-000000000071", localDigest) };
+        }
+        return undefined;
+      };
+      for (const command of ["start", "sync"]) {
+        const refused = await run(["--token", "synthetic-token", "app", "dev", command, directory], context, { OPENCLOUD_TELEMETRY: "1" });
+        expect(refused.status, `${status} ${command}`).toBe(1);
+        const error = JSON.parse(refused.stderr.trim().split("\n").at(-1)!).error as { code: string; message: string; hint: string };
+        expect(error.code, `${status} ${command}`).toBe("DEV_DRAFT_CLOSED");
+        expect(error.message).toContain(`is ${status}`);
+        expect(error.hint).toContain(`opencloud app dev stop ${directory}`);
+        expect(error.hint).toContain(`then \`opencloud app dev start ${directory}\``);
+      }
+      expect(reports).toEqual([]);
+    }
+  });
+
   it("adds the stale release hint when app dev start is refused with ACTIVE_DEPLOYMENT_CHANGED", async () => {
     const context = await workspace("dev-start-stale-hint");
     const directory = await app(context);

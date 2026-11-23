@@ -1623,6 +1623,26 @@ async function recordReleaseBase(
   });
 }
 
+/**
+ * The development session's draft can't take changes any more: a promotion
+ * deployed it (a release OpenCloud compensated leaves it deployed too) or it
+ * was discarded. `app dev start` resumes the folder's session, so it can't
+ * be the way out; stopping that session clears the folder, and a start then
+ * begins a new session from a new draft. Start doesn't stop it by itself:
+ * the folder's state is the only handle on that session, which may still be
+ * running containers.
+ */
+function devDraftClosed(draftId: string, status: string): Error {
+  const directory = runningCommand.args.get("directory");
+  const dir = directory === undefined ? "<directory>" : shellArgument(directory);
+  const why = status === "discarded" ? "it was discarded" : "a promotion deployed it (one whose release then failed does too)";
+  return callerFailure(new CliContractError("DEV_DRAFT_CLOSED",
+    `This folder's development session works on draft ${draftId}, which is ${status}, so it can't take changes: ${why}.`, {
+      fields: { draftId },
+      hint: `Run \`opencloud app dev stop ${dir}\` to stop that session, then \`opencloud app dev start ${dir}\` to start a new one from this copy.`,
+    }));
+}
+
 async function synchronizeValidatedDraft(
   control: OpenCloudClient,
   sourceRoot: string,
@@ -1706,9 +1726,7 @@ async function synchronizeValidatedDraft(
         throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
           `The draft this command was waiting on (${existing.id}) is ${existing.status} now, so its validation can't be rejoined. Nothing was sent; run the command again to start from a new draft.`));
       }
-      throw callerFailure(new Error(
-        `The local dev draft is ${existing.status}; start a new dev session for the next change.`,
-      ));
+      throw devDraftClosed(existing.id, existing.status);
     }
     draft = { id: existing.id, revision: existing.revision };
     if (validationProgress && draft.revision !== validationProgress.revision) await dropKeptValidation();
@@ -1771,9 +1789,7 @@ async function synchronizeValidatedDraft(
         throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
           `The source draft (${draft.id}) is ${current.status} now, so it can't be updated or validated. Run the command again to start from a new draft.`));
       }
-      throw callerFailure(new Error(
-        `The source draft is ${current.status}; start a new workflow for the next change.`,
-      ));
+      throw devDraftClosed(draft.id, current.status);
     }
     revision = current.revision;
     const remoteFiles = await control.call("listDraftFiles", {

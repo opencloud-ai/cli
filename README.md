@@ -360,6 +360,12 @@ an unknown outcome, keeps its development session in `.opencloud/dev.json`, so
 retries with that session and draft instead of creating new ones; `app dev
 verify` says when the session has no applied revision yet.
 
+A promotion deploys the session's draft, even one whose release then fails,
+and a draft can be discarded; either way it takes no more changes. `app dev
+start` and `sync` then fail with `DEV_DRAFT_CLOSED`: run `app dev stop`, which
+stops that session and clears the folder, then `app dev start`, which begins
+a new session from a new draft.
+
 A session that production has overtaken, or that stopped or expired, fails
 before any apply is sent with `ACTIVE_DEPLOYMENT_CHANGED` (naming the
 session's release and the live one), `DEV_SESSION_STALE`,
