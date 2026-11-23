@@ -1385,11 +1385,12 @@ export const agentFeedAnyVersionOutput = agentFeedV1Output.extend({
 
 export const cronSkipReasonSchema = z.enum([
   "missed",
+  "busy",
+  "app_busy",
   "superseded",
   "expired",
   "disabled",
   "schedule_changed",
-  "removed",
   "no_longer_due",
 ]);
 

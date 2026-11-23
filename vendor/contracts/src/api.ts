@@ -197,8 +197,15 @@ export interface AppDeploymentTruth {
  * time, so a run OpenCloud couldn't start then is skipped, never run later.
  */
 export type CronSkipReason =
-  /** OpenCloud couldn't start it within 5 minutes of its time, for example during an update or an outage. */
+  /**
+   * It couldn't start within 5 minutes of its time, for example during a
+   * platform update or outage, or while the app was being deployed or restored.
+   */
   | "missed"
+  /** OpenCloud was busy running other scheduled tasks and couldn't start it within 5 minutes of its time. */
+  | "busy"
+  /** The app already had as many scheduled runs in progress as it runs at once (4) until 5 minutes after its time. */
+  | "app_busy"
   /** It hadn't started when the next run was due. */
   | "superseded"
   /** It waited a day without starting. */
@@ -207,8 +214,6 @@ export type CronSkipReason =
   | "disabled"
   /** The schedule changed before it started. */
   | "schedule_changed"
-  /** The schedule was removed before it started. */
-  | "removed"
   /** It was no longer due when it could start. */
   | "no_longer_due";
 
