@@ -105,6 +105,11 @@ export function journalHint(code: string, pending: PendingView, running: Running
     const draft = pending.draftId ? quoted(commandLine(["draft", "get"], [pending.appId, pending.draftId])) : check;
     return `The validation may still be running and was not repeated. Check with ${draft}; run the command again with a new --idempotency-key only if you still need it.`;
   }
+  if (code === "DEPLOY_OUTCOME_UNKNOWN") {
+    const releases = quoted(commandLine(["deployment", "list"], [pending.appId]));
+    const draft = pending.draftId ? ` (draft ${pending.draftId})` : "";
+    return `OpenCloud deployed this source${draft} but didn't say which release that made, so it was not sent again. See what is live with ${releases}. A deploy of changed source is sent as usual; to deploy this same source again, add a new --idempotency-key.`;
+  }
   if (code.endsWith("_OUTCOME_UNKNOWN")) {
     return `It was not repeated. Check whether it took effect with ${check}. If it did not, run the command again with a new --idempotency-key.`;
   }

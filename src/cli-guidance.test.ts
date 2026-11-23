@@ -1598,11 +1598,21 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
       code: "DEPLOY_OUTCOME_UNKNOWN", pending: { command: "opencloud deploy", state: "unknown", draftId },
     });
     expect(deploySends).toBe(2);
-    // Run again, it sends nothing and says the same.
+    // Run again, it sends nothing and says the same, not retryable, with what to do.
     const again = await run(args, context);
-    expect(JSON.parse(again.stderr.trim().split("\n").at(-1)!).error.code).toBe("DEPLOY_OUTCOME_UNKNOWN");
+    const repeated = JSON.parse(again.stderr.trim().split("\n").at(-1)!).error as { code: string; retryable: boolean; hint: string };
+    expect(repeated).toMatchObject({ code: "DEPLOY_OUTCOME_UNKNOWN", retryable: false });
+    expect(repeated.hint).toContain(`opencloud deployment list ${appId}`);
+    expect(repeated.hint).toContain("new --idempotency-key");
     expect(deploySends).toBe(2);
     expect(mock.state.draftKeys.size).toBe(1);
+    // Changed source is a new deploy, not held behind that outcome.
+    await writeFile(path.join(directory, "frontend", "index.html"), "<!doctype html><title>changed</title>\n");
+    const changed = await run(args, context);
+    // (This mock answers every new draft with the deployed one, so it goes no further.)
+    expect(changed.stderr).not.toContain("MUTATION_IN_PROGRESS");
+    expect(changed.stderr).not.toContain("DEPLOY_OUTCOME_UNKNOWN");
+    expect(mock.state.draftKeys.size).toBe(2);
   });
 
   it("gives verification its own --timeout, and one still running says to run the same deploy again to finish", async () => {

@@ -135,6 +135,16 @@ const GENERATED_KEY = /^ocj1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const VALIDATION_WAITING_STAGE = "validation_waiting";
 
 /**
+ * Unknown outcomes that hold back only their own request. Nothing is ever
+ * sent again for them (DEPLOY_OUTCOME_UNKNOWN: OpenCloud deployed the draft
+ * but won't say which release that made), so the very same request still
+ * meets the unknown outcome, while a different one without a key of its own,
+ * such as a deploy of changed source, replaces the entry instead of waiting
+ * for a resolution that never comes.
+ */
+const UNKNOWN_HOLDING_ONLY_ITS_REQUEST = new Set(["DEPLOY_OUTCOME_UNKNOWN"]);
+
+/**
  * A completed entry is forgotten by the next run without a key, except one
  * settled while OpenCloud may still be validating: the very same request
  * rejoins that validation instead of uploading a new draft. Any other request
@@ -2159,6 +2169,15 @@ export class MutationJournal {
         !concurrentCompletion &&
         explicitKey === null &&
         !rejoinsValidation(entry, spec.commandId, scopeDigest, requestDigest)
+      ) {
+        entry = null;
+      }
+      if (
+        entry?.state === "unknown" &&
+        explicitKey === null &&
+        entry.unknownCode !== null &&
+        UNKNOWN_HOLDING_ONLY_ITS_REQUEST.has(entry.unknownCode) &&
+        (entry.commandId !== spec.commandId || entry.scopeDigest !== scopeDigest || entry.requestDigest !== requestDigest)
       ) {
         entry = null;
       }

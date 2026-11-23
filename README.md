@@ -244,6 +244,9 @@ A key the journal generated, passed back with `--idempotency-key`, resumes
 that same entry; it never starts a second one under the same key. Unknown
 outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `MUTATION_OUTCOME_UNKNOWN`) carry the
 same `pending` field and say what to check before deciding on a new key.
+`DEPLOY_OUTCOME_UNKNOWN` (OpenCloud deployed the draft but wouldn't say which
+release that made) holds back only the same source: a deploy of changed
+source is sent as usual, and the same source again needs a new key.
 
 Where OpenCloud advertises `contracts.pinnedDraftValidation` in `/version`,
 validation is pinned to the uploaded draft revision and waited for with short

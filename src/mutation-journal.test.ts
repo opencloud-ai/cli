@@ -910,6 +910,44 @@ describe("mutation journal", () => {
     });
   });
 
+  it("lets a different keyless request replace a deploy whose outcome is unknown, and only that kind of unknown", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const deploy = (artifactSha256: string) => ({ commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID },
+      safeRequest: { action: "deploy", artifactSha256 } });
+    await expect((await MutationJournal.open(binding)).run(deploy("a".repeat(64)), async run => {
+      await run.markAttempted();
+      return run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEPLOY_OUTCOME_UNKNOWN", retryable: false });
+    // The same request still meets its unknown outcome; nothing is sent again.
+    await (await MutationJournal.open(binding)).run(deploy("a".repeat(64)), async run => {
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DEPLOY_OUTCOME_UNKNOWN" }));
+    });
+    // Changed source, without a key, is a new request in its place.
+    await (await MutationJournal.open(binding)).run(deploy("b".repeat(64)), async run => {
+      expect(run.recovered).toBe(false);
+      expect(run.attempted).toBe(false);
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.markAttempted();
+      await run.complete();
+    });
+    // Any other unknown outcome still holds a different request back.
+    await expect((await MutationJournal.open(binding)).run(deploy("c".repeat(64)), async run => {
+      await run.markAttempted();
+      return run.markUnknown("MUTATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
+    await expect((await MutationJournal.open(binding)).run(deploy("d".repeat(64)), async () => "sent"))
+      .rejects.toMatchObject({ code: "MUTATION_IN_PROGRESS" });
+    // So does this one for a request that names a key of its own.
+    const keyed = { ...deploy("e".repeat(64)), explicitIdempotencyKey: "deploy-unknown-k1" };
+    await expect((await MutationJournal.open(binding)).run(keyed, async run => {
+      await run.markAttempted();
+      return run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEPLOY_OUTCOME_UNKNOWN" });
+    await expect((await MutationJournal.open(binding)).run({ ...keyed, safeRequest: { action: "deploy", artifactSha256: "f".repeat(64) } }, async () => "sent"))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+  });
+
   it("atomically retains primary and secondary operation coordinates", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const journal = await MutationJournal.open({

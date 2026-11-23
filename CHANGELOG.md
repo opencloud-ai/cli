@@ -31,7 +31,10 @@
   that entry. Refused again with
   `ACTIVE_DEPLOYMENT_CHANGED` while the draft never deployed, it is settled
   as any stale copy is; a deployed draft OpenCloud refuses to answer for ends
-  as `DEPLOY_OUTCOME_UNKNOWN`, which says what to check.
+  as `DEPLOY_OUTCOME_UNKNOWN` (not retryable), which names `deployment list`.
+  It holds back only that same source: a deploy of changed source without a
+  key replaces the entry, and the same source again needs a new
+  `--idempotency-key`.
 - Validation waits on the in-progress answer OpenCloud actually sends: its
   error filter drops the body's `retryable` flag, which the contract requires,
   so the first "still running" answer used to end the wait with
