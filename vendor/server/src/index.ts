@@ -3163,6 +3163,135 @@ function serviceRequestTooLarge(size: number, requestId: string): never {
   });
 }
 
+/**
+ * A service's answer to `containers.request` arrives framed, not as JSON: one
+ * line of JSON with its status, headers and declared length, a newline, the
+ * raw body, then a 64-byte tail (a newline and JSON padded with spaces) that
+ * says whether the body is whole. The Function holds the body once: a 32 MiB
+ * body costs about 32 MiB of its memory, not Base64 text and a parsed string
+ * of it as well.
+ */
+const SERVICE_RESPONSE_TYPE = "application/vnd.opencloud.service-response.v1";
+const SERVICE_RESPONSE_BODY_BYTES = 32 * 1024 * 1024;
+const SERVICE_RESPONSE_TAIL_BYTES = 64;
+/** A head line holds a status, at most 32 KiB of headers and a length. */
+const SERVICE_RESPONSE_HEAD_BYTES = 40 * 1024;
+type ServiceResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
+
+/** A service answer that arrived but can't be used, in the platform refusal's shape. */
+function serviceResponseFailure(message: string, requestId: string, origin: "app" | "unknown"): OpenCloudError {
+  return new OpenCloudError(message, {
+    code: "COMPUTE_UPSTREAM_FAILED", status: 502, requestId, retryable: false,
+    details: { statusCode: 502, code: "COMPUTE_UPSTREAM_FAILED", message, requestId, details: {
+      category: "ingress", origin, phase: "ingress", retryScope: "none", retryable: false,
+      billingDisposition: "confirmed_usage",
+    } },
+  });
+}
+
+/**
+ * Reads a framed service answer into one buffer and returns the body as a view
+ * of it, without copying. The buffer is sized once from the declared length;
+ * a body sent without one grows it by doubling, up to the limit.
+ */
+async function readServiceResponse(
+  response: Response,
+  requestId: string,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<ServiceResponse> {
+  const invalid = (why: string) => new OpenCloudError(`Service response is invalid: ${why}`, {
+    code: "PLATFORM_INVALID_RESPONSE", status: 502, requestId, retryable: false,
+  });
+  const type = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== SERVICE_RESPONSE_TYPE || !response.body) {
+    await response.body?.cancel().catch(() => undefined);
+    throw invalid("it isn't a framed service response");
+  }
+  const reader = response.body.getReader();
+  const maximum = SERVICE_RESPONSE_HEAD_BYTES + SERVICE_RESPONSE_BODY_BYTES + SERVICE_RESPONSE_TAIL_BYTES;
+  let buffer = new Uint8Array(65_536),
+    length = 0,
+    headEnd = -1;
+  let head: { status: number; headers: Record<string, string>; bodyBytes?: number } | undefined;
+  const grow = (needed: number, exact: boolean) => {
+    if (needed <= buffer.length) return;
+    if (needed > maximum) throw invalid("it is longer than its limit");
+    let size = exact ? needed : buffer.length;
+    while (size < needed) size *= 2;
+    const next = new Uint8Array(Math.min(size, maximum));
+    next.set(buffer.subarray(0, length));
+    buffer = next;
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      grow(length + value.byteLength, false);
+      buffer.set(value, length);
+      length += value.byteLength;
+      if (headEnd >= 0) continue;
+      const newline = buffer.subarray(0, Math.min(length, SERVICE_RESPONSE_HEAD_BYTES)).indexOf(10);
+      if (newline < 0) {
+        if (length >= SERVICE_RESPONSE_HEAD_BYTES) throw invalid("it has no head line");
+        continue;
+      }
+      headEnd = newline;
+      head = serviceResponseHead(new TextDecoder().decode(buffer.subarray(0, newline)), invalid);
+      // Sized once for the declared body, so the body is never copied again.
+      if (head.bodyBytes !== undefined) grow(newline + 1 + head.bodyBytes + SERVICE_RESPONSE_TAIL_BYTES, true);
+    }
+  } catch (cause) {
+    void reader.cancel().catch(() => undefined);
+    if (cause instanceof OpenCloudError) throw cause;
+    throw signal.aborted
+      ? new OpenCloudError(`The service's response didn't arrive within timeoutMs (${timeoutMs} ms). A Function receives a large response at a few MB a second: give such a call a longer timeoutMs, up to 900000.`, {
+        code: "PLATFORM_REQUEST_FAILED", status: 504, requestId, retryable: false, cause,
+      })
+      : new OpenCloudError("The connection to OpenCloud broke while the service's response was arriving", {
+        code: "PLATFORM_REQUEST_FAILED", status: 502, requestId, retryable: false, cause,
+      });
+  }
+  if (!head || length < headEnd + 1 + SERVICE_RESPONSE_TAIL_BYTES) throw invalid("it ended early");
+  const bodyBytes = length - headEnd - 1 - SERVICE_RESPONSE_TAIL_BYTES;
+  const tailText = new TextDecoder().decode(buffer.subarray(length - SERVICE_RESPONSE_TAIL_BYTES, length));
+  let tail: { end?: unknown; bodyBytes?: unknown } | null = null;
+  try {
+    tail = tailText.startsWith("\n") ? JSON.parse(tailText.slice(1)) : null;
+  } catch {
+    tail = null;
+  }
+  if (!tail || typeof tail !== "object" || tail.bodyBytes !== bodyBytes) throw invalid("its tail is malformed");
+  if (tail.end === "too_large") {
+    throw serviceResponseFailure(`The service's response was over the 32 MiB (${SERVICE_RESPONSE_BODY_BYTES}-byte) limit a Function's containers.request can receive, so it was cut off there. Return less, or store a large result in Files and return its File ID.`, requestId, "app");
+  }
+  if (tail.end === "failed") {
+    throw serviceResponseFailure(`The connection to the service broke after ${bodyBytes} bytes of its response, so the response is incomplete. The request may have had its effects: don't repeat it blindly.`, requestId, "unknown");
+  }
+  if (tail.end !== "complete") throw invalid("its tail is malformed");
+  if (head.bodyBytes !== undefined && head.bodyBytes !== bodyBytes) throw invalid("its body isn't the length it declared");
+  return { status: head.status, headers: head.headers, body: buffer.subarray(headEnd + 1, headEnd + 1 + bodyBytes) };
+}
+
+function serviceResponseHead(
+  text: string,
+  invalid: (why: string) => OpenCloudError,
+): { status: number; headers: Record<string, string>; bodyBytes?: number } {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw invalid("its head isn't JSON");
+  }
+  const head = value as { status?: unknown; headers?: unknown; bodyBytes?: unknown } | null;
+  if (!head || typeof head !== "object" || typeof head.status !== "number" || !Number.isInteger(head.status)
+    || head.status < 100 || head.status > 599 || !head.headers || typeof head.headers !== "object"
+    || Array.isArray(head.headers) || Object.values(head.headers).some((entry) => typeof entry !== "string")
+    || (head.bodyBytes !== undefined && (typeof head.bodyBytes !== "number" || !Number.isSafeInteger(head.bodyBytes)
+      || head.bodyBytes < 0 || head.bodyBytes > SERVICE_RESPONSE_BODY_BYTES))) throw invalid("its head is malformed");
+  return head as { status: number; headers: Record<string, string>; bodyBytes?: number };
+}
+
 function containersClient(bindings: RuntimeBindings, requestId: string): OpenCloudContainersClient {
   const invalid = (message: string): never => { throw new OpenCloudError(message, {
     code: "INVALID_CONTAINER_INPUT", status: 400, requestId, retryable: false,
@@ -3179,19 +3308,32 @@ function containersClient(bindings: RuntimeBindings, requestId: string): OpenClo
     if (!value || !/^[A-Za-z0-9:._-]{8,128}$/.test(value)) invalid("Container mutations require an idempotencyKey of 8 to 128 safe characters");
     return value;
   };
-  const request = async <T>(operation: "run" | "get" | "cancel" | "request", input: unknown, timeoutMs = 20_000): Promise<T> => {
+  const send = async (operation: "run" | "get" | "cancel" | "request", input: unknown, timeoutMs = 20_000) => {
     if (!bindings.containersUrl || !bindings.containersToken) throw new OpenCloudError("Containers are unavailable in this Function runtime", {
       code: "COMPUTE_UNAVAILABLE", status: 503, requestId, retryable: true,
     });
-    const response = await safeFetch(new URL(`/_opencloud/containers/${operation}`, bindings.containersUrl), {
-      method: "POST", redirect: "error", headers: {
-        authorization: `Bearer ${bindings.containersToken}`, "content-type": "application/json",
-        "x-opencloud-function-grant": bindings.filesGrant, "x-request-id": requestId,
-      }, body: JSON.stringify(input), signal: AbortSignal.timeout(assertTimeout(timeoutMs)),
-    }, requestId);
+    const timeout = assertTimeout(timeoutMs);
+    const signal = AbortSignal.timeout(timeout);
+    let response: Response;
+    try {
+      response = await safeFetch(new URL(`/_opencloud/containers/${operation}`, bindings.containersUrl), {
+        method: "POST", redirect: "error", headers: {
+          authorization: `Bearer ${bindings.containersToken}`, "content-type": "application/json",
+          "x-opencloud-function-grant": bindings.filesGrant, "x-request-id": requestId,
+        }, body: JSON.stringify(input), signal,
+      }, requestId);
+    } catch (error) {
+      // Say which limit ended it, rather than that the platform failed.
+      if (signal.aborted) throw new OpenCloudError(`containers.${operation} got no answer within timeoutMs (${timeout} ms)`, {
+        code: "PLATFORM_REQUEST_FAILED", status: 504, requestId, retryable: true, cause: error,
+      });
+      throw error;
+    }
     if (!response.ok) throw await responseError(response, requestId);
-    return parseJsonResponse<T>(response, requestId);
+    return { response, signal, timeout };
   };
+  const request = async <T>(operation: "run" | "get" | "cancel", input: unknown, timeoutMs?: number): Promise<T> =>
+    parseJsonResponse<T>((await send(operation, input, timeoutMs)).response, requestId);
   return {
     run(workload, input, options) {
       let encoded: string;
@@ -3209,22 +3351,11 @@ function containersClient(bindings: RuntimeBindings, requestId: string): OpenClo
       const bytes = typeof input.body === "string" ? new TextEncoder().encode(input.body) : input.body;
       if (bytes && !(bytes instanceof Uint8Array)) invalid("Service request body must be a string or a Uint8Array");
       if (bytes && bytes.byteLength > SERVICE_REQUEST_BODY_BYTES) serviceRequestTooLarge(bytes.byteLength, requestId);
-      const result = await request<{ status: number; headers: Record<string, string>; bodyBase64: string }>("request", {
+      const { response, signal, timeout } = await send("request", {
         name: name(workload), path: input.path, method: input.method ?? "GET", headers: input.headers ?? {},
         ...(bytes ? { bodyBase64: encodeBase64(bytes) } : {}),
       }, options?.timeoutMs);
-      const badResponse = (): never => { throw new OpenCloudError("Service response is invalid", {
-        code: "PLATFORM_INVALID_RESPONSE", status: 502, requestId, retryable: false,
-      }); };
-      if (!result || !Number.isInteger(result.status) || result.status < 100 || result.status > 599
-        || !result.headers || typeof result.headers !== "object" || Array.isArray(result.headers)
-        || Object.values(result.headers).some(value => typeof value !== "string")
-        || typeof result.bodyBase64 !== "string" || result.bodyBase64.length > 44_739_244) badResponse();
-      let body: Uint8Array;
-      try { body = decodeBase64(result.bodyBase64); }
-      catch { return badResponse(); }
-      if (body.byteLength > 32 * 1024 * 1024) badResponse();
-      return { status: result.status, headers: result.headers, body };
+      return readServiceResponse(response, requestId, signal, timeout);
     },
   };
 }
@@ -4908,69 +5039,6 @@ function encodeBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
   }
   return btoa(binary);
-}
-
-const BASE64_DECODE = (() => {
-  const table = new Int16Array(128).fill(-1);
-  for (let i = 0; i < 26; i++) {
-    table[65 + i] = i; // A-Z
-    table[97 + i] = 26 + i; // a-z
-  }
-  for (let i = 0; i < 10; i++) table[48 + i] = 52 + i; // 0-9
-  table[43] = 62; // +
-  table[47] = 63; // /
-  return table;
-})();
-
-function decodeBase64(input: string): Uint8Array {
-  const len = input.length;
-  if (len === 0) return new Uint8Array(0);
-  if ((len & 3) !== 0) throw new Error("Invalid base64 length");
-  const pad = input.charCodeAt(len - 1) === 61
-    ? (input.charCodeAt(len - 2) === 61 ? 2 : 1)
-    : 0;
-  const out = new Uint8Array((len >>> 2) * 3 - pad);
-  const fullEnd = pad > 0 ? len - 4 : len;
-  let outPos = 0;
-  for (let i = 0; i < fullEnd; i += 4) {
-    const c0 = input.charCodeAt(i);
-    const c1 = input.charCodeAt(i + 1);
-    const c2 = input.charCodeAt(i + 2);
-    const c3 = input.charCodeAt(i + 3);
-    if ((c0 | c1 | c2 | c3) > 127) throw new Error("Invalid base64 character");
-    const v0 = BASE64_DECODE[c0]!;
-    const v1 = BASE64_DECODE[c1]!;
-    const v2 = BASE64_DECODE[c2]!;
-    const v3 = BASE64_DECODE[c3]!;
-    if ((v0 | v1 | v2 | v3) < 0) throw new Error("Invalid base64 character");
-    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
-    out[outPos++] = (triple >>> 16) & 0xff;
-    out[outPos++] = (triple >>> 8) & 0xff;
-    out[outPos++] = triple & 0xff;
-  }
-  if (pad === 1) {
-    const c0 = input.charCodeAt(fullEnd);
-    const c1 = input.charCodeAt(fullEnd + 1);
-    const c2 = input.charCodeAt(fullEnd + 2);
-    if ((c0 | c1 | c2) > 127) throw new Error("Invalid base64 character");
-    const v0 = BASE64_DECODE[c0]!;
-    const v1 = BASE64_DECODE[c1]!;
-    const v2 = BASE64_DECODE[c2]!;
-    if ((v0 | v1 | v2) < 0 || (v2 & 0x3) !== 0) throw new Error("Invalid base64 padding");
-    const triple = (v0 << 18) | (v1 << 12) | (v2 << 6);
-    out[outPos++] = (triple >>> 16) & 0xff;
-    out[outPos++] = (triple >>> 8) & 0xff;
-  } else if (pad === 2) {
-    const c0 = input.charCodeAt(fullEnd);
-    const c1 = input.charCodeAt(fullEnd + 1);
-    if ((c0 | c1) > 127) throw new Error("Invalid base64 character");
-    const v0 = BASE64_DECODE[c0]!;
-    const v1 = BASE64_DECODE[c1]!;
-    if ((v0 | v1) < 0 || (v1 & 0xf) !== 0) throw new Error("Invalid base64 padding");
-    const triple = (v0 << 18) | (v1 << 12);
-    out[outPos++] = (triple >>> 16) & 0xff;
-  }
-  return out;
 }
 
 function normalizeGenerateImageInput(

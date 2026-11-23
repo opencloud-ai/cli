@@ -55,7 +55,7 @@ describe("container Function client", () => {
   it("round-trips binary service bodies and explicit cancellation keys", async () => {
     const runtime = scoped();
     const fetch = vi.fn(async (url: URL) => url.pathname.endsWith("/request")
-      ? Response.json({ status: 201, headers: { "content-type": "application/octet-stream" }, bodyBase64: "AP+A" })
+      ? framed({ status: 201, headers: { "content-type": "application/octet-stream" }, bodyBytes: 3 }, [new Uint8Array([0, 255, 128])])
       : Response.json({ executionId: fileId, state: "cancelled" }));
     vi.stubGlobal("fetch", fetch);
     defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
@@ -82,7 +82,7 @@ describe("container Function client", () => {
   });
 
   it("bounds a service request body at 4 MiB before fetching, with the documented code", async () => {
-    const fetch = vi.fn(async () => Response.json({ status: 200, headers: {}, bodyBase64: "" }));
+    const fetch = vi.fn(async () => framed({ status: 200, headers: {}, bodyBytes: 0 }, []));
     vi.stubGlobal("fetch", fetch);
     const oversized = scoped();
     let refused: unknown;
@@ -131,82 +131,136 @@ describe("container Function client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("decodes large binary service responses quickly and rejects invalid base64", async () => {
-    const size = 16 * 1024 * 1024 + 2; // 16 MiB + 2 bytes (tests 1-byte padding too)
-    const expected = new Uint8Array(size);
-    for (let i = 0; i < size; i++) expected[i] = (i * 31 + 17) & 0xff;
-    const encoded = Buffer.from(expected).toString("base64");
+  // S7c: a 32 MiB response sent as Base64 inside JSON held the text, its
+  // parsed string and the decoded bytes at once, and the 150 MB Function was
+  // killed. The framed answer is read into one buffer, the body a view of it.
+  it("reads a framed 32 MiB service response into one buffer without copying the body", async () => {
+    const size = 32 * 1024 * 1024;
+    const chunk = new Uint8Array(65_536);
+    for (let index = 0; index < chunk.length; index++) chunk[index] = (index * 31 + 17) & 0xff;
+    const head = { status: 200, headers: { "content-type": "application/octet-stream" }, bodyBytes: size };
+    const headLength = new TextEncoder().encode(`${JSON.stringify(head)}\n`).length;
+    // Test-only: the most memory the read held, sampled as each chunk is taken.
+    const used = () => process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers;
+    const baseline = used();
+    let peak = baseline;
+    vi.stubGlobal("fetch", vi.fn(async () => framed(head, Array.from({ length: size / chunk.length }, () => chunk), "complete", () => {
+      peak = Math.max(peak, used());
+    })));
+    let body: Uint8Array | undefined;
+    const runtime = scoped();
+    defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+      body = (await containers.request("image-api", { path: "/export" }, { timeoutMs: 120_000 })).body;
+      peak = Math.max(peak, used());
+      return { length: body.byteLength };
+    } });
+    await expect((await runtime.invoke()).json()).resolves.toEqual({ length: size });
+    expect(body!.byteOffset).toBe(headLength);
+    // A view of the one buffer the whole answer was read into: head, body, tail.
+    expect(body!.buffer.byteLength).toBe(headLength + size + 64);
+    expect(body![0]).toBe(17);
+    expect(body![size - 1]).toBe(chunk[chunk.length - 1]);
+    // About the body once (32 MiB; measured 35 MiB with the test's own
+    // allocations), not three times over as with Base64 in JSON (over 120 MB).
+    expect(peak - baseline).toBeLessThan(48 * 1024 * 1024);
+  });
 
-    const large = scoped();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        Response.json({
-          status: 200,
-          headers: { "content-type": "application/octet-stream" },
-          bodyBase64: encoded,
-        }),
-      ),
-    );
-    let decoded: Uint8Array | undefined;
-    defineFunction({
-      input: schema.object({}),
-      handler: async ({ containers }) => {
-        const result = await containers.request("image-api", { path: "/large" });
-        decoded = result.body;
-        return { length: result.body.byteLength };
-      },
+  it("reads a body sent without a length, and says why an answer can't be used", async () => {
+    const call = async (response: () => Response) => {
+      vi.stubGlobal("fetch", vi.fn(async () => response()));
+      const runtime = scoped();
+      let error: unknown;
+      defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+        try {
+          const result = await containers.request("image-api", { path: "/stream" });
+          return { status: result.status, text: new TextDecoder().decode(result.body) };
+        } catch (caught) {
+          error = caught;
+          throw caught;
+        }
+      } });
+      const answer = await runtime.invoke();
+      return { answer, error: error as OpenCloudError | undefined };
+    };
+    const parts = ["chunked ", "body ", "without a length"].map((text) => new TextEncoder().encode(text));
+    const streamed = await call(() => framed({ status: 206, headers: {} }, parts));
+    await expect(streamed.answer.json()).resolves.toEqual({ status: 206, text: "chunked body without a length" });
+    // Cut off at the 32 MiB limit: the service's size, said plainly.
+    const tooLarge = await call(() => framed({ status: 200, headers: {} }, parts, "too_large"));
+    expect(tooLarge.error).toMatchObject({
+      code: "COMPUTE_UPSTREAM_FAILED",
+      status: 502,
+      message: expect.stringContaining("over the 32 MiB (33554432-byte) limit"),
+      details: { details: { origin: "app" } },
     });
-    const started = performance.now();
-    const response = await large.invoke();
-    const elapsedMs = performance.now() - started;
-    expect(response.status).toBe(200);
-    expect(decoded?.byteLength).toBe(size);
-    expect(Buffer.compare(Buffer.from(decoded!), Buffer.from(expected))).toBe(0);
-    expect(elapsedMs).toBeLessThan(2_000);
-
-    // Also verify 1-byte (==) and 2-byte (=) padded responses.
-    for (const sample of [new Uint8Array([0xab]), new Uint8Array([0xab, 0xcd])]) {
-      const padded = scoped();
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          Response.json({
-            status: 200,
-            headers: {},
-            bodyBase64: Buffer.from(sample).toString("base64"),
-          }),
-        ),
-      );
-      defineFunction({
-        input: schema.object({}),
-        handler: async ({ containers }) => {
-          const result = await containers.request("image-api", { path: "/padded" });
-          return { bytes: [...result.body] };
-        },
-      });
-      await expect((await padded.invoke()).json()).resolves.toEqual({ bytes: [...sample] });
-    }
-
-    // Invalid base64 payloads must fail with 502 PLATFORM_INVALID_RESPONSE.
-    for (const bad of ["ABC", "A===", "====", "AB=C", "!!!!", "AB==", "ABC=", "AB\u0100D"]) {
-      const invalid = scoped();
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () => Response.json({ status: 200, headers: {}, bodyBase64: bad })),
-      );
-      defineFunction({
-        input: schema.object({}),
-        handler: async ({ containers }) => containers.request("image-api", { path: "/bad" }),
-      });
-      const res = await invalid.invoke();
-      expect(res.status).toBe(502);
-      await expect(res.json()).resolves.toMatchObject({
-        error: { code: "PLATFORM_INVALID_RESPONSE" },
-      });
+    // The connection to the service broke part way.
+    const broken = await call(() => framed({ status: 200, headers: {} }, parts, "failed"));
+    expect(broken.error).toMatchObject({
+      code: "COMPUTE_UPSTREAM_FAILED",
+      message: expect.stringContaining("broke after 29 bytes"),
+    });
+    // The connection to OpenCloud broke part way.
+    const cut = await call(() => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"status":200,"headers":{}}\nsome'));
+        controller.error(new Error("socket hang up"));
+      },
+    }), { headers: { "content-type": "application/vnd.opencloud.service-response.v1" } }));
+    expect(cut.error).toMatchObject({ code: "PLATFORM_REQUEST_FAILED", message: expect.stringContaining("broke while the service's response") });
+    // Not a framed answer, a missing tail, a body longer than it said.
+    for (const response of [
+      () => Response.json({ status: 200, headers: {}, bodyBase64: "" }),
+      () => new Response('{"status":200,"headers":{}}\nno tail', { headers: { "content-type": "application/vnd.opencloud.service-response.v1" } }),
+      () => framed({ status: 200, headers: {}, bodyBytes: 3 }, parts),
+    ]) {
+      const invalid = await call(response);
+      expect(invalid.answer.status).toBe(502);
+      expect(invalid.error).toMatchObject({ code: "PLATFORM_INVALID_RESPONSE" });
     }
   });
+
+  it("says which limit ended a call that got no answer within timeoutMs", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: URL, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener("abort", () => reject(init.signal!.reason));
+    })));
+    const runtime = scoped();
+    let error: unknown;
+    defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+      try {
+        return await containers.request("image-api", { path: "/slow" }, { timeoutMs: 50 });
+      } catch (caught) {
+        error = caught;
+        throw caught;
+      }
+    } });
+    expect((await runtime.invoke()).status).toBe(504);
+    expect(error).toMatchObject({ code: "PLATFORM_REQUEST_FAILED", message: "containers.request got no answer within timeoutMs (50 ms)" });
+  });
 });
+
+/** A framed service answer, as the platform's relay sends one. */
+function framed(
+  head: { status: number; headers: Record<string, string>; bodyBytes?: number },
+  chunks: Uint8Array[],
+  end: "complete" | "too_large" | "failed" = "complete",
+  onPull?: () => void,
+): Response {
+  const encoder = new TextEncoder();
+  const bodyBytes = chunks.reduce((total, part) => total + part.byteLength, 0);
+  const parts = [
+    encoder.encode(`${JSON.stringify(head)}\n`),
+    ...chunks,
+    encoder.encode(`\n${JSON.stringify({ end, bodyBytes })}`.padEnd(64, " ")),
+  ];
+  let index = 0;
+  return new Response(new ReadableStream<Uint8Array>({
+    pull(controller) {
+      onPull?.();
+      if (index < parts.length) controller.enqueue(parts[index++]!);
+      else controller.close();
+    },
+  }), { headers: { "content-type": "application/vnd.opencloud.service-response.v1" } });
+}
 
 describe("resumable managed File inputs", () => {
   it("uses opaque sessions and bounded chunks while keeping the whole input out of memory", async () => {

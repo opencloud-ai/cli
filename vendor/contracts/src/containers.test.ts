@@ -99,7 +99,9 @@ describe("compute API errors and money", () => {
   it("validates full-size service bodies without a regex stack and bounds decoded bytes", () => {
     const maximumBytes = 4 * 1024 * 1024;
     expect(containerServiceRequestBodyBytes).toBe(maximumBytes);
-    expect(containerRuntimeServiceResponseSchema.shape.bodyBase64.maxLength).toBe(44_739_244);
+    // The response is framed raw bytes (no Base64): its head bounds the declared length.
+    expect(containerRuntimeServiceResponseSchema.safeParse({ status: 200, headers: {}, bodyBytes: 32 * 1024 * 1024 }).success).toBe(true);
+    expect(containerRuntimeServiceResponseSchema.safeParse({ status: 200, headers: {}, bodyBytes: 32 * 1024 * 1024 + 1 }).success).toBe(false);
     const bytes = Buffer.alloc(maximumBytes + 1, 255);
     const bodyBase64 = bytes.subarray(0, maximumBytes).toString("base64");
     expect(containerRuntimeServiceRequestSchema.safeParse({ name: "web", path: "/", bodyBase64 }).success).toBe(true);

@@ -417,7 +417,28 @@ export const containerRuntimeServiceRequestSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(3_600).optional(),
   bodyBase64: serviceBodyBase64Schema.optional(),
 }).strict();
-export const containerRuntimeServiceResponseSchema = z.object({ status: z.number().int().min(100).max(599), headers: httpHeadersSchema, bodyBase64: z.string().max(Math.ceil(containerServiceResponseBodyBytes / 3) * 4) }).strict();
+/**
+ * A Function's `containers.request` answer is framed, not JSON, so a 32 MiB
+ * body costs a Function's 150 MB about 32 MiB, not Base64 text and its parsed
+ * string as well. The frame is one line of JSON (the head:
+ * `containerRuntimeServiceResponseSchema`), a newline, the service's raw body,
+ * and a tail of exactly `containerServiceResponseTailBytes` bytes: a newline,
+ * then JSON (`containerRuntimeServiceResponseTailSchema`) padded with spaces.
+ * The head's `bodyBytes` is the service's declared length, when it gave one;
+ * the tail says whether the body is whole, was cut off at the 32 MiB limit,
+ * or broke off because the connection to the service failed.
+ */
+export const containerServiceResponseContentType = "application/vnd.opencloud.service-response.v1";
+export const containerServiceResponseTailBytes = 64;
+export const containerRuntimeServiceResponseSchema = z.object({
+  status: z.number().int().min(100).max(599),
+  headers: httpHeadersSchema,
+  bodyBytes: z.number().int().min(0).max(containerServiceResponseBodyBytes).optional(),
+}).strict();
+export const containerRuntimeServiceResponseTailSchema = z.object({
+  end: z.enum(["complete", "too_large", "failed"]),
+  bodyBytes: z.number().int().min(0).max(containerServiceResponseBodyBytes),
+}).strict();
 export const containerRuntimeOperations = {
   run: { path: "/_opencloud/containers/run", input: containerRuntimeRunRequestSchema, output: computeExecutionSchema },
   get: { path: "/_opencloud/containers/get", input: containerRuntimeGetRequestSchema, output: computeExecutionSchema },

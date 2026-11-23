@@ -124,8 +124,11 @@ the shapes it misread, the route table may carry a host-outage reason, and
 `containers.request` refuses a body over 4 MiB with `COMPUTE_REQUEST_TOO_LARGE`.
 `compute-protocol/src/index.ts` and `contracts/src/containers.ts` are then
 refreshed verbatim from platform `434a56677`, which lets a held host recovery
-name its blocker in `details.reason`. Every file this release changed under
-`vendor/` is byte-identical to platform `434a56677`.
+name its blocker in `details.reason`. `contracts/src/{containers.ts,containers.test.ts}`
+and `server/src/{index.ts,index.test.ts}` are then refreshed verbatim from
+platform `bbc9f77e1`: `containers.request` reads the service's answer as raw
+bytes rather than Base64 inside JSON. Every file this release changed under
+`vendor/` is byte-identical to platform `bbc9f77e1`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 
