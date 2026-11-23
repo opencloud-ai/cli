@@ -1422,12 +1422,13 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
   /**
    * A control plane that, like OpenCloud, replays createDraft and deployDraft
    * for a key it has seen: the same draft in its current state, and the same
-   * release and operation. `onDeploy` decides how the first deploy's reply
-   * is lost.
+   * release and operation, looked up before anything else. A draft goes from
+   * validated to deployed when OpenCloud takes the deploy. `onDeploy` decides
+   * how the first deploy's reply is lost.
    */
   function sentDeployResponder(localDigest: string, onDeploy: () => { status: number; body: unknown } | "deployed") {
     const state = {
-      draftStatus: "open" as "open" | "validated" | "deploying" | "deployed",
+      draftStatus: "open" as "open" | "validated" | "deployed",
       draftRevision: 1,
       files: new Map<string, string>(),
       draftKeys: new Set<string>(),
@@ -1475,23 +1476,12 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
       if (request.method === "POST" && request.path.startsWith(`${draftPath}/deploy`)) {
         const key = String(request.headers["idempotency-key"]);
         state.deployKeys.push(key);
-        if (state.operationKeys.has(key)) {
-          // OpenCloud refuses a draft while it is deploying; this one finishes meanwhile.
-          if (state.draftStatus === "deploying") {
-            state.draftStatus = "deployed";
-            return { status: 409, body: { statusCode: 409, message: "Draft must pass authoritative validation before use", error: "Conflict" } };
-          }
-          return { status: 201, body: started() };
-        }
+        if (state.operationKeys.has(key)) return { status: 201, body: started() };
         if (state.draftStatus !== "validated") return { status: 409, body: { statusCode: 409, message: "Draft must pass authoritative validation before use", error: "Conflict" } };
         state.operationKeys.add(key);
+        state.draftStatus = "deployed";
         const answer = onDeploy();
-        if (answer === "deployed") {
-          state.draftStatus = "deployed";
-          return { status: 201, body: started() };
-        }
-        state.draftStatus = "deploying";
-        return answer;
+        return answer === "deployed" ? { status: 201, body: started() } : answer;
       }
       if (request.method === "POST" && request.path === `/v1/apps/${appId}/verifications`) {
         state.verifyPosts += 1;
@@ -1503,7 +1493,7 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     return { state, responder };
   }
 
-  it("follows a deploy whose reply was lost, without deploying again, while its draft is deploying and then deployed", async () => {
+  it("follows a deploy whose reply was lost after OpenCloud took it, without deploying again", async () => {
     const context = await workspace("deploy-lost-reply");
     const directory = await app(context);
     const localDigest = (JSON.parse((await run(["validate", directory], context)).stdout) as { artifactSha256: string }).artifactSha256;
@@ -1512,15 +1502,15 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     responder = mock.responder;
     const lost = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"], context);
     expect(lost.status).toBe(1);
-    expect(mock.state.draftStatus).toBe("deploying");
+    expect(mock.state.draftStatus).toBe("deployed");
 
     const resumed = await run(["--token", "synthetic-token", "deploy", directory, "--no-verify", "--interval", "0.05"], context);
     expect(resumed.status, resumed.stderr).toBe(0);
     expect(JSON.parse(resumed.stdout)).toMatchObject({ operation: { id: deployOpId, state: "succeeded" }, deployment: { id: deployedId } });
     expect(mock.state.operationKeys.size).toBe(1);
     expect(mock.state.draftKeys.size).toBe(1);
+    expect(mock.state.deployKeys).toHaveLength(2);
     expect(new Set(mock.state.deployKeys).size).toBe(1);
-    expect(mock.state.deployKeys.length).toBeGreaterThanOrEqual(2);
     expect((JSON.parse(await readFile(path.join(directory, ".opencloud", "base.json"), "utf8")) as { deploymentId: string }).deploymentId).toBe(deployedId);
 
     // The entry is settled: the next deploy is a new request, held behind nothing.

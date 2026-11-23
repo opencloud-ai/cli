@@ -24,8 +24,8 @@
 - A deploy whose reply was lost (a timeout, a reset connection) or that was
   killed before it saved the operation is not sent twice. Run again, it sends
   the deploy again with the same key while its draft still holds the
-  validated revision, waits while OpenCloud is still deploying that draft,
-  and follows the release it started, then verifies it and records it in
+  validated revision, and follows the release it started (OpenCloud answers
+  a key it knows with that release), then verifies it and records it in
   `.opencloud/base.json`. 3.21 found the draft deployed and stopped with
   "The source draft is deployed", every time, holding later deploys behind
   that entry. Refused again with

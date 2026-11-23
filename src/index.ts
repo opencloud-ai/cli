@@ -1510,18 +1510,20 @@ function rerunCommand(run: MutationRun): string {
  * The draft an earlier run of this deploy validated and may already have
  * sent to deployDraft: its reply was lost (a timeout, a reset connection) or
  * the run was killed before it saved the operation. While the draft still
- * holds the revision that run validated, and is validated, deploying or
- * deployed, the deploy is sent again with its own key (see resendDeploy),
- * never synchronized again: OpenCloud refuses to update a deployed draft,
- * which used to settle the entry, and the next run then released the same
- * source a second time. Null when the deploy can't have been sent, or the
- * draft changed since, so the run applies and validates as usual.
+ * holds the revision that run validated, and is validated or deployed, the
+ * deploy is sent again with its own key (see resendDeploy), never
+ * synchronized again: OpenCloud refuses to update a deployed draft, which
+ * used to settle the entry, and the next run then released the same source a
+ * second time. The contract's `deploying` status, which OpenCloud doesn't
+ * write today, is taken the same way, so it can never lead there either.
+ * Null when the deploy can't have been sent, or the draft changed since, so
+ * the run applies and validates as usual.
  */
 async function sentDeployDraft(
   control: OpenCloudClient,
   run: MutationRun,
   appId: string,
-): Promise<{ id: string; status: string } | null> {
+): Promise<string | null> {
   const checkpoint = run.checkpoint;
   if (!run.attempted || checkpoint?.stage !== "validated" || !checkpoint.draftId || checkpoint.revision === undefined) {
     return null;
@@ -1531,35 +1533,31 @@ async function sentDeployDraft(
     throw error;
   });
   return draft && draft.revision === checkpoint.revision && ["validated", "deploying", "deployed"].includes(draft.status)
-    ? { id: draft.id, status: draft.status }
+    ? draft.id
     : null;
 }
 
 /**
  * Sends a deploy an earlier run may have sent (see sentDeployDraft) again
- * with the same key: OpenCloud answers with the release that request
- * started, or starts it if the request never arrived. The entry is not
- * settled on the way, so no later run deploys the source a second time.
- * A draft OpenCloud is still deploying is refused for now: this waits while
- * it is, within --timeout. ACTIVE_DEPLOYMENT_CHANGED may come from the first
- * request still starting its release; sent again, the key answers with that
- * release, so only a second refusal of a draft that still isn't deployed is
+ * with the same key: OpenCloud looks the key up first and answers with the
+ * release that request started, or starts it if the request never arrived.
+ * The entry is not settled on the way, so no later run deploys the source a
+ * second time; an answer this can't read is thrown with the entry kept, and
+ * the next run sends it again. ACTIVE_DEPLOYMENT_CHANGED may come from the
+ * first request still starting its release; sent again, the key answers with
+ * that release, so only a second refusal of a draft that never deployed is
  * the stale copy it says, settled as any other.
  */
 async function resendDeploy(
   control: OpenCloudClient,
   run: MutationRun,
   input: { appId: string; draftId: string; query?: { expectedActiveDeploymentId: string } },
-  initialStatus: string,
   options: OperationOptions,
   directory: string,
 ): Promise<unknown> {
   const intervalMs = parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) * 1_000;
-  const deadline = Date.now() + parseBoundedNumber(options.timeout, "--timeout", 1, 1_800, false) * 1_000;
-  let before = initialStatus;
-  let staleRefusals = 0;
   await run.markAttempted();
-  for (;;) {
+  for (let attempt = 1; ; attempt += 1) {
     try {
       return await control.call("deployDraft", input, {
         idempotencyKey: childIdempotencyKey(run, "deploy"),
@@ -1567,32 +1565,19 @@ async function resendDeploy(
       });
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 409) throw error;
-      const current = (await control.call("getDraft", { appId: input.appId, draftId: input.draftId })).status;
-      if (current === "deploying") {
-        if (Date.now() >= deadline) {
-          throw new CliContractError("DRAFT_STILL_DEPLOYING",
-            `OpenCloud is still deploying draft ${input.draftId}, which an earlier run of this command sent; it was not sent twice.`, {
-              retryable: true,
-              fields: { draftId: input.draftId },
-              hint: `To follow that release, run ${rerunCommand(run)} again.`,
-            });
-        }
-      } else if (error.code === "ACTIVE_DEPLOYMENT_CHANGED") {
-        staleRefusals += 1;
-        if (staleRefusals > 1) {
-          if (current === "validated") {
-            return withStaleReleaseHint(control, input.appId, directory, settleStaleReleaseRefusal(run, Promise.reject(error)));
-          }
-          await run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
-        }
-      } else if (current === before) {
-        // Refused without the draft moving on: a deployed draft's release is
-        // OpenCloud's to say, so this command can't tell what it did.
-        if (current === "deployed" && isDefiniteRefusal(error)) await run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
-        throw error;
+      const stale = error.code === "ACTIVE_DEPLOYMENT_CHANGED";
+      if (stale && attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        continue;
       }
-      before = current;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, Math.max(0, deadline - Date.now()))));
+      const current = (await control.call("getDraft", { appId: input.appId, draftId: input.draftId })).status;
+      if (stale && current === "validated") {
+        return withStaleReleaseHint(control, input.appId, directory, settleStaleReleaseRefusal(run, Promise.reject(error)));
+      }
+      // A deployed draft's release is OpenCloud's to name; refused, this
+      // command can't tell what that deploy did.
+      if (current === "deployed" && (stale || isDefiniteRefusal(error))) await run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+      throw error;
     }
   }
 }
@@ -5541,10 +5526,10 @@ addOperationOptions(
             );
           }
         } else {
-          const sent = await sentDeployDraft(context.control, run, appId);
-          if (sent) {
-            draftId = sent.id;
-            started = await resendDeploy(context.control, run, deployInput(draftId), sent.status, options, String(directory));
+          const sentDraftId = await sentDeployDraft(context.control, run, appId);
+          if (sentDraftId) {
+            draftId = sentDraftId;
+            started = await resendDeploy(context.control, run, deployInput(draftId), options, String(directory));
           } else {
             const synchronized = await synchronizeValidatedDraft(
               context.control,
