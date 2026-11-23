@@ -169,7 +169,7 @@ import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.22.0";
+const CLI_VERSION = "3.22.1";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -3999,15 +3999,32 @@ dev
           );
         }
         await run.markAttempted();
-        const result = await context.control.call("verifyDevSession", {
-          appId: state.appId,
-          sessionId: state.sessionId,
-          body: {
-            requireInteractionContract: true,
-            requireExternalE2eSpec: true,
-            ...(parallelism === undefined ? {} : { parallelism }),
-          },
-        }, { timeoutMs });
+        let result: Awaited<ReturnType<typeof context.control.call<"verifyDevSession">>>;
+        try {
+          result = await context.control.call("verifyDevSession", {
+            appId: state.appId,
+            sessionId: state.sessionId,
+            body: {
+              requireInteractionContract: true,
+              requireExternalE2eSpec: true,
+              ...(parallelism === undefined ? {} : { parallelism }),
+            },
+          }, { timeoutMs });
+        } catch (error) {
+          // OpenCloud definitively refused or failed this verification attempt,
+          // so nothing is still running and the journal entry must not block
+          // verifying a newly synced revision later. Leave
+          // DEV_VERIFICATION_IN_PROGRESS unsettled so a retry reconciles it.
+          if (
+            error instanceof ApiError &&
+            error.status !== 429 &&
+            isDefiniteRefusal(error) &&
+            error.code !== "DEV_VERIFICATION_IN_PROGRESS"
+          ) {
+            await run.complete();
+          }
+          throw error;
+        }
         if (
           result.receipt.revisionId !== activeRevisionId ||
           result.receipt.artifactSha256 !== artifactSha256

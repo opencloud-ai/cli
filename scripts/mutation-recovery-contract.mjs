@@ -458,6 +458,38 @@ const server = createServer(async (request, response) => {
     request.method === "POST" &&
     request.url === `/v1/apps/${appId}/dev-sessions/${sessionId}/verify`
   ) {
+    if (devVerificationBehavior === "conflict-diagnostics") {
+      send(response, 409, {
+        code: "BROWSER_DIAGNOSTICS_FAILED",
+        message: "BrowserVerificationError: tests/opencloud.e2e.js is required",
+      });
+      return;
+    }
+    if (devVerificationBehavior === "conflict-in-progress") {
+      activeDevSessionStatus = "verifying";
+      devVerificationReceipts = [devReceipt(true)];
+      send(response, 409, {
+        code: "DEV_VERIFICATION_IN_PROGRESS",
+        message: "A verification attempt is already running for this development session",
+      });
+      return;
+    }
+    if (devVerificationBehavior === "rate-limited-nonretryable") {
+      send(response, 429, {
+        code: "COMPUTE_BUDGET_EXCEEDED",
+        message: "Spending limit reached",
+        retryable: false,
+        details: {
+          category: "billing",
+          origin: "policy",
+          phase: "admission",
+          retryScope: "none",
+          retryable: false,
+          billingDisposition: "none",
+        },
+      });
+      return;
+    }
     const passed = !devVerificationBehavior.includes("fail");
     if (devVerificationDelayMs) {
       await new Promise(resolve => setTimeout(resolve, devVerificationDelayMs));
@@ -1094,6 +1126,151 @@ try {
     true,
   );
   devVerificationDelayMs = 0;
+
+  // A definitive 409 verification failure (such as BROWSER_DIAGNOSTICS_FAILED)
+  // must settle the journal entry so syncing a new revision and re-running bare
+  // `app dev verify` without --idempotency-key succeeds instead of getting stuck
+  // on DEV_VERIFICATION_TARGET_CHANGED.
+  const conflictVerifyJournal = path.join(temporary, "journal-verify-conflict");
+  const conflictVerifyRoot = await prepareDevSource(
+    "verify-conflict-app",
+    conflictVerifyJournal,
+  );
+  activeDevSessionStatus = "active";
+  activeDevRevisionId = revisionId;
+  devVerificationReceipts = [];
+  devVerificationBehavior = "conflict-diagnostics";
+  const bareVerifyArguments = [
+    "app",
+    "dev",
+    "verify",
+    conflictVerifyRoot,
+    "--interval",
+    "0.05",
+    "--timeout",
+    "5",
+  ];
+  const initialConflictArtifactSha256 = artifactSha256;
+  const updatedConflictArtifactSha256 = "d".repeat(64);
+  assert.notEqual(updatedConflictArtifactSha256, initialConflictArtifactSha256);
+  const conflictFailure = await runCli(bareVerifyArguments, {
+    journal: conflictVerifyJournal,
+    status: 1,
+  });
+  assert.equal(
+    JSON.parse(conflictFailure.stderr).error.code,
+    "BROWSER_DIAGNOSTICS_FAILED",
+  );
+  activeDevRevisionId = nextRevisionId;
+  artifactSha256 = updatedConflictArtifactSha256;
+  await writeDevState(conflictVerifyRoot, {
+    artifactSha256: updatedConflictArtifactSha256,
+  });
+  devVerificationBehavior = "pass";
+  const verifiedAfterSync = await runCli(bareVerifyArguments, {
+    journal: conflictVerifyJournal,
+  });
+  assert.equal(
+    JSON.parse(verifiedAfterSync.stdout).receipt.revisionId,
+    nextRevisionId,
+  );
+  assert.equal(
+    JSON.parse(verifiedAfterSync.stdout).receipt.artifactSha256,
+    updatedConflictArtifactSha256,
+  );
+  assert.equal(
+    JSON.parse(verifiedAfterSync.stdout).receipt.summary.passed,
+    true,
+  );
+  artifactSha256 = initialConflictArtifactSha256;
+
+  // A coded, explicitly non-retryable 429 must leave the verification journal
+  // entry unsettled so a subsequent sync cannot silently discard its checkpoint.
+  const rateLimitVerifyJournal = path.join(temporary, "journal-verify-429");
+  const rateLimitVerifyRoot = await prepareDevSource(
+    "verify-429-app",
+    rateLimitVerifyJournal,
+  );
+  activeDevSessionStatus = "active";
+  activeDevRevisionId = revisionId;
+  devVerificationReceipts = [];
+  devVerificationBehavior = "rate-limited-nonretryable";
+  const rateLimitArgs = [
+    "app",
+    "dev",
+    "verify",
+    rateLimitVerifyRoot,
+    "--interval",
+    "0.05",
+    "--timeout",
+    "5",
+  ];
+  const rateLimitFailure = await runCli(rateLimitArgs, {
+    journal: rateLimitVerifyJournal,
+    status: 1,
+  });
+  assert.equal(
+    JSON.parse(rateLimitFailure.stderr).error.code,
+    "COMPUTE_BUDGET_EXCEEDED",
+  );
+  activeDevRevisionId = nextRevisionId;
+  devVerificationBehavior = "pass";
+  const blockedAfter429 = await runCli(rateLimitArgs, {
+    journal: rateLimitVerifyJournal,
+    status: 1,
+  });
+  assert.equal(
+    JSON.parse(blockedAfter429.stderr).error.code,
+    "DEV_VERIFICATION_TARGET_CHANGED",
+  );
+
+  // DEV_VERIFICATION_IN_PROGRESS means a verification is still running, so it
+  // must stay unsettled and reconcile on retry without starting another POST.
+  const inProgressVerifyJournal = path.join(temporary, "journal-verify-in-progress");
+  const inProgressVerifyRoot = await prepareDevSource(
+    "verify-in-progress-app",
+    inProgressVerifyJournal,
+  );
+  activeDevSessionStatus = "active";
+  activeDevRevisionId = revisionId;
+  devVerificationReceipts = [];
+  devVerificationBehavior = "conflict-in-progress";
+  const inProgressArgs = [
+    "app",
+    "dev",
+    "verify",
+    inProgressVerifyRoot,
+    "--interval",
+    "0.05",
+    "--timeout",
+    "5",
+  ];
+  const verifyPostsBeforeInProgress = requests.filter((request) =>
+    request.url?.endsWith(`/dev-sessions/${sessionId}/verify`),
+  ).length;
+  const inProgressFailure = await runCli(inProgressArgs, {
+    journal: inProgressVerifyJournal,
+    status: 1,
+  });
+  assert.equal(
+    JSON.parse(inProgressFailure.stderr).error.code,
+    "DEV_VERIFICATION_IN_PROGRESS",
+  );
+  const reconciledInProgress = await runCli(inProgressArgs, {
+    journal: inProgressVerifyJournal,
+  });
+  assert.equal(JSON.parse(reconciledInProgress.stdout).reconciled, true);
+  assert.equal(
+    JSON.parse(reconciledInProgress.stdout).receipt.summary.passed,
+    true,
+  );
+  assert.equal(
+    requests.filter((request) =>
+      request.url?.endsWith(`/dev-sessions/${sessionId}/verify`),
+    ).length,
+    verifyPostsBeforeInProgress + 1,
+  );
+  activeDevSessionStatus = "active";
 
   const receiptVerifyJournal = path.join(temporary, "journal-verify-receipt");
   const receiptVerifyRoot = await prepareDevSource(

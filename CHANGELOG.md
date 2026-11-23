@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.22.1
+
+- `app dev verify` now completes its mutation-journal entry when OpenCloud
+  definitively refuses or fails verification with a non-retryable 4xx response
+  (such as `BROWSER_DIAGNOSTICS_FAILED`, `E2E_TEST_TOO_SHALLOW`, or
+  `DEV_FUNCTION_COVERAGE_FAILED`), so fixing the app, running `app dev sync`,
+  and re-running `app dev verify` without `--idempotency-key` works instead of
+  failing with `DEV_VERIFICATION_TARGET_CHANGED`. `DEV_VERIFICATION_IN_PROGRESS`
+  stays unsettled so a retry reconciles the active verification.
+
 ## 3.22.0
 
 - `cron history` lists skipped scheduled runs too: `--state skipped` selects
