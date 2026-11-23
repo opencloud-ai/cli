@@ -141,7 +141,8 @@
   a deploy, records the release in `.opencloud/base.json`. A failure the app
   caused (its containers, or a public app's own answer to `HEAD /`,
   "returned HTTP 405") is not sent as an error report; a platform fault (no
-  answer to `HEAD /`, a missing artifact) is. A release another deploy, a
+  answer to `HEAD /`, a 502, 503 or 504 from the platform's router, a
+  missing artifact) is. A release another deploy, a
   rollback or a pause replaced before it was verified fails with
   `VERIFICATION_FAILED` and `verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH"`
   as the caller's conflict, not an error report; its hint names

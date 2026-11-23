@@ -852,6 +852,13 @@ describe("live release verification, journal settlement, rejoin dead-ends, and d
     responder = failing("CANONICAL_HEAD_FAILED", "fetch failed", platformReports);
     expect((await deploy()).status).toBe(1);
     expect(platformReports.length).toBe(1);
+    // So are 502, 503 and 504, which the platform's own router answers when it can't reach the app.
+    for (const status of [502, 503, 504]) {
+      const routerReports: Recorded[] = [];
+      responder = failing("CANONICAL_HEAD_FAILED", `Canonical production HEAD returned HTTP ${status}`, routerReports);
+      expect((await deploy()).status).toBe(1);
+      expect(routerReports.length, String(status)).toBe(1);
+    }
 
     // The release was no longer active when verified: the caller's conflict, and not the copy's base.
     await rm(baseFile, { force: true });

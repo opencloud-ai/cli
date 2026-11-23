@@ -822,10 +822,12 @@ function isCallerVerificationFailure(
   if (code === "ACTIVE_DEPLOYMENT_MISMATCH") return true;
   if (code === "CANONICAL_HEAD_FAILED") {
     // The app answered HEAD / itself, such as a container frontend's 404, 405
-    // or 500; no answer at all (a timeout, a refused connection, a missing
-    // Auth redirect) is the platform's.
+    // or 500. No answer at all (a timeout, a refused connection, a missing
+    // Auth redirect) is the platform's, and so is 502, 503 or 504: the
+    // platform's own router answers those when it can't reach the app.
     const message = diagnostic?.message ?? operationError?.message;
-    return typeof message === "string" && /\breturned HTTP \d{3}\b/.test(message);
+    const status = typeof message === "string" ? /\breturned HTTP (\d{3})\b/.exec(message)?.[1] : undefined;
+    return status !== undefined && !["502", "503", "504"].includes(status);
   }
   if (!code || PLATFORM_VERIFICATION_FAILURE_CODES.has(code)) return false;
   if (code.startsWith("COMPUTE_")) return isExpectedComputeError(code);
