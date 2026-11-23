@@ -1301,14 +1301,38 @@ const agentFeedBreachOutput = z
   })
   .passthrough();
 
+export const cronSkipReasonSchema = z.enum([
+  "missed",
+  "busy",
+  "app_busy",
+  "superseded",
+  "expired",
+  "disabled",
+  "schedule_changed",
+  "no_longer_due",
+]);
+
+/** A scheduled run that didn't happen: a schedule runs only at its time. */
+const cronSkippedRunOutput = z.object({
+  reason: cronSkipReasonSchema,
+  message: z.string(),
+  since: z.string().nullable(),
+});
+
 const agentFeedEventOutput = z
   .object({
     id: z.string(),
     type: z.enum(["operation", "cron", "job"]),
+    // A cron event's state is running, succeeded, failed or skipped.
     state: z.string(),
     occurredAt: z.string(),
     message: z.string(),
     deploymentId: uuid.nullable(),
+    // Cron events: the schedule's name and the run's scheduled time.
+    cronName: z.string().optional(),
+    scheduledAt: z.string().optional(),
+    // A skipped cron run: why, and the range when one event covers several.
+    skipped: cronSkippedRunOutput.optional(),
   })
   .passthrough();
 
@@ -1383,17 +1407,6 @@ export const agentFeedAnyVersionOutput = agentFeedV1Output.extend({
   computeSources: computeSourceFreshnessSetSchema.optional(),
 });
 
-export const cronSkipReasonSchema = z.enum([
-  "missed",
-  "busy",
-  "app_busy",
-  "superseded",
-  "expired",
-  "disabled",
-  "schedule_changed",
-  "no_longer_due",
-]);
-
 const cronInvocationStateSchema = z.enum(["running", "succeeded", "failed", "skipped"]);
 
 const cronInvocationOutput = z
@@ -1409,14 +1422,7 @@ const cronInvocationOutput = z
     finishedAt: z.string().nullable(),
     responseStatus: z.number().int().nullable(),
     error: jsonObject.nullable(),
-    // A scheduled run that didn't happen: a schedule runs only at its time.
-    skipped: z
-      .object({
-        reason: cronSkipReasonSchema,
-        message: z.string(),
-        since: z.string().nullable(),
-      })
-      .optional(),
+    skipped: cronSkippedRunOutput.optional(),
   })
   .passthrough();
 

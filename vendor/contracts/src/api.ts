@@ -500,10 +500,18 @@ export interface AgentFeedBreach {
 export interface AgentFeedEvent {
   id: string;
   type: "operation" | "cron" | "job";
+  /** A cron event's state is `running`, `succeeded`, `failed` or `skipped`. */
   state: string;
+  /** A skipped cron run's is when it was recorded as skipped. */
   occurredAt: string;
   message: string;
   deploymentId: string | null;
+  /** Cron events: the schedule's name. */
+  cronName?: string;
+  /** Cron events: the run's scheduled time. */
+  scheduledAt?: string;
+  /** A skipped cron run: why, and the range when one event covers several. */
+  skipped?: CronSkippedRun;
 }
 
 export interface AgentFeedResponse {

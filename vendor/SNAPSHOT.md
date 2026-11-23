@@ -133,8 +133,9 @@ refusal page a visitor's browser gets, and again from `ddac0e8df`, whose page
 says plainly whether to wait. `contracts/src/{api.ts,control-plane.ts}` are then
 refreshed verbatim from platform `a6bb20216`, whose cron run history lists
 skipped runs, and again from `e32a6189c`, whose skip reasons name a busy
-scheduler. Every file this release changed under `vendor/` is byte-identical
-to platform `e32a6189c`.
+scheduler, and again from `cb62ad893`, whose Agent Feed lists skipped runs
+as events. Every file this release changed under `vendor/` is byte-identical to
+platform `cb62ad893`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 
