@@ -5,7 +5,7 @@ import {
   classifyComputeError, isExpectedComputeError, computeErrorCatalog, computeErrorSchema, computeJobSubmitRequestSchema,
   computePriceDefinitionSchema, containerDefinitionSchema, normalizeComputeResources,
   unsupportedComputeCapabilities, containerRuntimeServiceRequestSchema, containerRuntimeServiceResponseSchema,
-  containerServiceRequestBodyBytes, computeExecutionSchema,
+  containerServiceRequestBodyBytes, computeExecutionSchema, computeRefusalPage,
 } from "./containers.js";
 import { installationCapabilitiesSchema } from "./installation.js";
 import { resolvePlatformFeatureFlag } from "./feature-flags.js";
@@ -210,5 +210,16 @@ describe("compute API errors and money", () => {
     for (const value of [0.004, "-1", "1e-3", "NaN", "0.0000000000001"]) expect(computePriceDefinitionSchema.safeParse({ ...price, ratesMinorPerUnit: { ...price.ratesMinorPerUnit, vcpu_second: value } }).success).toBe(false);
     expect(computePriceDefinitionSchema.safeParse({ ...price, ratesMinorPerUnit: { vcpu_second: "0" } }).success).toBe(false);
     expect(computePriceDefinitionSchema.safeParse({ ...price, quantumSeconds: 60 }).success).toBe(false);
+  });
+});
+
+describe("the page a site visitor gets for a compute refusal", () => {
+  it("shows the refusal's own status words and message, escaped, without platform controls", () => {
+    const page = computeRefusalPage({ statusCode: 503, code: "COMPUTE_SERVICE_UNAVAILABLE", message: "The service <web> is paused & \"stopped\"" }, "id-1");
+    expect(page).toContain("<h1>This site isn't available right now</h1>");
+    expect(page).toContain("The service &#60;web&#62; is paused &#38; &#34;stopped&#34;");
+    expect(page).toContain("COMPUTE_SERVICE_UNAVAILABLE · id-1");
+    expect(page).not.toMatch(/<script|<form|<a |OpenCloud/);
+    expect(computeRefusalPage({ statusCode: 429, code: "COMPUTE_CONCURRENCY_EXCEEDED", message: "Busy." }, "id-2")).toContain("This site is busy right now");
   });
 });

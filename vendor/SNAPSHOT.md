@@ -127,8 +127,10 @@ refreshed verbatim from platform `434a56677`, which lets a held host recovery
 name its blocker in `details.reason`. `contracts/src/{containers.ts,containers.test.ts}`
 and `server/src/{index.ts,index.test.ts}` are then refreshed verbatim from
 platform `bbc9f77e1`: `containers.request` reads the service's answer as raw
-bytes rather than Base64 inside JSON. Every file this release changed under
-`vendor/` is byte-identical to platform `bbc9f77e1`.
+bytes rather than Base64 inside JSON. `contracts/src/{containers.ts,containers.test.ts}`
+are then refreshed verbatim from platform `83c445952`, which adds the plain
+refusal page a visitor's browser gets. Every file this release changed under
+`vendor/` is byte-identical to platform `83c445952`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 
