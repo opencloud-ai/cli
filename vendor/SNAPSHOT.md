@@ -122,8 +122,10 @@ and `resolveRequestedAiModel`, which nothing vendored imports. The bundler,
 then refreshed verbatim from platform `b124a41c8`: the E2E test check refuses
 the shapes it misread, the route table may carry a host-outage reason, and
 `containers.request` refuses a body over 4 MiB with `COMPUTE_REQUEST_TOO_LARGE`.
-Every file this release changed under `vendor/` is byte-identical to platform
-`b124a41c8`.
+`compute-protocol/src/index.ts` and `contracts/src/containers.ts` are then
+refreshed verbatim from platform `434a56677`, which lets a held host recovery
+name its blocker in `details.reason`. Every file this release changed under
+`vendor/` is byte-identical to platform `434a56677`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 

@@ -226,6 +226,8 @@ export const computeErrorDetailsSchema = z.object({
   upstreamStatus: z.number().int().min(100).max(599).optional(),
   /** The request field a malformed request got wrong, such as `measurements.0.value`. */
   field: z.string().regex(/^[A-Za-z0-9_.]{1,100}$/).optional(),
+  /** Why a platform refusal holds, as a stable code (what blocks a compute host's recovery, say); never text or a value. */
+  reason: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(),
 }).strict();
 export const computeErrorSchema = z.object({
   statusCode: z.number().int().min(400).max(599),
