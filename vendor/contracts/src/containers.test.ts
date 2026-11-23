@@ -214,12 +214,12 @@ describe("compute API errors and money", () => {
 });
 
 describe("the page a site visitor gets for a compute refusal", () => {
-  it("shows the refusal's own status words and message, escaped, without platform controls", () => {
-    const page = computeRefusalPage({ statusCode: 503, code: "COMPUTE_SERVICE_UNAVAILABLE", message: "The service <web> is paused & \"stopped\"" }, "id-1");
-    expect(page).toContain("<h1>This site isn't available right now</h1>");
-    expect(page).toContain("The service &#60;web&#62; is paused &#38; &#34;stopped&#34;");
-    expect(page).toContain("COMPUTE_SERVICE_UNAVAILABLE · id-1");
-    expect(page).not.toMatch(/<script|<form|<a |OpenCloud/);
-    expect(computeRefusalPage({ statusCode: 429, code: "COMPUTE_CONCURRENCY_EXCEEDED", message: "Busy." }, "id-2")).toContain("This site is busy right now");
+  it("tells the visitor plainly whether waiting helps, keeps the builder's message out, and escapes the request ID", () => {
+    const paused = computeRefusalPage({ statusCode: 503, code: "COMPUTE_SERVICE_UNAVAILABLE", details: { retryable: false } }, "<id-1>");
+    expect(paused).toContain("<h1>This site isn't available right now</h1><p>Please try again later.</p>");
+    expect(paused).toContain("COMPUTE_SERVICE_UNAVAILABLE · &#60;id-1&#62;");
+    expect(paused).not.toMatch(/<script|<form|<a |OpenCloud|containers get|service web/);
+    expect(computeRefusalPage({ statusCode: 503, code: "COMPUTE_STARTING_PENDING", details: { retryable: true } }, "id-2")).toContain("Please try again in a moment.");
+    expect(computeRefusalPage({ statusCode: 429, code: "COMPUTE_CONCURRENCY_EXCEEDED" }, "id-3")).toContain("<h1>This site is busy right now</h1><p>Please try again in a moment.</p>");
   });
 });

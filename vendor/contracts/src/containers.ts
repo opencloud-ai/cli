@@ -255,17 +255,22 @@ const escapeRefusalHtml = (value: string) =>
   value.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
 /**
  * The page a visitor's browser gets when a compute refusal answers a page of
- * an app's own site (a paused container frontend, say): the refusal's status
- * and message, plainly, with no platform branding, sign-in or "try again"
- * controls, since the message says whether waiting helps. The gateway and
- * Control send the same page, with `computeRefusalPageHeaders`.
+ * an app's own site (a paused container frontend, say): a plain sentence for
+ * the site's visitors, whether waiting helps, and the code and request ID for
+ * support, with no platform branding, sign-in or "try again" controls. The
+ * refusal's own message is written for the app's builder (it names
+ * workloads and CLI commands), so it stays in the JSON body only. The gateway
+ * and Control send the same page, with `computeRefusalPageHeaders`.
  */
 export function computeRefusalPage(
-  error: Pick<ComputeError, "statusCode" | "code" | "message">,
+  error: Pick<ComputeError, "statusCode" | "code"> & { details?: { retryable?: boolean } },
   requestId: string,
 ): string {
   const title = error.statusCode === 429 ? "This site is busy right now" : "This site isn't available right now";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:15vh auto;padding:0 1.5rem;color:#222}p.code{font-size:.85em;color:#666}</style></head><body><h1>${title}</h1><p>${escapeRefusalHtml(error.message)}</p><p class="code">${escapeRefusalHtml(error.code)} · ${escapeRefusalHtml(requestId)}</p></body></html>`;
+  const advice = error.statusCode === 429 || error.details?.retryable === true
+    ? "Please try again in a moment."
+    : "Please try again later.";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:15vh auto;padding:0 1.5rem;color:#222}p.code{font-size:.85em;color:#666}</style></head><body><h1>${title}</h1><p>${advice}</p><p class="code">${escapeRefusalHtml(error.code)} · ${escapeRefusalHtml(requestId)}</p></body></html>`;
 }
 export function isExpectedComputeError(code: string): boolean {
   const parsed = computeErrorCodeSchema.safeParse(code);
