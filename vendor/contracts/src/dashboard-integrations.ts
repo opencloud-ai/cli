@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+  aiAutomaticSourceSchema,
+  aiModelPriceSchema,
+  aiQualifiedModelIdSchema,
+} from "@opencloud/agent-protocol";
+import {
   customIntegrationCapabilitySchema,
   integrationCapabilitySchema,
   integrationDefinitionSchema,
@@ -221,7 +226,8 @@ export const telegramPairingDestinationSchema = z.object({
   expiresAt: timestamp,
 });
 
-export const aiProviderSchema = z.enum(["openai", "anthropic"]);
+/** Providers people connect. OpenRouter is API-key only. */
+export const aiProviderSchema = z.enum(["openai", "anthropic", "openrouter"]);
 export const aiAuthMethodSchema = z.enum([
   "device_oauth",
   "manual_oauth",
@@ -253,6 +259,18 @@ export const aiProviderConnectionSchema = z.object({
   createdAt: timestamp,
   updatedAt: timestamp,
   revokedAt: timestamp.nullable(),
+  /** Credit the provider reports (OpenRouter). Null limit: no cap on the key. */
+  credit: z
+    .object({
+      remainingNanodollars: z.string().regex(/^(0|[1-9][0-9]{0,39})$/).nullable(),
+      limitNanodollars: z.string().regex(/^(0|[1-9][0-9]{0,39})$/).nullable(),
+      reportedAt: timestamp,
+    })
+    .strict()
+    .nullable()
+    .optional(),
+  /** OpenRouter: only route to providers that don't train on or keep prompts. */
+  privateProvidersOnly: z.boolean().optional(),
 });
 
 const aiAuthorizationBase = {
@@ -430,11 +448,93 @@ export const updateAiConnectionRequestSchema = z
   .object({
     label: z.string().trim().min(1).max(200).optional(),
     makeDefault: z.literal(true).optional(),
+    privateProvidersOnly: z.boolean().optional(),
   })
   .strict()
-  .refine((value) => value.label !== undefined || value.makeDefault === true, {
-    message: "At least one AI connection setting is required",
-  });
+  .refine(
+    (value) =>
+      value.label !== undefined || value.makeDefault === true || value.privateProvidersOnly !== undefined,
+    { message: "At least one AI connection setting is required" },
+  );
+
+/** Why a model can't be switched on for a connection. */
+export const aiConnectionModelBlockSchema = z.enum([
+  "key_cannot_reach",
+  "no_price",
+  "no_tools",
+  "not_enabled",
+]);
+
+/**
+ * One model on one connected provider. Direct providers list every model the
+ * installation enables; OpenRouter lists the models someone added. Switched-on
+ * models appear in the Agent's model picker.
+ */
+export const aiConnectionModelSchema = z
+  .object({
+    model: aiQualifiedModelIdSchema,
+    label: z.string().trim().min(1).max(200),
+    vendor: z.string().trim().min(1).max(100),
+    contextTokens: z.number().int().positive().nullable(),
+    supportsTools: z.boolean(),
+    price: aiModelPriceSchema.nullable(),
+    /** On the platform admin's installation list. */
+    listed: z.boolean(),
+    on: z.boolean(),
+    blockedReason: aiConnectionModelBlockSchema.nullable(),
+    /** Apps whose automatic tasks use this provider and model now. */
+    automaticIn: z
+      .array(
+        z
+          .object({
+            appId: uuid,
+            appName: z.string().trim().min(1).max(160),
+            source: aiAutomaticSourceSchema,
+          })
+          .strict(),
+      )
+      .max(500),
+  })
+  .strict();
+
+export const aiConnectionModelsSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    connectionId: uuid,
+    provider: aiProviderSchema,
+    /** OpenRouter: models can be added from its catalogue. */
+    addable: z.boolean(),
+    models: z.array(aiConnectionModelSchema).max(500),
+  })
+  .strict();
+
+export const updateAiConnectionModelsRequestSchema = z
+  .object({
+    /** On adds an OpenRouter model to the connection; off keeps it listed but unpickable. */
+    changes: z
+      .array(z.object({ model: aiQualifiedModelIdSchema, on: z.boolean() }).strict())
+      .min(1)
+      .max(100),
+  })
+  .strict();
+
+export const aiConnectionModelSearchQuerySchema = z
+  .object({
+    query: z.string().trim().max(100).optional(),
+    toolsOnly: z.enum(["true", "false"]).optional(),
+  })
+  .strict();
+
+export const aiConnectionModelSearchSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    candidates: z
+      .array(aiConnectionModelSchema.omit({ on: true, automaticIn: true }))
+      .max(100),
+    /** Unlisted OpenRouter models hidden because the installation allows listed ones only. */
+    hiddenByPolicy: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export const updateAppAiRequestSchema = z
   .object({

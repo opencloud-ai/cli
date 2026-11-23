@@ -28,6 +28,9 @@ import {
   upsertAlertRuleRequestSchema,
 } from "./api-core.js";
 import { openCloudManifestSchema } from "./manifest.js";
+import type { ComputeLogCoordinates, ComputeLogObservation } from "./compute-observation.js";
+import { customMetricMeasurementSchema, ingestCustomMetricsRequestSchema } from "./api-core.js";
+export { customMetricDimensionsSchema, customMetricMeasurementSchema, ingestCustomMetricsRequestSchema } from "./api-core.js";
 
 export {
   alertAggregationSchema,
@@ -57,31 +60,6 @@ export {
   startAgentOnboardingRequestSchema,
   upsertAlertRuleRequestSchema,
 } from "./api-core.js";
-
-export const customMetricDimensionsSchema = z.record(
-  z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
-  z.string().min(1).max(40),
-);
-
-export const customMetricMeasurementSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .max(63)
-    .regex(/^[a-z][a-z0-9_]*$/),
-  value: z.number().finite().min(-1e15).max(1e15),
-  dimensions: customMetricDimensionsSchema.default({}),
-  idempotencyKey: z
-    .string()
-    .min(8)
-    .max(120)
-    .regex(/^[A-Za-z0-9._:-]+$/)
-    .optional(),
-});
-
-export const ingestCustomMetricsRequestSchema = z.object({
-  measurements: z.array(customMetricMeasurementSchema).min(1).max(20),
-});
 
 export const alertStateSchema = z.enum([
   "ok",
@@ -180,6 +158,9 @@ export interface AppRecord {
   appUrl: string | null;
   authUrl: string;
   apiUrl: string;
+  /** The app's page in the dashboard, and its Sharing page, where people are invited. */
+  dashboardUrl?: string;
+  sharingUrl?: string;
   visibility: AppVisibility;
   aiCredentialSource: AppAiCredentialSource;
   state: AppState;
@@ -211,18 +192,58 @@ export interface AppDeploymentTruth {
   } | null;
 }
 
+/**
+ * Why a scheduled run didn't happen. A schedule runs only at its configured
+ * time, so a run OpenCloud couldn't start then is skipped, never run later.
+ */
+export type CronSkipReason =
+  /**
+   * It couldn't start within 5 minutes of its time, for example during a
+   * platform update or outage, or while the app was being deployed or restored.
+   */
+  | "missed"
+  /** OpenCloud was busy running other scheduled tasks and couldn't start it within 5 minutes of its time. */
+  | "busy"
+  /** The app already had as many scheduled runs in progress as it runs at once (4) until 5 minutes after its time. */
+  | "app_busy"
+  /** It hadn't started when the next run was due. */
+  | "superseded"
+  /** It waited a day without starting. */
+  | "expired"
+  /** The schedule was turned off before it started. */
+  | "disabled"
+  /** The schedule changed before it started. */
+  | "schedule_changed"
+  /** It was no longer due when it could start. */
+  | "no_longer_due";
+
+export interface CronSkippedRun {
+  reason: CronSkipReason;
+  /** The reason in plain words. */
+  message: string;
+  /**
+   * Set when the row stands for every scheduled run from this time to
+   * `scheduledAt`, after a gap too long to list run by run.
+   */
+  since: string | null;
+}
+
 export interface CronInvocationRecord {
   id: string;
   appId: string;
   deploymentId: string;
   cronName: string;
   functionName: string;
-  state: "running" | "succeeded" | "failed";
+  /** `skipped`: a scheduled run that didn't happen; see `skipped`. */
+  state: "running" | "succeeded" | "failed" | "skipped";
   scheduledAt: string;
-  startedAt: string;
+  /** Null for a skipped run, which never started. */
+  startedAt: string | null;
   finishedAt: string | null;
   responseStatus: number | null;
   error: Record<string, unknown> | null;
+  /** Set when `state` is `skipped`. */
+  skipped?: CronSkippedRun;
 }
 
 export interface CronInvocationsPage {
@@ -292,6 +313,9 @@ export interface DeploymentRecord {
   sdkVersion: string;
   manifest: unknown;
   state: DeploymentState;
+  /** Server-selected release path; absent on older installations. */
+  deploymentMode?: "online" | "maintenance";
+  preparationPhase?: "preparing" | "ready" | "published" | "failed" | null;
   rollbackOfDeploymentId: string | null;
   error: Record<string, unknown> | null;
   createdAt: string;
@@ -349,15 +373,19 @@ export interface OperationsPage {
 }
 
 export interface AppLogEntry {
+  compute?: ComputeLogCoordinates;
   id: string;
   timestamp: string;
   level: "debug" | "info" | "warn" | "error";
   surface: string;
   message: string;
   requestId: string | null;
+  /** The structured fields a Function passed to `log`, on lines its runtime wrote. */
+  fields?: Record<string, unknown>;
 }
 
 export interface AppLogsPage {
+  computeObservation?: ComputeLogObservation;
   entries: AppLogEntry[];
   nextCursor: string | null;
 }
@@ -422,6 +450,8 @@ export interface AgentFeedSignal {
     | "function"
     | "mixed"
     | "none";
+  /** A custom metric's newest sample in its window, or null with none. */
+  lastSampleAt?: string | null;
 }
 
 export interface AgentFeedAlert {
@@ -470,10 +500,18 @@ export interface AgentFeedBreach {
 export interface AgentFeedEvent {
   id: string;
   type: "operation" | "cron" | "job";
+  /** A cron event's state is `running`, `succeeded`, `failed` or `skipped`. */
   state: string;
+  /** A skipped cron run's is when it was recorded as skipped. */
   occurredAt: string;
   message: string;
   deploymentId: string | null;
+  /** Cron events: the schedule's name. */
+  cronName?: string;
+  /** Cron events: the run's scheduled time. */
+  scheduledAt?: string;
+  /** A skipped cron run: why, and the range when one event covers several. */
+  skipped?: CronSkippedRun;
 }
 
 export interface AgentFeedResponse {

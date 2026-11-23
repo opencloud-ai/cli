@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
+import { build } from "esbuild";
 
 const root = path.resolve(import.meta.dirname, "..");
 const binary = path.join(root, "dist", "index.cjs");
@@ -421,26 +422,37 @@ for (const [id, record] of nonJournal) {
   }
 }
 
-const operationsObject = declaredObject(contract, "controlPlaneOperations");
+// Evaluate the public registry so operations produced by factories or object
+// spreads receive exactly the same audit as inline descriptors.
+const catalogBundle = await build({
+  stdin: { contents: 'export { controlPlaneOperations } from "./vendor/contracts/src/control-plane.ts";', resolveDir: root },
+  bundle: true, write: false, platform: "node", format: "esm", target: "node22",
+  alias: {
+    "@opencloud/compute-protocol": path.join(root, "vendor/compute-protocol/src/index.ts"),
+    "@opencloud/agent-protocol": path.join(root, "src/agent-protocol-snapshot.ts"),
+  },
+});
+const { controlPlaneOperations } = await import(`data:text/javascript;base64,${Buffer.from(catalogBundle.outputFiles[0].text).toString("base64")}`);
+// These POST queries predate MCP exposure; assert their complete read boundary.
+const logQueries = new Map([
+  ["queryLogsPage", "/v1/apps/{appId}/logs/page"],
+  ["queryDevLogsPage", "/v1/apps/{appId}/dev-sessions/{sessionId}/logs/page"],
+]);
 const operations = new Map();
-for (const property of operationsObject.properties) {
-  if (!ts.isPropertyAssignment(property)) continue;
-  const name = propertyName(property.name);
-  const call = unwrap(property.initializer);
-  if (!name || !ts.isCallExpression(call) || call.arguments.length !== 1) continue;
-  const definition = unwrap(call.arguments[0]);
-  const method = objectProperty(definition, "method");
-  const route = objectProperty(definition, "path");
-  const mcp = objectProperty(definition, "mcp");
-  const readOnly = mcp
-    ? objectProperty(unwrap(mcp.initializer), "readOnlyHint")
-    : null;
+for (const [name, definition] of Object.entries(controlPlaneOperations)) {
+  if (logQueries.has(name)) {
+    assert.equal(definition.path, logQueries.get(name));
+    assert.equal(definition.method, "POST");
+    assert.equal(definition.idempotency, "none");
+    assert.deepEqual(definition.scopes, ["app:observe"]);
+  }
   operations.set(name, {
-    method: method ? literalValue(method.initializer) : undefined,
-    path: route ? literalValue(route.initializer) : undefined,
-    readOnly: readOnly ? literalValue(readOnly.initializer) : false,
+    method: definition.method,
+    path: definition.path,
+    readOnly: definition.mcp?.readOnlyHint === true || logQueries.has(name),
   });
 }
+assert.ok(operations.has("submitContainerJob"), "Factory-generated compute operations are missing from the mutation audit");
 
 function normalizedRoute(node) {
   const value = unwrap(node);
@@ -593,6 +605,7 @@ assert.deepEqual(
 );
 
 function isExactAppMutationCall(node, environment, file) {
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ["validateDraftWithProgress", "applyDevRevisionOnce"].includes(node.expression.text)) return true;
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
     return false;
   }
@@ -806,7 +819,15 @@ assert.ok(
   auditExactAppMutations(unprotectedHelper).length > 0,
   "A MutationRun-typed helper called outside journal.run must fail the audit",
 );
+assert.ok(auditExactAppMutations(ts.createSourceFile("unprotected-validation.ts",
+  'async function unsafe(control, input) { await validateDraftWithProgress(control, input); }',
+  ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)).length > 0,
+  "Validation waiting outside a journal must fail the audit");
+assert.ok(auditExactAppMutations(ts.createSourceFile("unprotected-dev-apply.ts",
+  'async function unsafe(control, journal, target) { await applyDevRevisionOnce(control, journal, target, "key"); }',
+  ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)).length > 0,
+  "Development apply outside a journal must fail the audit");
 
 process.stdout.write(
-  `Mutation audit passed for ${exactRegistry.length} journal-managed exact-app dispositions, ${nonJournal.size} explicit authority/bootstrap callsites, ${registry.size} registry entries, ${leaves.size} Commander leaves, and 4 negative structural fixtures.\n`,
+  `Mutation audit passed for ${exactRegistry.length} journal-managed exact-app dispositions, ${nonJournal.size} explicit authority/bootstrap callsites, ${registry.size} registry entries, ${leaves.size} Commander leaves, and 6 negative structural fixtures.\n`,
 );

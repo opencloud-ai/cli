@@ -75,6 +75,14 @@ const server = createServer(async (request, response) => {
   if (request.url === `/v1/apps/${slowAppId}`) return setTimeout(() => send(200, { id: slowAppId }), 1_500);
   if (request.url === `/v1/apps/${appId}/usage`) return request.socket.destroy();
   if (request.method === "POST" && request.url === `/v1/apps/${appId}/restart`) return send(202, { id: operationId, state: "queued" });
+  // A fault whose message quotes the secret value it was sent.
+  if (request.method === "PUT" && request.url === `/v1/apps/${appId}/secrets/STRIPE_KEY`) {
+    return send(500, { code: "SECRET_STORE_FAILED", message: `Could not store ${JSON.parse(record.body).value}` });
+  }
+  // A fault whose message quotes the registry password it was sent.
+  if (request.method === "POST" && request.url === `/v1/apps/${appId}/compute/registries`) {
+    return send(500, { code: "REGISTRY_CHECK_FAILED", message: `Registry check failed for ${JSON.parse(record.body).password}` });
+  }
   if (request.url === `/v1/operations/${operationId}`) {
     return send(200, { id: operationId, state: "failed", error: { code: "RESTART_FAILED", message: "The runtime did not start" } });
   }
@@ -95,7 +103,7 @@ if (process.argv[1] && process.argv[1].endsWith("index.cjs")) {
 }
 `);
 
-async function run(args, { cwd = temporary, env = {}, authority = true } = {}) {
+async function run(args, { cwd = temporary, env = {}, authority = true, stdin } = {}) {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
     if (name.startsWith("OPENCLOUD_") || name === "DO_NOT_TRACK" || name === "INIT_CWD" || name === "NODE_OPTIONS") {
@@ -111,7 +119,8 @@ async function run(args, { cwd = temporary, env = {}, authority = true } = {}) {
   });
   const prefix = ["--api-url", apiUrl, ...(authority ? ["--token", token] : [])];
   const started = Date.now();
-  const child = spawn(process.execPath, [binary, ...prefix, ...args], { cwd, env: environment, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [binary, ...prefix, ...args], { cwd, env: environment, stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+  if (stdin !== undefined) child.stdin.end(stdin);
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
@@ -239,6 +248,24 @@ try {
   assert.equal(operationReport.context.operationState, "failed");
   assert.equal(operationReport.context.operationErrorCode, "RESTART_FAILED");
   assert.equal(operationReport.context.options, "--api-url,--idempotency-key,--interval,--timeout,--token");
+
+  // A password read from standard input is never reported, even when the
+  // failure's message quotes it.
+  const registryPassword = "synthetic-registry-password-7f3a";
+  const registry = await reported(["containers", "registry", "create", appId, "--name", "Images", "--host", "registry.test",
+    "--username", "reader", "--password-stdin", "--idempotency-key", "contract-registry-1"], { stdin: `${registryPassword}\n` });
+  assert.equal(registry.status, 1, registry.stderr);
+  assert.equal(registry.sent.length, 1);
+  const registryReport = parsedReport(registry.sent[0]);
+  assert.equal(registryReport.errorCode, "REGISTRY_CHECK_FAILED");
+  assert.equal(registryReport.message, "Registry check failed for [VALUE]");
+  assert.ok(!registry.sent[0].body.includes(registryPassword), "the registry password was reported");
+
+  const secretValue = "synthetic-secret-value-9c41";
+  const secretSet = await reported(["secret", "set", appId, "STRIPE_KEY", "--idempotency-key", "contract-secret-1"], { stdin: `${secretValue}\n` });
+  assert.equal(secretSet.status, 1, secretSet.stderr);
+  assert.equal(parsedReport(secretSet.sent[0]).message, "Could not store [VALUE]");
+  assert.ok(!secretSet.sent[0].body.includes(secretValue), "the secret value was reported");
 
   // A CLI failure before any request: paths in the home directory are
   // reported from ~, and parsers' excerpts of files never.

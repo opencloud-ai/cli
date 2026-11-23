@@ -1,8 +1,25 @@
 import { z } from "zod";
+import { computeControlPlaneOperations } from "./compute-control-plane.js";
+export * from "./containers.js";
+export * from "./compute-files.js";
+import { computeUsageSchema } from "./containers.js";
+import { computeFeedEventSchema, computeLogCoordinatesSchema, computeLogFilterFields, computeLogObservationSchema, computeSourceFreshnessSetSchema } from "./compute-observation.js";
+export * from "./compute-observation.js";
 import { appExportDownloadSchema, appImportReviewSchema, appInstallManifestSchema, appPackageDownloadSchema, installAppPackageRequestSchema, publicHttpsUrlSchema } from "./app-portability.js";
 export * from "./app-portability.js";
+import { agentTaskRangeSchema, agentTaskHistoryQuerySchema, agentTasksOverviewSchema,
+  agentTaskRunsPageSchema, agentTaskRunDetailSchema, agentTaskActivitySchema } from "./agent-task-dashboard.js";
 import { organisationEmailDomainSchema, organisationHostSchema } from "./organisation-domains.js";
 import { appAudiencesSchema, appSharingViewSchema } from "./app-audiences.js";
+import {
+  acceptedAppInvitationSchema,
+  appInvitationPermissionRequestSchema,
+  appInvitationPreviewSchema,
+  appInvitationSchema,
+  appInvitationsViewSchema,
+  appInvitationTokenRequestSchema,
+  createAppInvitationRequestSchema,
+} from "./app-invitations.js";
 import { organisationWeeklyCapacitySchema, employeeAllowanceOverrideSchema, organisationWeekSchema } from "./organisation-capacity.js";
 import { organisationLimitSchema, organisationTimeZoneSchema } from "./organisation.js";
 import {
@@ -60,6 +77,9 @@ import {
 import {
   accountIntegrationConnectionSchema,
   aiAuthorizationSchema,
+  aiConnectionModelSearchQuerySchema,
+  aiConnectionModelSearchSchema,
+  aiConnectionModelsSchema,
   aiIntegrationOverviewSchema,
   aiProviderConnectionSchema,
   appAiAssignmentSchema,
@@ -82,6 +102,7 @@ import {
   slackChannelSchema,
   telegramPairingDestinationSchema,
   telegramPairingRequestSchema,
+  updateAiConnectionModelsRequestSchema,
   updateAiConnectionRequestSchema,
   updateAppAiRequestSchema,
 } from "./dashboard-integrations.js";
@@ -96,6 +117,9 @@ import {
   reorderOrganisationAiAccountsRequestSchema,
   setPersonalAiBudgetRequestSchema,
   shareAppAiAccountRequestSchema,
+  updateAppAiAutomaticRequestSchema,
+  updateAppAiRepairsRequestSchema,
+  updateAppAdminAiRequestSchema,
   updateAppAiSetupRequestSchema,
 } from "./ai-capacity.js";
 
@@ -165,6 +189,10 @@ const platformVersionOutput = z.object({
     deployPreconditions: z.literal(1).optional(),
     /** Validation builds frontends that declare frontend.build. */
     platformBuilds: z.literal(1).optional(),
+    /** Validation honours expectedRevision: a request joins that revision's
+     * run and answers DRAFT_VALIDATION_IN_PROGRESS while it lasts. Without
+     * it, keep the earlier flow: a long wait, retrying FRONTEND_BUILD_BUSY. */
+    pinnedDraftValidation: z.literal(1).optional(),
   }),
 });
 
@@ -366,6 +394,7 @@ const usageRollupOutput = z.object({
 });
 
 const usageOutput = z.object({
+  compute: computeUsageSchema.optional(),
   asOf: z.string(),
   latestRollup: usageRollupOutput.nullable(),
   rollups: z.array(usageRollupOutput),
@@ -478,6 +507,8 @@ export const controlPlaneDeploymentSchema = z
     sdkVersion: z.string(),
     manifest: z.unknown(),
     state: deploymentStateSchema,
+    deploymentMode: z.enum(["online", "maintenance"]).optional(),
+    preparationPhase: z.enum(["preparing", "ready", "published", "failed"]).nullable().optional(),
     rollbackOfDeploymentId: uuid.nullable(),
     error: jsonObject.nullable(),
     createdAt: z.string(),
@@ -550,6 +581,22 @@ export const devEmailCaptureSummarySchema = z
     status: z.literal("captured"),
     idempotencyKey: z.string(),
     attachmentCount: z.number().int().nonnegative(),
+    createdAt: z.string(),
+  })
+  .passthrough();
+
+export const devInboundEmailSummarySchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    id: uuid,
+    appId: uuid,
+    devSessionId: uuid,
+    revisionId: uuid,
+    direction: z.literal("inbound"),
+    address: z.object({ name: z.string(), value: z.string() }),
+    from: z.string(),
+    subject: z.string().nullable(),
+    status: z.string(),
     createdAt: z.string(),
   })
   .passthrough();
@@ -1143,6 +1190,7 @@ const metricSourceOutput = z.enum([
   "mixed",
   "none",
 ]);
+const containerMetricSourceOutput = z.enum(["browser", "authenticated", "function", "container", "mixed", "none"]);
 
 export const alertRuleDetailOutput = z
   .object({
@@ -1159,7 +1207,7 @@ export const alertRuleDetailOutput = z
       state: z.enum(["ok", "firing", "unknown", "invalid"]),
       value: z.number().nullable(),
       samples: z.number().int().nonnegative(),
-      source: metricSourceOutput,
+      source: containerMetricSourceOutput,
       observedAt: z.iso.datetime(),
       firstFiredAt: z.iso.datetime().nullable(),
       resolvedAt: z.iso.datetime().nullable(),
@@ -1170,7 +1218,7 @@ export const alertRuleDetailOutput = z
       z.object({
         value: z.number(),
         recordedAt: z.iso.datetime(),
-        source: z.enum(["browser", "authenticated", "function"]),
+        source: z.enum(["browser", "authenticated", "function", "container"]),
       }),
     ),
     delivery: alertFireDeliveryOutput.nullable(),
@@ -1194,6 +1242,8 @@ const agentFeedSignalOutput = z
       "mixed",
       "none",
     ]),
+    /** A custom metric's newest sample in its window, or null with none. */
+    lastSampleAt: z.string().nullable().optional(),
   })
   .passthrough();
 
@@ -1251,18 +1301,42 @@ const agentFeedBreachOutput = z
   })
   .passthrough();
 
+export const cronSkipReasonSchema = z.enum([
+  "missed",
+  "busy",
+  "app_busy",
+  "superseded",
+  "expired",
+  "disabled",
+  "schedule_changed",
+  "no_longer_due",
+]);
+
+/** A scheduled run that didn't happen: a schedule runs only at its time. */
+const cronSkippedRunOutput = z.object({
+  reason: cronSkipReasonSchema,
+  message: z.string(),
+  since: z.string().nullable(),
+});
+
 const agentFeedEventOutput = z
   .object({
     id: z.string(),
     type: z.enum(["operation", "cron", "job"]),
+    // A cron event's state is running, succeeded, failed or skipped.
     state: z.string(),
     occurredAt: z.string(),
     message: z.string(),
     deploymentId: uuid.nullable(),
+    // Cron events: the schedule's name and the run's scheduled time.
+    cronName: z.string().optional(),
+    scheduledAt: z.string().optional(),
+    // A skipped cron run: why, and the range when one event covers several.
+    skipped: cronSkippedRunOutput.optional(),
   })
   .passthrough();
 
-const agentFeedOutput = z
+export const agentFeedV1Output = z
   .object({
     contractVersion: z.literal("1"),
     app: z
@@ -1299,6 +1373,42 @@ const agentFeedOutput = z
   })
   .passthrough();
 
+const agentFeedV2SignalOutput = agentFeedSignalOutput.extend({
+  source: z.enum(["control", "runtime", "usage", "browser", "authenticated", "function", "container", "mixed", "none"]),
+  samples: z.number().int().nonnegative().optional(),
+});
+const agentFeedV2AlertOutput = agentFeedAlertOutput.extend({
+  metric: agentFeedAlertOutput.shape.metric.unwrap().extend({ source: containerMetricSourceOutput }).optional(),
+});
+const agentFeedV2BreachOutput = agentFeedBreachOutput.extend({
+  metric: agentFeedBreachOutput.shape.metric.extend({ source: containerMetricSourceOutput }),
+});
+const agentFeedV2EventOutput = z.union([agentFeedEventOutput, computeFeedEventSchema]);
+
+export const agentFeedV2Output = agentFeedV1Output.extend({
+  contractVersion: z.literal("2"),
+  signals: z.array(agentFeedV2SignalOutput).max(100),
+  alerts: z.array(agentFeedV2AlertOutput).max(100),
+  recentBreaches: z.array(agentFeedV2BreachOutput).max(100),
+  events: z.array(agentFeedV2EventOutput).max(100),
+  computeSources: computeSourceFreshnessSetSchema,
+});
+export const agentFeedOutput = z.discriminatedUnion("contractVersion", [agentFeedV1Output, agentFeedV2Output]);
+export type AgentFeedV2Response = z.infer<typeof agentFeedV2Output>;
+/** MCP structured output is one object, never a union: the v1 fields, with the
+ * v2 values and `computeSources` admitted, so both versions keep their
+ * top-level fields. Installations without compute serve plain v1 instead. */
+export const agentFeedAnyVersionOutput = agentFeedV1Output.extend({
+  contractVersion: z.enum(["1", "2"]),
+  signals: z.array(agentFeedV2SignalOutput),
+  alerts: z.array(agentFeedV2AlertOutput),
+  recentBreaches: z.array(agentFeedV2BreachOutput),
+  events: z.array(agentFeedV2EventOutput),
+  computeSources: computeSourceFreshnessSetSchema.optional(),
+});
+
+const cronInvocationStateSchema = z.enum(["running", "succeeded", "failed", "skipped"]);
+
 const cronInvocationOutput = z
   .object({
     id: uuid,
@@ -1306,12 +1416,13 @@ const cronInvocationOutput = z
     deploymentId: uuid,
     cronName: z.string(),
     functionName: z.string(),
-    state: z.enum(["running", "succeeded", "failed"]),
+    state: cronInvocationStateSchema,
     scheduledAt: z.string(),
-    startedAt: z.string(),
+    startedAt: z.string().nullable(),
     finishedAt: z.string().nullable(),
     responseStatus: z.number().int().nullable(),
     error: jsonObject.nullable(),
+    skipped: cronSkippedRunOutput.optional(),
   })
   .passthrough();
 
@@ -1355,17 +1466,47 @@ export const accountOperationsPageQuerySchema =
 
 export const appLogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 
-export const appLogsPageRequestSchema = z
-  .object({
+/**
+ * The raw log query's body: open, as it always was, plus two optional
+ * filters. Without a development session it reads production lines only.
+ * An installation without compute describes neither filter with containers.
+ */
+export function appLogsQueryBodySchema(compute: boolean) {
+  return z
+    .object({
+      surface: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(`Only lines from this surface: ${compute ? "function, container, http, ai or platform" : "function, http, ai or platform"}.`),
+      developmentSessionId: uuid
+        .optional()
+        .describe(`Read this development session's ${compute ? "Function and container" : "Function"} lines instead of production lines. The session must belong to the app.`),
+    })
+    .catchall(z.unknown());
+}
+
+const appLogsPageBaseFields = {
     contains: z.string().max(200).optional(),
     level: appLogLevelSchema.optional(),
-    surface: z.string().trim().min(1).max(200).optional(),
+    surface: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Where the lines came from: function, container, http, ai or platform. functions and runtime (the older name) also select function, containers selects container, and page, rest and storage select http. Any other value, realtime and cron included, is refused."),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
     cursor: z.string().max(2_048).optional(),
     limit: z.coerce.number().int().min(1).max(200).default(50),
-  })
-  .superRefine((value, context) => {
+};
+const appLogsPageRequestFields = {
+    ...computeLogFilterFields,
+    ...appLogsPageBaseFields,
+};
+function appLogsRangeIssue(value: { from: string; to: string }, context: z.RefinementCtx) {
     if (Date.parse(value.from) >= Date.parse(value.to)) {
       context.addIssue({
         code: "custom",
@@ -1373,18 +1514,32 @@ export const appLogsPageRequestSchema = z
         message: "log query to must be after from",
       });
     }
-  });
+}
+export const appLogsPageRequestSchema = z.object({
+  ...appLogsPageRequestFields, environment: z.literal("production").optional(), developmentSessionId: z.never().optional(),
+}).superRefine(appLogsRangeIssue);
+/** A log page request as read before container filters: other fields are stripped, never refused. */
+export const appLogsPageRequestV1Schema = z.object(appLogsPageBaseFields).superRefine(appLogsRangeIssue);
+export const devAppLogsPageRequestSchema = z.object({
+  ...appLogsPageRequestFields, environment: z.literal("development").optional(), developmentSessionId: z.never().optional(),
+}).superRefine(appLogsRangeIssue);
 
 export const appLogEntryOutput = z.object({
+  compute: computeLogCoordinatesSchema.optional(),
   id: z.string().regex(/^[a-f0-9]{64}$/),
   timestamp: z.string(),
   level: appLogLevelSchema,
   surface: z.string(),
   message: z.string(),
   requestId: z.string().nullable(),
+  fields: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe("The structured fields a Function passed to log, on lines its runtime wrote."),
 });
 
 export const appLogsPageOutput = z.object({
+  computeObservation: computeLogObservationSchema.optional(),
   entries: z.array(appLogEntryOutput),
   nextCursor: z.string().nullable(),
 });
@@ -1511,6 +1666,7 @@ export const productionDataMutationSchema = z.discriminatedUnion("action", [
 
 export const productionFunctionInvocationSchema = z.object({
   input: jsonObject.default({}),
+  expectedDeploymentId: uuid.optional(),
 });
 
 export const productionFileSchema = z.object({
@@ -1529,7 +1685,42 @@ export const productionFilesPageSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 
+/** A file sent in the app's Agent chat; the chat keeps its message. */
+export const appAgentFileSchema = z.object({
+  id: uuid,
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+  mediaType: z.string(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  threadId: uuid,
+  messageId: uuid,
+  uploaderUserId: uuid,
+  uploaderName: z.string().nullable(),
+  createdAt: z.string(),
+  sentAt: z.string(),
+});
+
+export const appAgentFilesPageSchema = z.object({
+  files: z.array(appAgentFileSchema),
+  nextCursor: z.string().nullable(),
+});
+
 export type ControlPlaneAuth = "none" | "bearer" | "user" | "browser";
+
+/** Only this explicit response permits a client to wait by repeating validation. */
+export const draftValidationInProgressSchema = z.object({
+  code: z.literal("DRAFT_VALIDATION_IN_PROGRESS"),
+  retryable: z.literal(true),
+  details: z.object({
+    appId: uuid,
+    draftId: uuid,
+    revision: z.number().int().positive(),
+    retryAfterSeconds: z.number().int().min(1).max(10),
+  }).strict(),
+}).passthrough();
+
+/** Explicit per-call allowance for synchronous development preparation/readiness. */
+export const developmentReadinessTimeoutMs = 15 * 60_000;
 
 export interface McpOperationMetadata {
   toolName: string;
@@ -1603,6 +1794,7 @@ export const workspaceCapacityOutputSchema = z.object({
 });
 
 export const controlPlaneOperations = {
+  ...computeControlPlaneOperations,
   getAppCapabilities: operation({
     method: "GET", path: "/v1/apps/{appId}/capabilities",
     summary: "Read current app capabilities", description: "Read canonical server actions for the current app actor.",
@@ -1632,6 +1824,69 @@ export const controlPlaneOperations = {
     summary: "Revoke an app share", description: "Revoke one grant while retaining independently effective access.",
     auth: "user", scopes: [], input: appPath.extend({ shareId: uuid }),
     output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }), idempotency: "required",
+  }),
+  listAppInvitations: operation({
+    method: "GET", path: "/v1/apps/{appId}/invitations",
+    summary: "List app people and invitations", description: "Read the people who accepted an invitation to this app and its open invitations. Personal installations only; elsewhere `available` is false.",
+    auth: "user", scopes: [], input: appPath, output: appInvitationsViewSchema, idempotency: "none",
+  }),
+  createAppInvitation: operation({
+    method: "POST", path: "/v1/apps/{appId}/invitations",
+    summary: "Invite someone to an app", description: "Email an invitation to use (view) or administer (edit) this app. The link expires in 7 days and needs a confirmed account with the invited address.",
+    auth: "user", scopes: [], input: appPath.extend({ body: createAppInvitationRequestSchema }),
+    output: appInvitationSchema, bodyKey: "body", idempotency: "required",
+  }),
+  updateAppInvitation: operation({
+    method: "PATCH", path: "/v1/apps/{appId}/invitations/{invitationId}",
+    summary: "Change an app invitation", description: "Change the access an open invitation gives once it is accepted. The emailed link stays the same.",
+    auth: "user", scopes: [], input: appPath.extend({ invitationId: uuid, body: appInvitationPermissionRequestSchema }),
+    output: appInvitationSchema, bodyKey: "body", idempotency: "required",
+  }),
+  resendAppInvitation: operation({
+    method: "POST", path: "/v1/apps/{appId}/invitations/{invitationId}/resend",
+    summary: "Resend an app invitation", description: "Email an open or expired invitation again with a new link that replaces the earlier one and expires in 7 days.",
+    auth: "user", scopes: [], input: appPath.extend({ invitationId: uuid }),
+    output: appInvitationSchema, idempotency: "required",
+  }),
+  revokeAppInvitation: operation({
+    method: "DELETE", path: "/v1/apps/{appId}/invitations/{invitationId}",
+    summary: "Cancel an app invitation", description: "Cancel an open invitation so its link stops working.",
+    auth: "user", scopes: [], input: appPath.extend({ invitationId: uuid }),
+    output: z.object({ revoked: z.literal(true) }).strict(), idempotency: "required",
+  }),
+  setAppInvitedPersonPermission: operation({
+    method: "PUT", path: "/v1/apps/{appId}/invited-people/{userId}",
+    summary: "Change an invited person's access", description: "Change whether someone who accepted an invitation can use (view) or administer (edit) this app.",
+    auth: "user", scopes: [], input: appPath.extend({ userId: uuid, body: appInvitationPermissionRequestSchema }),
+    output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }),
+    bodyKey: "body", idempotency: "required",
+  }),
+  removeAppInvitedPerson: operation({
+    method: "DELETE", path: "/v1/apps/{appId}/invited-people/{userId}",
+    summary: "Remove an invited person", description: "Remove the access someone received through an invitation. Giving it back needs a new invitation.",
+    auth: "user", scopes: [], input: appPath.extend({ userId: uuid }),
+    output: z.object({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }),
+    idempotency: "required",
+  }),
+  inspectAppInvitation: operation({
+    method: "POST", path: "/v1/app-invitations/{invitationId}/inspect",
+    summary: "Inspect an app invitation", description: "Read an app invitation with its link token before accepting it: the app, the access it gives, the invited address, and whether the signed-in account can accept it. Changes nothing.",
+    auth: "user", scopes: [], input: z.object({ invitationId: uuid, body: appInvitationTokenRequestSchema }),
+    output: appInvitationPreviewSchema, bodyKey: "body", idempotency: "none",
+  }),
+  acceptAppInvitation: operation({
+    method: "POST", path: "/v1/app-invitations/{invitationId}/accept",
+    summary: "Accept an app invitation", description: "Accept an app invitation with its link token. The signed-in account must be confirmed and use the invited address.",
+    auth: "user", scopes: [], input: z.object({ invitationId: uuid, body: appInvitationTokenRequestSchema }),
+    output: acceptedAppInvitationSchema.extend({ operation: controlPlaneOperationSchema, reconciliation: z.enum(["complete", "pending"]) }),
+    bodyKey: "body", idempotency: "required",
+  }),
+  listSharedApps: operation({
+    method: "GET", path: "/v1/account/shared-apps",
+    summary: "List apps shared with you", description: "Read the apps the signed-in person was invited to use (Can use), each with its address. Apps they administer are in the app list instead. Personal installations only; elsewhere the list is empty.",
+    auth: "user", scopes: [], input: z.object({}),
+    output: z.object({ apps: z.array(z.object({ id: uuid, name: z.string(), appUrl: z.string().nullable() }).strict()) }).strict(),
+    idempotency: "none",
   }),
   getOrganisationCapacity: operation({
     method: "GET", path: "/v1/organisations/{organisationId}/capacity",
@@ -2358,6 +2613,95 @@ export const controlPlaneOperations = {
     output: aiIntegrationOverviewSchema,
     idempotency: "none",
   }),
+getAiConnectionModels: operation({
+    method: "GET",
+    path: "/v1/ai-integrations/connections/{connectionId}/models",
+    summary: "List an AI account's models",
+    description:
+      "The models of one of the caller's own AI accounts and whether each is switched on. Switched-on models appear in the Agent's model picker. Direct providers list every model the installation enables; OpenRouter lists the models added to it.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid }),
+    output: aiConnectionModelsSchema,
+    idempotency: "none",
+  }),
+  updateAiConnectionModels: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/connections/{connectionId}/models",
+    summary: "Switch an AI account's models on or off",
+    description:
+      "Switch models on or off for one of the caller's own AI accounts, or add OpenRouter models. Work already running keeps its model.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid, body: updateAiConnectionModelsRequestSchema }),
+    output: aiConnectionModelsSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  searchAiConnectionModels: operation({
+    method: "GET",
+    path: "/v1/ai-integrations/connections/{connectionId}/models/search",
+    summary: "Search models to add to an AI account",
+    description:
+      "Search OpenRouter models that could be added to one of the caller's own OpenRouter accounts, with the reason any can't be added.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ connectionId: uuid, query: aiConnectionModelSearchQuerySchema.optional() }),
+    queryKey: "query",
+    output: aiConnectionModelSearchSchema,
+    idempotency: "none",
+  }),
+  getOrganisationAiConnectionModels: operation({
+    method: "GET",
+    path: "/v1/ai-integrations/organisations/{organisationId}/connections/{connectionId}/models",
+    summary: "List an organisation AI account's models",
+    description:
+      "The models of one organisation AI account and whether each is switched on for the organisation's Agent model picker. Organisation administrators only.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ organisationId: uuid, connectionId: uuid }),
+    output: aiConnectionModelsSchema,
+    idempotency: "none",
+  }),
+  updateOrganisationAiConnectionModels: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/organisations/{organisationId}/connections/{connectionId}/models",
+    summary: "Switch an organisation AI account's models on or off",
+    description:
+      "Switch models on or off for one organisation AI account, or add OpenRouter models. Organisation administrators only; work already running keeps its model.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ organisationId: uuid, connectionId: uuid, body: updateAiConnectionModelsRequestSchema }),
+    output: aiConnectionModelsSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  searchOrganisationAiConnectionModels: operation({
+    method: "GET",
+    path: "/v1/ai-integrations/organisations/{organisationId}/connections/{connectionId}/models/search",
+    summary: "Search models to add to an organisation AI account",
+    description:
+      "Search OpenRouter models that could be added to an organisation OpenRouter account, with the reason any can't be added. Organisation administrators only.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ organisationId: uuid, connectionId: uuid, query: aiConnectionModelSearchQuerySchema.optional() }),
+    queryKey: "query",
+    output: aiConnectionModelSearchSchema,
+    idempotency: "none",
+  }),
+  updateOrganisationAiConnection: operation({
+    method: "PATCH",
+    path: "/v1/ai-integrations/organisations/{organisationId}/connections/{connectionId}",
+    summary: "Change an organisation AI account",
+    description:
+      "Rename an organisation AI account or change its OpenRouter data policy. Organisation administrators only.",
+    auth: "user",
+    scopes: [],
+    input: z.object({ organisationId: uuid, connectionId: uuid, body: updateAiConnectionRequestSchema }),
+    output: z.object({ schemaVersion: z.literal(1), connection: aiProviderConnectionSchema }),
+    bodyKey: "body",
+    idempotency: "none",
+  }),
   getOrganisationAiConnections: operation({
     method:"GET",path:"/v1/ai-integrations/organisations/{organisationId}",
     summary:"List organisation AI accounts",description:"Read credential-free provider account metadata for the current organisation.",
@@ -2526,6 +2870,44 @@ export const controlPlaneOperations = {
     bodyKey: "body",
     idempotency: "none",
   }),
+  updateAppAiAutomatic: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/apps/{appId}/automatic",
+    summary: "Choose the model for an app's automatic tasks",
+    description:
+      "Make an app's automatic tasks (automatic repairs, scheduled Agent tasks and AI calls from its code) follow the latest pick in its Agent chat, or always use one provider and model. Requires app Admin or organisation admin authority and the current version.",
+    auth: "user",
+    scopes: [],
+    input: appPath.extend({ body: updateAppAiAutomaticRequestSchema }),
+    output: appAiSetupSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  updateAppAiRepairs: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/apps/{appId}/repairs",
+    summary: "Turn an app's automatic repairs on or off",
+    description:
+      "Automatic repairs are on unless an app Admin turns them off: when one of the app's alerts fires, its Agent finds the cause, tests a fix and releases it. Turning them on records the caller as the editor who allowed them. Requires app Admin or organisation admin authority.",
+    auth: "user",
+    scopes: [],
+    input: appPath.extend({ body: updateAppAiRepairsRequestSchema }),
+    output: appAiSetupSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
+  updateAppAdminAi: operation({
+    method: "PUT",
+    path: "/v1/ai-integrations/apps/{appId}/admin-ai",
+    summary: "Allow other app admins to use the owner's AI provider",
+    description: "On personal installations, allow or disallow other app admins using the owner's selected chat provider for their messages in this app. Enabled by default. Only the app owner can change it, with the current settings version.",
+    auth: "user",
+    scopes: [],
+    input: appPath.extend({ body: updateAppAdminAiRequestSchema }),
+    output: appAiSetupSchema,
+    bodyKey: "body",
+    idempotency: "none",
+  }),
   allowAppAiOwnUse: operation({
     method: "PUT",
     path: "/v1/ai-integrations/apps/{appId}/own-use",
@@ -2661,7 +3043,7 @@ export const controlPlaneOperations = {
     path: "/version",
     summary: "Get platform version and compatibility contracts",
     description:
-      "Returns non-secret build metadata and explicitly activated client compatibility markers without caching the response. CLI mutation-journal support is safe only when contracts.cliMutationJournal is 1; absence means clients must fail before a journaled mutation. Clients should request revalidation before relying on the marker.",
+      "Returns non-secret build metadata and explicitly activated client compatibility markers without caching the response. CLI mutation-journal support is safe only when contracts.cliMutationJournal is 1; absence means clients must fail before a journaled mutation. contracts.pinnedDraftValidation is 1 when draft validation honours expectedRevision; without it, a client keeps the earlier validation flow. Clients should request revalidation before relying on the marker.",
     auth: "none",
     scopes: [],
     input: emptyBody,
@@ -2673,7 +3055,7 @@ export const controlPlaneOperations = {
     path: "/v1/onboarding/agent",
     summary: "Start email-based agent onboarding",
     description:
-      "Retains an onboarding request and creates a provisional identity for a new email, or requests verification for an existing identity. Returns a non-secret owner launch URL. Email confirmation and explicit company setup or invitation acceptance precede app and credential creation.",
+      "Retains an onboarding request and creates a provisional identity for a new email, or requests verification for an existing identity. Returns a non-secret owner launch URL. Email confirmation precedes app and credential creation; on organisation installations, so does organisation setup or invitation acceptance. Each address receives at most five onboarding emails a day and the installation accepts a bounded number of new requests an hour; beyond that the request fails with 429 onboarding_rate_limited.",
     auth: "none",
     scopes: [],
     input: z.object({ body: startAgentOnboardingRequestSchema }),
@@ -2712,7 +3094,7 @@ export const controlPlaneOperations = {
     description: "Creates a full ZIP of the live release source, artifact, business data and managed files. No partial export is available.",
     auth: "bearer", scopes: ["owner"], input: appPath.extend({ body: z.object({ example: z.boolean().default(false) }).strict() }),
     output: controlPlaneOperationSchema, bodyKey: "body", idempotency: "required",
-    mcp: { toolName: "export_app", title: "Export full app", description: "Prepare a complete private app package. Wait for the operation and download its exportId. Example mode is only for separately prepared fictional examples.", readOnlyHint:false, destructiveHint:false, idempotentHint:true, openWorldHint:false },
+    mcp: { toolName: "export_app", title: "Export full app", description: "Prepare a complete private app package. Wait for the operation to succeed, then pass its id as exportId to get_app_export. Example mode is only for separately prepared fictional examples.", readOnlyHint:false, destructiveHint:false, idempotentHint:true, openWorldHint:false },
   }),
   downloadAppExport: operation({
     method: "GET", path: "/v1/apps/{appId}/exports/{exportId}/content", summary: "Download a full app package",
@@ -3347,6 +3729,7 @@ export const controlPlaneOperations = {
     scopes: ["app:deploy"],
     input: draftPath.extend({
       body: z.object({
+        expectedRevision: z.number().int().positive().optional().describe("Validate only this exact draft revision. The request then waits at most 25 seconds and otherwise returns HTTP 429 DRAFT_VALIDATION_IN_PROGRESS (retryable) with the revision; repeat with it to join the same validation. Without it, the earlier contract applies: up to 70 seconds, then HTTP 429 FRONTEND_BUILD_BUSY (retryable) while the work continues."),
         version: z
           .string()
           .min(1)
@@ -3427,7 +3810,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/drafts/{draftId}/dev-sessions",
     summary: "Start a development session",
     description:
-      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment. A new session starts only while expectedActiveDeploymentId, or the release the draft was cloned from, is still the latest release; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED.",
+      "Creates or resumes an isolated preview for a validated draft, optionally applies its exact revision, and returns a browserPreviewUrl that a signed-in owner or builder can open in a clearly marked responsive preview shell before deployment. A new session starts only while expectedActiveDeploymentId, or the release the draft was cloned from, is still the latest release; otherwise it fails with ACTIVE_DEPLOYMENT_CHANGED. Applying waits synchronously for readiness; allow 900 seconds and a transport without a shorter response-header deadline. Use apply:false to retain the session ID before a separate apply request. A lost reply is uncertain and does not authorize repeating apply.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: draftPath.extend({
@@ -3443,7 +3826,7 @@ export const controlPlaneOperations = {
       toolName: "start_dev_session",
       title: "Start dev session",
       description:
-        "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
+      "Start or resume an isolated frontend and database preview for a validated draft. Applying may wait up to 900 seconds; use apply:false to retain its session ID before a separate apply. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -3455,7 +3838,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}",
     summary: "Get a development session",
     description:
-      "Returns preview state, the owner/builder browserPreviewUrl for the marked responsive review shell, capabilities, and verification status.",
+      "Returns preview state, the owner/builder browserPreviewUrl for the marked responsive review shell, capabilities, and verification status. activeRevision describes only the currently active revision, not pending or failed preparation. After a lost apply reply, only an exact matching session, draft revision and artifact can confirm success; absence of that match leaves the outcome uncertain.",
     auth: "bearer",
     scopes: ["app:read"],
     input: devSessionPath,
@@ -3575,7 +3958,7 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/apply",
     summary: "Apply a draft revision to development",
     description:
-      "Materializes the exact validated draft and replays migrations into its isolated dev schema when needed.",
+      "Materializes the exact validated draft and replays migrations into its isolated dev schema when needed. Waits synchronously for readiness: allow 900 seconds and a transport without a shorter response-header deadline. This endpoint has no request replay key. After a lost reply, read the known session to confirm an exact active draft revision and artifact; do not automatically repeat the POST or treat a missing active result as a terminal failure.",
     auth: "bearer",
     scopes: ["app:deploy"],
     input: devSessionPath,
@@ -3585,7 +3968,7 @@ export const controlPlaneOperations = {
       toolName: "apply_dev_revision",
       title: "Apply dev revision",
       description:
-        "Sync the validated draft to its development preview; migration changes reset isolated dev data.",
+        "Sync the validated draft to its development preview; migration changes reset isolated dev data. May wait up to 900 seconds for readiness. After a lost reply, inspect the known session for the exact active revision and artifact; never automatically repeat apply.",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
@@ -3648,16 +4031,8 @@ export const controlPlaneOperations = {
     }),
     bodyKey: "body",
     idempotency: "required",
-    mcp: {
-      toolName: "mutate_dev_data",
-      title: "Write dev fixture data",
-      description:
-        "Create, createMany, updateById, or deleteById synthetic-user-A fixture rows in one named table in the isolated development schema. Pass table, action, values, and id as applicable; raw REST paths are not accepted. See https://docs.opencloud.ai/openapi.yaml.",
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: true,
-    },
+    // Hosted MCP exposes separate, strictly typed fixture tools instead of
+    // advertising this lower-level REST adapter as a generic executor.
   }),
   invokeDevFunction: operation({
     method: "POST",
@@ -3678,36 +4053,28 @@ export const controlPlaneOperations = {
     }),
     bodyKey: "body",
     idempotency: "required",
-    mcp: {
-      toolName: "invoke_dev_function",
-      title: "Invoke dev Function",
-      description:
-        "Run app-defined development code that may change isolated data or external systems, and capture diagnostics.",
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: true,
-    },
   }),
   listDevEmailCaptures: operation({
     method: "GET",
     path: "/v1/apps/{appId}/dev-sessions/{sessionId}/email/captures",
     summary: "List captured development email",
     description:
-      "Returns bounded metadata for outbound messages captured from only the selected development session.",
+      "Returns bounded metadata for outbound messages captured from, and test inbound messages injected into, only the selected development session. Inbound entries have direction inbound.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: devSessionPath.extend({
       query: z.object({ limit: z.number().int().min(1).max(200).default(100) }),
     }),
-    output: z.array(devEmailCaptureSummarySchema),
+    output: z.array(
+      z.union([devEmailCaptureSummarySchema, devInboundEmailSummarySchema]),
+    ),
     queryKey: "query",
     idempotency: "none",
     mcp: {
       toolName: "list_dev_email_captures",
       title: "List dev email captures",
       description:
-        "Inspect outbound messages captured from an isolated development session.",
+        "Inspect outbound messages captured from an isolated development session, and test inbound messages injected into it.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -3938,7 +4305,7 @@ export const controlPlaneOperations = {
       toolName: "verify_app",
       title: "Verify app",
       description:
-        "Run the read-only production release gate after development verification.",
+        "Check the live app after a deploy: its active artifact, SDK pin and home page. Before the first deploy there is nothing live to check, so verify the dev session instead.",
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
@@ -4303,7 +4670,7 @@ export const controlPlaneOperations = {
       toolName: "list_custom_integrations",
       title: "List custom integrations",
       description:
-        "List integrations published by other apps in this app's organisation. Declare one in the manifest with provider: custom, integration: <name>, account: app, and only the capabilities you need, then call its operations with integrations.use(slot).call(operation, input) from a Function on SDK 2.2.0 or later.",
+        "Read the catalog of integrations available to one app, including published descriptions, capabilities, and app-development contracts. This is a read-only metadata lookup: it does not invoke integrations, execute Functions, create connections, or register additional MCP tools. Credential values and account connections are omitted.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -4560,14 +4927,15 @@ export const controlPlaneOperations = {
     method: "GET",
     path: "/v1/apps/{appId}/cron/invocations",
     summary: "List cron invocations",
-    description: "Lists scheduled function invocation history.",
+    description:
+      "Lists scheduled function run history, newest first: runs, and scheduled runs that were skipped (state skipped, with the reason in skipped). A run starts at its time, or within 5 minutes if OpenCloud is briefly busy; one that can't, for example during an outage, is skipped rather than run later. The after filter compares a run's start, and a skipped run's scheduled time.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({
       query: z
         .object({
           name: z.string().optional(),
-          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          state: cronInvocationStateSchema.optional(),
           after: z.iso.datetime({ offset: true }).optional(),
           cursor: z.string().max(512).optional(),
           limit: z.number().int().min(1).max(200).default(50),
@@ -4580,7 +4948,8 @@ export const controlPlaneOperations = {
     mcp: {
       toolName: "list_cron_invocations",
       title: "List cron invocations",
-      description: "Inspect cron execution history.",
+      description:
+        "Inspect cron run history, including scheduled runs that were skipped because OpenCloud couldn't start them within 5 minutes of their time (state skipped, with the reason). Check it after an outage: if a skipped run still matters, the person can run the schedule now with Run now on the app's Scheduled jobs page; MCP can't run it.",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -4592,14 +4961,14 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/cron/invocations/page",
     summary: "List a cron invocation page",
     description:
-      "Returns a stable, newest-first keyset page of app-scoped cron invocation history. Continue with nextCursor using the same filters and page size.",
+      "Returns a stable, newest-first keyset page of app-scoped cron run history, including skipped scheduled runs (state skipped). Continue with nextCursor using the same filters and page size. The after filter compares a run's start, and a skipped run's scheduled time.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({
       query: z
         .object({
           name: z.string().optional(),
-          state: z.enum(["running", "succeeded", "failed"]).optional(),
+          state: cronInvocationStateSchema.optional(),
           after: z.iso.datetime({ offset: true }).optional(),
           cursor: z.string().max(2_048).optional(),
           limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -4772,6 +5141,79 @@ export const controlPlaneOperations = {
     output: controlPlaneOperationSchema,
     idempotency: "required",
   }),
+  listAppAgentFiles: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/agent-files",
+    summary: "List Agent chat files",
+    description:
+      "Lists a bounded cursor page of the files sent in the exact app's Agent chat, newest first.",
+    auth: "user",
+    scopes: ["owner"],
+    input: appPath.extend({
+      query: z
+        .object({
+          limit: z.number().int().min(1).max(100).default(50),
+          cursor: z.string().max(512).optional(),
+        })
+        .optional(),
+    }),
+    output: appAgentFilesPageSchema,
+    queryKey: "query",
+    idempotency: "none",
+  }),
+  getAppAgentTasks: operation({
+    method: "GET", path: "/v1/apps/{appId}/agent-tasks", summary: "Inspect app Agent tasks",
+    description: "Current task definitions, retained run totals and AI cost for an inclusive-start, exclusive-end date range.",
+    auth: "user", scopes: ["owner"], input: appPath.extend({ query: agentTaskRangeSchema }),
+    output: agentTasksOverviewSchema, queryKey: "query", idempotency: "none",
+  }),
+  listAppAgentTaskRuns: operation({
+    method: "GET", path: "/v1/apps/{appId}/agent-task-runs", summary: "List app Agent task runs",
+    description: "Bounded task history with current status and recorded cost. Requires current app Edit access.",
+    auth: "user", scopes: ["owner"], input: appPath.extend({ query: agentTaskHistoryQuerySchema }),
+    output: agentTaskRunsPageSchema, queryKey: "query", idempotency: "none",
+  }),
+  getAppAgentTaskRun: operation({
+    method: "GET", path: "/v1/apps/{appId}/agent-task-runs/{runId}", summary: "Inspect an app Agent task run",
+    description: "Read one task's captured definition, input, output, result receipts and recorded cost.",
+    auth: "user", scopes: ["owner"], input: appPath.extend({ runId: uuid }),
+    output: agentTaskRunDetailSchema, idempotency: "none",
+  }),
+  getAppAgentTaskActivity: operation({
+    method: "GET", path: "/v1/apps/{appId}/agent-task-runs/{runId}/activity", summary: "Inspect Agent task activity",
+    description: "A bounded safe trace projection for one task, excluding credentials and unavailable hidden reasoning.",
+    auth: "user", scopes: ["owner"],
+    input: appPath.extend({ runId: uuid, query: z.object({ offset: z.number().int().min(0).max(1_000_000).default(0) }).optional() }),
+    output: agentTaskActivitySchema, queryKey: "query", idempotency: "none",
+  }),
+  downloadAppAgentFile: operation({
+    method: "GET",
+    path: "/v1/apps/{appId}/agent-files/{fileId}/content",
+    summary: "Download an Agent chat file",
+    description:
+      "Streams the original bytes of one file sent in the exact app's Agent chat as an attachment.",
+    auth: "user",
+    scopes: ["owner"],
+    input: productionFilePath,
+    output: z.unknown(),
+    rawOutput: {
+      contentType: "application/octet-stream",
+      description: "The original file bytes.",
+    },
+    idempotency: "none",
+  }),
+  deleteAppAgentFile: operation({
+    method: "DELETE",
+    path: "/v1/apps/{appId}/agent-files/{fileId}",
+    summary: "Delete an Agent chat file",
+    description:
+      "Permanently deletes one file sent in the exact app's Agent chat and releases its storage. The chat keeps the message and shows the file as deleted.",
+    auth: "user",
+    scopes: ["owner"],
+    input: productionFilePath,
+    output: z.object({ id: uuid, deleted: z.literal(true) }),
+    idempotency: "none",
+  }),
   invokeProductionFunction: operation({
     method: "POST",
     path: "/v1/apps/{appId}/functions/{functionName}/invocations",
@@ -4854,16 +5296,6 @@ export const controlPlaneOperations = {
       })
       .passthrough(),
     idempotency: "none",
-    mcp: {
-      toolName: "invoke_cron",
-      title: "Invoke cron",
-      description:
-        "Run an enabled production cron Function that may change app data or external systems.",
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: true,
-    },
   }),
   invokeCronOperation: operation({
     method: "POST",
@@ -4886,13 +5318,14 @@ export const controlPlaneOperations = {
     path: "/v1/apps/{appId}/agent-feed",
     summary: "Get the app Agent Feed",
     description:
-      "Reads the stable, bounded app health, signal, current alert, derived threshold-breach history, and recent-event contract without changing alert state.",
+      "Reads bounded app health, signals, alerts and recent events without changing state. Omitted contractVersion returns v1; explicitly request 2 for compute events, source freshness and container metric provenance.",
     auth: "bearer",
     scopes: ["app:observe"],
     input: appPath.extend({
       query: z
         .object({
           since: z.iso.datetime({ offset: true }).optional(),
+          contractVersion: z.enum(["1", "2"]).optional().describe("Omit for the v1 contract. 2 adds container events, source freshness and container metric provenance."),
         })
         .optional(),
     }),
@@ -4999,7 +5432,7 @@ export const controlPlaneOperations = {
     description: "Runs an app-scoped, bounded log query.",
     auth: "bearer",
     scopes: ["app:observe"],
-    input: appPath.extend({ body: jsonObject }),
+    input: appPath.extend({ body: appLogsQueryBodySchema(true) }),
     output: jsonObject,
     bodyKey: "body",
     idempotency: "none",
@@ -5025,6 +5458,13 @@ export const controlPlaneOperations = {
     output: appLogsPageOutput,
     bodyKey: "body",
     idempotency: "none",
+  }),
+  queryDevLogsPage: operation({
+    method: "POST", path: "/v1/apps/{appId}/dev-sessions/{sessionId}/logs/page",
+    summary: "Query development logs", description: "Read bounded logs for this exact authorized development session: its Functions' lines, with the fields they logged, and its container lines. Container filters select container lines only. Cursors bind every filter and cannot cross production or another session.",
+    auth: "bearer", scopes: ["app:observe"],
+    input: appPath.extend({ sessionId: uuid, body: devAppLogsPageRequestSchema }),
+    output: appLogsPageOutput, bodyKey: "body", idempotency: "none",
   }),
   queryMetrics: operation({
     method: "POST",
@@ -5266,6 +5706,53 @@ export const controlPlaneOperations = {
 } as const;
 
 export type ControlPlaneOperationId = keyof typeof controlPlaneOperations;
+
+/** What an installation without compute serves for a shared operation that
+ * container compute extended: the earlier input, output and MCP text. */
+export interface ComputeOffOperationView {
+  readonly input?: z.ZodObject;
+  readonly output?: z.ZodType;
+  readonly mcpDescription?: string;
+}
+
+/**
+ * Installations without compute keep these shared operations exactly as they
+ * were before container compute, so agent-facing text and schemas match the
+ * running installation. MCP builds its tool surface from them there; the
+ * surface sits behind accepted connector submissions, so it must not change
+ * without the user's decision. One has been made: `queryLogs` gained its
+ * surface and development-session filters on every installation, described
+ * here without containers.
+ */
+export const computeOffOperationViews: { readonly [K in ControlPlaneOperationId]?: ComputeOffOperationView } = {
+  validateDraft: {
+    input: controlPlaneOperations.validateDraft.input.extend({
+      body: controlPlaneOperations.validateDraft.input.shape.body.omit({ expectedRevision: true }),
+    }),
+  },
+  startDevSession: {
+    mcpDescription:
+      "Start or resume an isolated frontend and database preview for a validated draft. Give browserPreviewUrl to a signed-in owner or builder who wants to review it before deployment; the link opens a clearly marked Not live window with Full size, Tablet, Mobile, and Reload tools around isolated synthetic user A and never reads production data. An explicit no-deploy request stops at this review point and does not authorize promotion.",
+  },
+  applyDevRevision: {
+    mcpDescription: "Sync the validated draft to its development preview; migration changes reset isolated dev data.",
+  },
+  getAgentFeed: {
+    input: controlPlaneOperations.getAgentFeed.input.extend({
+      query: controlPlaneOperations.getAgentFeed.input.shape.query.unwrap().omit({ contractVersion: true }).optional(),
+    }),
+    output: agentFeedV1Output,
+  },
+  getUsage: {
+    output: controlPlaneOperations.getUsage.output.omit({ compute: true }),
+  },
+  queryLogsPage: {
+    input: controlPlaneOperations.queryLogsPage.input.extend({ body: appLogsPageRequestV1Schema }),
+  },
+  queryLogs: {
+    input: controlPlaneOperations.queryLogs.input.extend({ body: appLogsQueryBodySchema(false) }),
+  },
+};
 
 export type ControlPlaneOperationInput<T extends ControlPlaneOperationId> =
   z.infer<(typeof controlPlaneOperations)[T]["input"]>;

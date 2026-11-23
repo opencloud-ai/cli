@@ -48,7 +48,7 @@ const server = createServer(async (request, response) => {
         commit: "contract-test",
         builtAt: "2026-09-02T00:00:00.000Z",
         releaseId: "platform-v3.7.0-contract-test",
-        contracts: { cliMutationJournal: 1 },
+        contracts: { cliMutationJournal: 1, pinnedDraftValidation: 1 },
       }),
     );
     return;
@@ -549,7 +549,7 @@ try {
       ],
       method: "POST",
       url: `/v1/apps/${appId}/drafts/${draftId}/validate`,
-      body: { version: "legacy-2" },
+      body: { expectedRevision: 3, version: "legacy-2" },
     },
     {
       arguments_: [

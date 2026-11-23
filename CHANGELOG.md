@@ -1,5 +1,304 @@
 # Changelog
 
+## 3.22.0
+
+- `cron history` lists skipped scheduled runs too: `--state skipped` selects
+  them, and `--after` compares a skipped run's scheduled time. OpenCloud starts
+  a scheduled run only within 5 minutes of its time and records any it couldn't
+  start as skipped, with the reason.
+- `app request --access-token-env` takes any variable name, `OC_FOO`
+  included; it refuses only a name shaped like a token itself (`oc_app_…` at
+  a token's length, or another credential), still without repeating it.
+- An idempotency key is taken for a credential only when it has a real
+  credential's prefix and length, the prefix starting the key or following a
+  character that is not a letter or digit: `s5-otherdesk-deploy-001` and
+  `s5-task-abcdefghij` held `sk-` and ten more characters and were refused.
+  The refusal now names the kind of credential the key looks like, without
+  repeating it, and says not to put credentials in idempotency keys. A CLI
+  login's access token (`oc_cli_…`), its refresh token (`oc_refresh_…`) and
+  a device code (`oc_device_…`) count as credentials too.
+- Accept SDK 2.9.0 pins. Server SDK 2.9.0 lets a Function call the app's
+  containers. Deploying a 2.9.0 pin needs a platform release that installs
+  it. SDK 2.3.0 remains the default for new and unpinned apps without
+  containers.
+- A failure to reach OpenCloud (a refused or reset connection, a timeout, or
+  `fetch failed`) prints `retryable: true`. A host name DNS can't find
+  (`ENOTFOUND`, usually a mistyped `--api-url`) prints `retryable: false`,
+  as a retry won't find it either.
+- `app dev start` and `sync` in a folder whose development draft a promotion
+  deployed (one whose release then failed and was undone too) or that was
+  discarded fail with `DEV_DRAFT_CLOSED` and the commands that work: `app dev
+  stop <dir>`, then `app dev start <dir>`. They used to say "start a new dev
+  session for the next change", which `app dev start` had just refused.
+- A deploy whose reply was lost (a timeout, a reset connection) or that was
+  killed before it saved the operation is not sent twice. Run again, it sends
+  the deploy again with the same key while its draft still holds the
+  validated revision, and follows the release it started (OpenCloud answers
+  a key it knows with that release), then verifies it and records it in
+  `.opencloud/base.json`. 3.21 found the draft deployed and stopped with
+  "The source draft is deployed", every time, holding later deploys behind
+  that entry. Refused again with
+  `ACTIVE_DEPLOYMENT_CHANGED` while the draft never deployed, it is settled
+  as any stale copy is; a deployed draft OpenCloud refuses to answer for ends
+  as `DEPLOY_OUTCOME_UNKNOWN` (not retryable), which names `deployment list`.
+  It holds back only that same source: a deploy of changed source without a
+  key replaces the entry, and the same source again needs a new
+  `--idempotency-key`.
+- Validation waits on the in-progress answer OpenCloud actually sends: its
+  error filter drops the body's `retryable` flag, which the contract requires,
+  so the first "still running" answer used to end the wait with
+  `DRAFT_VALIDATION_IN_PROGRESS` and `retryable: false`. An error without a
+  retryable flag of its own now prints `retryable` as the client read it:
+  `details.retryable`, else true for 408, 425, 429 and 5xx.
+- Allow up to 15 minutes for development container readiness. Save the session
+  before applying, and reconcile lost start/sync apply replies through exact
+  reads without automatically repeating the request. The reads back off from
+  every 2 seconds to every 15, and one last read after the deadline confirms
+  an apply that became ready at the very end instead of calling it unknown;
+  running the command again takes that last look too.
+- Wait for slow draft validation using short requests pinned to the exact
+  revision, where OpenCloud advertises `contracts.pinnedDraftValidation` in
+  `/version`. An OpenCloud without it (2.35.x and older) gets 3.20's
+  requests: no revision, up to nine minutes for a frontend build, and
+  `FRONTEND_BUILD_BUSY` validated again on the same revision, up to 20 times.
+  Persist each dispatch and acknowledged response before continuing.
+  Deployment, development and direct draft validation share this behavior.
+  Resumed validation can still normalize the source manifest after its exact
+  result has been durably acknowledged. Validating the same revision again
+  joins OpenCloud's run for it, so a validation is never left as an unknown
+  outcome: when the wait ends without a result (a lost reply, a proxy's 5xx or
+  429, or `DRAFT_VALIDATION_WAIT_TIMEOUT`), the entry is settled and holds
+  nothing back; the same command with the same input rejoins that validation,
+  in a fresh window once the kept one has passed, and a changed request starts
+  afresh. Ctrl-C while waiting settles the entry the same way and exits 130
+  with `VALIDATION_INTERRUPTED`; a run killed outright leaves its validation
+  for the next run of the same command, which sends it again. A rejoined
+  validation whose draft no longer matches (edited elsewhere) is dropped, and
+  the run applies its source again; one whose draft holds this source's
+  canonical `opencloud.json` (a second validation stopped) is rejoined as it
+  is; one whose draft was deployed or discarded elsewhere fails with
+  `DRAFT_NOT_OPEN`, sends nothing, and the next run starts from a new draft.
+  `APP_LOCK_BUSY` (nothing started) is sent again while the window lasts;
+  once OpenCloud said the validation is running (or an earlier run's request
+  may have started it), a wait that ends on `APP_LOCK_BUSY` is settled as
+  waiting, rejoined by the same command, not as "nothing started". Apps
+  without containers or a frontend build wait at least 90
+  seconds, not 30, and `DRAFT_VALIDATION_WAIT_TIMEOUT` names the entry and the
+  command that rejoins it.
+- Add production and isolated development container commands for jobs, HTTP
+  services, and workers: list, get, run, executions, execution, cancel, pause,
+  resume, restart, scale, and events. Mutations retain their exact scope and
+  idempotency key; workload controls compare the observed generation and
+  answer with `workloadName`, the new `generation` (the one the next control
+  names) and `acceptedAt`. The change is saved when they answer; there is no
+  operation to follow, so its effect shows in `get` and `events`.
+- Add app-bound registry management with passwords read from standard input,
+  and account-only compute payer settings, prices, and usage reads. Consent
+  and budget changes remain in the browser. The mutation journal records
+  only a digest of the registry's name, host and username, never of its
+  password, and error reports never include the password.
+- Add Agent Feed v2 and scoped container log pages with cursors, gaps, and
+  source freshness. Expected app and policy errors keep their structured
+  diagnostics without becoming platform error reports. `agent-feed` checks
+  its options but prints OpenCloud's answer as received, as before, so a
+  value a newer platform adds (such as a new signal or alert state) never
+  fails the read with `API_CONTRACT_MISMATCH` and an error report.
+- `metrics --metric custom.<name>` reads a metric the app records (a
+  container's `recordMetric` or the browser SDK), as the Agent Feed names it;
+  a name without `custom.` is always a platform series. Its help says so, and
+  that `rate` is a counter's increments or a gauge's change per second.
+- `logs --page` and `app dev logs` keep the structured `fields` a Function
+  passed to `log` on its log lines; they used to be dropped while the answer
+  was parsed.
+- `app dev logs` accepts `--page`, as `logs` does, and both help texts say when
+  they return a page: development logs always do, while `logs` without
+  `--page` or a page filter keeps the raw answer earlier CLIs printed.
+- `metrics --help` explains the answer: Prometheus's matrix shape, one series
+  per label set with at most one `[unix seconds, "value"]` point per step, at
+  its start, that a long window lengthens the step, and how a `custom.<name>`
+  metric's dimension sets and `--aggregation` map onto series.
+- `logs` and `app dev logs` name the surfaces `--surface` accepts in their help
+  (`function`, `container`, `http`, `ai` and `platform`, plus `functions`,
+  `containers`, `page`, `rest` and `storage` for `http`, and `runtime`, the
+  older name for `function`) and refuse any other value with
+  `LOG_SURFACE_UNKNOWN` before sending a request, as the platform does,
+  instead of returning an empty page; `realtime` and `cron` name both
+  surfaces to use in `details.use`. Each name is sent as
+  typed, never mapped: OpenCloud reads every alias itself, and a release from
+  before the surface names still finds Function lines with `runtime`.
+- When OpenCloud refuses the input itself, the error keeps what it should be
+  in `details`: the `field`, the values it `allowed` and their `aliases`
+  (`LOG_SURFACE_UNKNOWN`, whether the platform or the CLI refused it), or each
+  refused field with its `code` and `message` (`invalid_request`). Only those
+  bounded parts are kept, with credentials redacted. An owner-only action
+  refused to a CLI login (`OWNER_ACTION_BROWSER_ONLY`) prints OpenCloud's way
+  forward as the error's `hint`.
+- `deploy` and `deployment rollback` run OpenCloud's production verification
+  (`verify_app`) once the release is live, as `app dev promote` does, and print
+  it as `verification`. A worker starts only after the switch, so a release
+  whose worker can't start used to print "succeeded". When the verification
+  fails, the command exits non-zero with `VERIFICATION_FAILED`, its code (such
+  as `COMPUTE_CRASH_LOOP`) and reason, `verificationId` and `deploymentId`,
+  and a hint naming the logs command, `app verify` and the rollback to the
+  earlier release; the release stays live. `--no-verify` skips it, and
+  `--no-follow` waits for neither. A credential without `app:observe` can't
+  run it: the command succeeds and prints `verification: {"state":
+  "skipped", "reason": "MISSING_OBSERVE_SCOPE", "message": …}`.
+  Verification gets its own `--timeout`, counted from when it starts, so an
+  upload, validation or container build before it never uses it up. One
+  still running when that ends fails with `OPERATION_WAIT_TIMEOUT`
+  (retryable, with `operationId`, `verificationId` and `deploymentId`); the
+  release is live and the entry stays open, and the hint gives the same
+  command with its idempotency key, which rejoins that verification and, for
+  a deploy, records the release in `.opencloud/base.json`. A failure the app
+  caused (its containers, or a public app's own answer to `HEAD /`,
+  "returned HTTP 405") is not sent as an error report; a platform fault (no
+  answer to `HEAD /`, a 502, 503 or 504 from the platform's router, a
+  missing artifact) is. A release another deploy, a
+  rollback or a pause replaced before it was verified fails with
+  `VERIFICATION_FAILED` and `verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH"`
+  as the caller's conflict, not an error report; its hint names
+  `deployment list` (and `pull`), and `.opencloud/base.json` keeps the
+  release the copy was based on.
+- A deploy or rollback OpenCloud compensated, which used to print only
+  `OPERATION_FAILED` and `DEPLOYMENT_COMPENSATED`, now prints the operation's
+  own message and the failed release: `deploymentId` and `deploymentError`
+  (code, message and the compute details, such as `exitCode` and
+  `workloadName`), with a hint giving the `logs --page --surface container`
+  command for the deploy's window. `operation get` does the same. A release
+  that failed for the app's own reason (its container, by the compute
+  catalog, or a refused migration) is not sent as an error report, and an
+  operation that failed or was cancelled settles its journal entry, so the
+  next deploy of fixed source is not held behind it.
+- A deploy refused with `ACTIVE_DEPLOYMENT_CHANGED` gives the exact recovery
+  in its hint, with this copy's directory and the release to base it on: after
+  a rollback (the copy's base was rolled back),
+  `opencloud pull <dir> --deployment <live> --merged`; after someone else's
+  newer release, `opencloud pull <dir>` (or `--merged` once merged by hand);
+  either way, or `--force`.
+- `deployment list`, `deployment get`, `operation get` and `operation list`
+  work from the app ID alone with the account login when the folder isn't
+  connected (or is connected to another app). `operation get`, which names
+  no app, reads with a connected folder's own credential first, as 3.21 did,
+  and uses the account login only when OpenCloud refuses that credential (403
+  or 404), so an expired login doesn't stop it. Container, log and metric reads
+  and every change still need the app's connected folder, because OpenCloud
+  grants an account login only `app:read`; `WORKSPACE_NOT_CONNECTED` now says
+  so to a signed-in person.
+- `validate`, and `deploy` and `app dev start` or `sync` before uploading,
+  warn with `CONTAINERS_NEED_SDK_2_9` when a manifest declares containers but
+  pins an SDK older than 2.9.0, naming the fix (`runtime.sdk.version: 2.9.0`).
+  `init` still pins 2.3.0.
+- A manifest with containers, or a container frontend, fails with
+  `COMPUTE_NOT_OFFERED` ("This installation doesn't run containers") before
+  `deploy`, `app dev start` or `sync` upload anything when the installation's
+  public `/v1/installation` says it doesn't run them, instead of with the
+  server's SDK-version and unknown-key diagnostics. A server without that
+  answer is left to its own validation.
+- `/version` markers count only when they are exactly 1; any other value reads
+  as absent (the earlier flow), not as `API_CONTRACT_MISMATCH` on every
+  journaled command.
+- The value `secret set` reads from standard input is kept out of error
+  reports, and `containers run` journals only a keyed digest of the job's
+  input (HMAC with a random key kept with the journal), never a plain digest
+  a guess could be tested against.
+- Accept container frontends and routes. A manifest that pins no SDK keeps
+  CLI 3.20's default, 2.3.0, which every supported OpenCloud installs, so an
+  unpinned app never moves to another SDK on its next deploy; one that
+  declares containers gets 2.9.0, whose Functions can call them. `init`
+  still pins 2.3.0. Pinned SDK versions and static frontends are unchanged.
+- Refresh the shared compute schemas, preserving exact 413/431 request-size
+  diagnostics and their no-replay policy, and container metric provenance in
+  alert detail without changing Feed v1.
+- Preserve optional per-counter sampling times in terminal resource diagnostics,
+  so retained measurements remain distinguishable from newly measured values.
+- Validate maximum-size compute HTTP bodies without a Base64 regex stack
+  overflow, with canonical encoding checks: a Function's request to a service
+  decodes to at most 4 MiB, its response to at most 32 MiB.
+- Read the platform's newer container answers: a waiting job's `waitReason`
+  (`no_capacity`, `host_unavailable`, `capacity_limit`, `budget`,
+  `concurrency`, `paused`, `previous_attempt`, `app_busy` or `platform_error`,
+  null otherwise), a failed job's `error.details.exitCode` and `signal`, a
+  Function's error status as `details.upstreamStatus`, and the
+  `COMPUTE_HOST_UNAVAILABLE`, `COMPUTE_NOT_LIVE`, `COMPUTE_RELEASE_REPLACED`,
+  `COMPUTE_CAPABILITY_INVALID`, `COMPUTE_NOT_OFFERED`, `COMPUTE_METRIC_INVALID`,
+  `COMPUTE_METRIC_LIMIT`, `COMPUTE_OUTPUT_DIRECTORY_MISSING` and
+  `COMPUTE_FUNCTION_FAILED` codes with their structured details.
+  `containers execution`, `executions` and `run` print them as received. An
+  answer this CLI's contract cannot read fails with `API_CONTRACT_MISMATCH`,
+  naming the field, instead of a bare schema error.
+- Make the mutation journal's stops actionable. `MUTATION_IN_PROGRESS` names
+  the unresolved request in `pending` (command, idempotency key, state and
+  server coordinates), and its `hint` gives the exact command to resume it
+  with that key, one to check it, and how to send a separate request. A key
+  the journal generated, passed back, resumes that entry instead of starting
+  a second one under the same key. Unknown outcomes carry `pending` too and
+  say what to check, such as `app dev status` for a development apply.
+- A given `--idempotency-key` that already names a different request, such as
+  `containers run` repeated with other input, fails with
+  `IDEMPOTENCY_KEY_REUSED` (not retryable), like the platform's reused-key
+  conflicts, instead of a retryable `MUTATION_IN_PROGRESS`. A request sent
+  without a key still waits for the target's unresolved one with
+  `MUTATION_IN_PROGRESS`.
+- A container command or registry change that OpenCloud refuses with its own
+  code, not retryable (such as `COMPUTE_REVISION_CONFLICT` once the
+  generation moved on), settles its journal entry: the corrected command, for
+  example with the generation `containers get` now shows, is sent instead of
+  failing with `MUTATION_IN_PROGRESS`. A retryable or uncertain answer
+  (`COMPUTE_OUTCOME_UNKNOWN`) still holds the target until the same request
+  resumes it with its key. A deploy or development start that fails with
+  `ARTIFACT_MISMATCH` settles its entry too, so changed source goes out
+  without a new key.
+- A development apply OpenCloud refuses (a coded 4xx answer or a compute
+  error such as `COMPUTE_NO_CAPACITY`) is recorded as refused, so running the
+  command again sends a new apply instead of waiting out the old one's
+  15-minute deadline. A start that ends refused or unconfirmed keeps its
+  session in `.opencloud/dev.json`, so retries reuse that session and draft
+  and `app dev status`, `containers`, `logs` and `stop` reach it.
+- A session production has overtaken, or that stopped or expired, now fails
+  before any apply with `ACTIVE_DEPLOYMENT_CHANGED` (with both release IDs),
+  `DEV_SESSION_STALE`, `DEV_SESSION_STOPPED` or `DEV_SESSION_EXPIRED` and the
+  commands to run, instead of `MUTATION_REPLAY_MISMATCH`. OpenCloud's own
+  `details.suggestedFix` is printed as the error's `hint`, and its
+  development-session refusals keep their session and release IDs.
+- `app connect` says what the connected folder can do, in words that fit a
+  person or any agent, instead of naming Codex.
+- Test a private app's routes from a script. `app request` accepts every
+  route method, a body (`--body`, `--body-file`, `--content-type`), a
+  `--timeout`, and `--show-body` to print the first 64 KiB of the response
+  (cut at a whole character; the response is streamed, so its size and
+  digest cover all of it without holding it in memory). `bodyBytes` and
+  `bodySha256` cover the raw bytes; 3.20 measured the body decoded as text,
+  so a binary body reports different values. With
+  `--access-token-env NAME` it sends the app access token held in that
+  environment variable, which the owner revealed in the browser, so the
+  request acts as the owner. The token is read only from the variable, sent
+  only to the app's own HTTPS address (with `OPENCLOUD_EDGE_URL` set it fails
+  with `ACCESS_TOKEN_DESTINATION_REFUSED` before sending anything), refused
+  unless it is an `oc_app_` token, and never printed, stored or reported,
+  not even the part of it a 64 KiB cut leaves at the end; output names
+  `"credential": "app_access_token"`. Without it the request stays signed
+  out, and the body stays unprinted unless asked for.
+- An app command run in a folder that is not connected fails with
+  `WORKSPACE_NOT_CONNECTED` and says what is missing: a signed-in person is
+  told to run `app connect` with the command's app ID (or in the folder the
+  command named), or to run the command in a connected folder; only someone
+  without an account login is also told to run `login`. It used to say "Run
+  opencloud login, then opencloud app connect <app-id> in this directory."
+  to everyone.
+- The local `validate` summary lists the containers (name, kind and image) and
+  routes it read, next to the counts of migrations, Functions, queues and cron.
+- An invalid manifest fails with `INVALID_MANIFEST` and one short line per
+  problem, naming where it is and what is expected there (`opencloud.yaml has
+  2 problems: containers[0].resources.cpu: must be one of 1, 2, 4, 8; …`),
+  plus an `issues` list, instead of Zod's issue tree as JSON inside
+  `CLI_ERROR`. Other invalid command input is listed the same way.
+- `--replicas` and `--generation` take plain decimal digits. An empty value
+  (such as an unset variable in `--replicas "$N"`), whitespace, `0x2` or `1e1`
+  fails with `INVALID_OPTION` before any request, instead of being read as 0,
+  2 or 10: `containers scale --replicas ""` used to stop every replica. Other
+  numeric options accept what 3.20 accepted, such as `--timeout 1e2`.
+
 ## 3.21.0
 
 - Accept SDK 2.8.0 pins. Server SDK 2.8.0 lets an AI text, stream, or object

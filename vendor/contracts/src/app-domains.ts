@@ -59,6 +59,9 @@ export type AppDomainBinding = z.infer<typeof appDomainBindingSchema>;
 export const appDomainIngressHostSchema = domainCoordinatesSchema.extend({
   certificateMethod: z.enum(["http01", "dns01"]),
   certificateReady: z.boolean().optional(),
+  // False until public traffic is seen reaching the installation: the adapter
+  // then holds back the HTTP-01 certificate request.
+  trafficReady: z.boolean().optional(),
 });
 export const appDomainIngressSnapshotSchema = z
   .object({

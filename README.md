@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.21.0` in
+OpenCloud application skills pin an exact CLI release. To install `v3.22.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.21.0"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.21.0.tgz"
+OPENCLOUD_CLI_VERSION="v3.22.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.22.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -96,7 +96,12 @@ per-user credential file under the normal OpenCloud configuration directory.
 Never inspect, print, copy, upload, or commit either credential backend.
 
 The account credential can list, inspect, and create apps, but it cannot build
-or deploy them. `app connect` writes only a non-secret `.opencloud/app.json`
+or deploy them. From any folder, it also reads an app's deployments and
+operations (`deployment list`, `deployment get`, `operation get`, `operation
+list`) from the app ID alone. Container, log and metric reads and every change
+need the app's own connection, because OpenCloud grants an account login only
+the `app:read` scope; in a folder that isn't connected, those commands fail
+with `WORKSPACE_NOT_CONNECTED` and say so. `app connect` writes only a non-secret `.opencloud/app.json`
 binding and stores a separate renewable 24-hour app credential in the protected
 backend. This lets later terminal sessions reuse the account login and lets one
 user work safely across multiple app directories.
@@ -160,7 +165,19 @@ commit that session file. Commands use it automatically:
 
 `deploy` uses the canonical server draft, file-change, validation, and
 deployment contract. It refuses deployment when the local and server bundle
-digests differ. For normal agent work, prefer the isolated development and
+digests differ. Once the release is live, `deploy` (like `deployment
+rollback`) runs OpenCloud's production verification and prints it as
+`verification`: a worker starts only after the switch, so this is what says
+whether the release runs. A failed verification exits non-zero with
+`VERIFICATION_FAILED`, its code (such as `COMPUTE_CRASH_LOOP`) and reason,
+and a hint naming the logs, `app verify` and the rollback; the release stays
+live. `--no-verify` skips it. Verification has its own `--timeout`, counted
+from when it starts; one still running then fails with
+`OPERATION_WAIT_TIMEOUT`, and the same command run again (the hint gives it
+with its idempotency key) rejoins it and records the release in
+`.opencloud/base.json`. A deploy interrupted after it was sent (a lost reply,
+a killed process) is followed, not sent again, when the same command runs
+again. For normal agent work, prefer the isolated development and
 verified-promotion flow below.
 
 New projects use manifest schema 3 and omit a top-level release version;
@@ -188,7 +205,12 @@ recover an interrupted or timed-out wait without repeating the mutation:
 Every app-owner Agent mutation requires one explicit `--idempotency-key`.
 Reuse it only for retries of the same intended effect; use a new key for
 materially different input. The CLI rejects a missing key before creating a
-journal entry or starting a request. Every success emits one compact JSON
+journal entry or starting a request. A key is 8 through 200 letters, numbers,
+dots, colons, underscores, or dashes. Keys are kept in the journal and sent
+with each request, so the CLI refuses one that looks like a credential (an
+`sk-…` API key, an OpenCloud, Stripe or GitHub token, or a JSON Web Token, by
+its real prefix and length) and names the kind without repeating the key.
+Every success emits one compact JSON
 document; failures emit redacted structured JSON and exit non-zero. `secret set` reads only standard input. `app
 credential-create` requires `--token-file`, refuses overwrite, writes the
 one-time token with mode `0600`, and never includes it in command output.
@@ -209,6 +231,46 @@ journal guarantee applies to exact-app mutations. Account OAuth,
 passwordless legacy onboarding, app creation, and app connection are separately
 audited authority/bootstrap boundaries with the recovery limits described
 above.
+
+While a journaled request is unresolved, a different request for the same
+target fails with `MUTATION_IN_PROGRESS`. Its `pending` field names the
+unresolved request (command, idempotency key, state and server coordinates),
+and its `hint` gives the exact command that resumes it with that same key, a
+command that shows what it did, and how to send a separate request instead.
+An `--idempotency-key` that already names a different request, finished or
+not, fails with `IDEMPOTENCY_KEY_REUSED` instead. Waiting never clears it, so
+it is not retryable: send the new request with a new key.
+A key the journal generated, passed back with `--idempotency-key`, resumes
+that same entry; it never starts a second one under the same key. Unknown
+outcomes (`DEV_APPLY_OUTCOME_UNKNOWN`, `MUTATION_OUTCOME_UNKNOWN`) carry the
+same `pending` field and say what to check before deciding on a new key.
+`DEPLOY_OUTCOME_UNKNOWN` (OpenCloud deployed the draft but wouldn't say which
+release that made) holds back only the same source: a deploy of changed
+source is sent as usual, and the same source again needs a new key.
+
+Where OpenCloud advertises `contracts.pinnedDraftValidation` in `/version`,
+validation is pinned to the uploaded draft revision and waited for with short
+requests. An OpenCloud without it (2.35.x and older) gets 3.20's requests: no
+revision, up to nine minutes for a frontend build, and `FRONTEND_BUILD_BUSY`
+validated again on the same revision. A result for another revision there
+means the draft changed meanwhile and fails with `DRAFT_REVISION_CHANGED`.
+
+Validation is never an unknown outcome: validating the same draft revision
+again joins OpenCloud's run for it. When `deploy` or `app dev start` or `sync`
+stops waiting without a result (a lost reply, a proxy's error, or
+`DRAFT_VALIDATION_WAIT_TIMEOUT` after the waiting budget, at least 90
+seconds), its entry is settled and holds nothing back: the same command with the
+same input rejoins that validation, in a fresh window if the last one has
+passed, and a changed request starts afresh. Ctrl-C while waiting settles the
+entry the same way and exits 130 with `VALIDATION_INTERRUPTED`; a command
+killed outright leaves its validation to the same command, which sends it
+again. When a rejoined draft no longer matches (edited elsewhere), the kept
+validation is dropped and the source applied again; a draft deployed or
+discarded elsewhere fails with `DRAFT_NOT_OPEN` and the next run starts from
+a new draft. `APP_LOCK_BUSY` started nothing, so it is sent again while the
+window lasts. A container command or registry change
+that OpenCloud refused with its own code, not retryable, holds nothing, so a
+corrected request is sent; so is a deploy after `ARTIFACT_MISMATCH`.
 
 The provisional account may create multiple apps during its 24-hour window.
 If the email remains unverified when that window ends, OpenCloud pauses every
@@ -278,6 +340,44 @@ Mobile, and Reload controls. Keep the raw `previewUrl` for CLI and agent
 inspection; opening it directly in a normal browser may return
 `AUTH_REQUIRED`.
 
+`app dev start` saves the session identity in its recovery journal before
+applying the validated draft. Development preparation can take up to 15
+minutes. Start and sync send one apply request with that allowance; an
+interrupted reply is reconciled only by reading the exact session, draft
+revision, artifact and production base. Rerunning the same command resumes
+those reads within the original deadline and never repeats an apply whose
+outcome is unknown. If no matching active revision can be confirmed, the CLI
+reports `DEV_APPLY_OUTCOME_UNKNOWN`: check with `app dev status`, whose
+`activeRevision.draftRevision` shows whether the apply took effect, and run
+the command again with a new `--idempotency-key` only if it did not.
+
+When OpenCloud refuses the apply itself, with a coded 4xx answer or a compute
+error such as `COMPUTE_NO_CAPACITY`, nothing was applied: the journal records
+the refusal, and running the command again sends a new apply. A gateway error
+or a lost reply stays uncertain as above. A start that ends refused, or with
+an unknown outcome, keeps its development session in `.opencloud/dev.json`, so
+`app dev status`, `containers`, `logs` and `stop` reach it and the next start
+retries with that session and draft instead of creating new ones; `app dev
+verify` says when the session has no applied revision yet.
+
+A promotion deploys the session's draft, even one whose release then fails,
+and a draft can be discarded; either way it takes no more changes. `app dev
+start` and `sync` then fail with `DEV_DRAFT_CLOSED`: run `app dev stop`, which
+stops that session and clears the folder, then `app dev start`, which begins
+a new session from a new draft.
+
+A session that production has overtaken, or that stopped or expired, fails
+before any apply is sent with `ACTIVE_DEPLOYMENT_CHANGED` (naming the
+session's release and the live one), `DEV_SESSION_STALE`,
+`DEV_SESSION_STOPPED` or `DEV_SESSION_EXPIRED`, as OpenCloud itself answers;
+run `app dev stop`, then `app dev start`, as the error's `hint` says. Any
+error whose OpenCloud answer has `details.suggestedFix` prints it as `hint`,
+as an owner-only action refused to a CLI login does
+(`OWNER_ACTION_BROWSER_ONLY`). When OpenCloud refuses the input itself,
+the error's `details` keep what it should be: the `field`, the values it
+`allowed` and their `aliases` (an unknown log surface), or each refused field
+with its `code` and `message` in `fields` (`invalid_request`).
+
 Development data is isolated from production and uses dummy records. Auth,
 Files, Functions, and background jobs are available; Realtime and cron are not. Manifest-
 generated secrets receive isolated synthetic development values, while owner-
@@ -326,9 +426,12 @@ JSON results add `sourceOnlyFiles` (up to 100 paths, in the same order) and
 After a successful `deploy`, `app dev promote`, or `pull`, the CLI records the
 release a working copy is based on in `.opencloud/base.json`. The next
 `deploy` or `app dev start` sends it. If someone has released since, OpenCloud
-refuses with `ACTIVE_DEPLOYMENT_CHANGED` and names the latest release. Update
-the copy and reapply your change, or pass `--force` to replace that release
-deliberately:
+refuses with `ACTIVE_DEPLOYMENT_CHANGED` and names the latest release, and the
+error's `hint` gives the exact command for this copy. After a rollback (the
+copy's base was rolled back), `pull <dir> --deployment <live-release> --merged`
+records the live release as the base without changing files. After someone
+else's newer release, update the copy and reapply your change. Either way you
+can pass `--force` to replace that release deliberately:
 
 ```bash
 "$OPENCLOUD_CLI" pull "$APP_DIR"
@@ -518,10 +621,101 @@ days; active work remains visible until terminal. These commands never return
 job payloads, idempotency keys, or enqueuing user identifiers, and intentionally
 provide no cancel or redrive action.
 
+## Containers
+
+Container compute requires an installation with compute enabled and a configured
+payer. Declare jobs, services, and workers in `opencloud.yaml`; commands cannot
+override their image, resources, or permissions. A manifest that declares
+containers and pins no SDK gets SDK 2.9.0, whose Functions can call the
+containers; other unpinned manifests keep 2.3.0, which every supported
+OpenCloud installs. Explicit SDK pins remain unchanged; a manifest with
+containers and a pin older than 2.9.0 gets a `CONTAINERS_NEED_SDK_2_9` warning
+from `validate` and before uploading, which names the fix. Where the
+installation's public `/v1/installation` says it doesn't run containers,
+`deploy` and `app dev start` or `sync` fail with `COMPUTE_NOT_OFFERED` before
+uploading anything.
+
+```bash
+opencloud containers list "$APP_ID"
+opencloud containers get "$APP_ID" web
+opencloud containers run "$APP_ID" report --input '{"month":"2026-11"}' \
+  --idempotency-key report-2026-11
+opencloud containers executions "$APP_ID" --workload report
+opencloud containers execution "$APP_ID" "$EXECUTION_ID"
+opencloud containers cancel "$APP_ID" "$EXECUTION_ID" --idempotency-key cancel-report-2026-11
+opencloud containers pause "$APP_ID" web --generation 3
+opencloud containers resume "$APP_ID" web --generation 4
+opencloud containers restart "$APP_ID" web --generation 5
+opencloud containers scale "$APP_ID" consumer --generation 2 --replicas 3
+opencloud containers events "$APP_ID" web --limit 50
+```
+
+`run` returns durable acceptance, followed by execution status and independently
+reported completion delivery. After a lost reply, repeat the same input and key
+to recover that execution. An unknown process outcome is never permission to
+repeat its effects. A deploy or rollback OpenCloud compensated (a new
+container that never became ready, or exited) fails with `OPERATION_FAILED`,
+and its error names the release in `deploymentId` and its own failure in
+`deploymentError` (code, message and details such as `exitCode`), with a
+`hint` giving the `logs --page --surface container` command for that window;
+the release that was live keeps serving. Control commands require the generation from `get`; scaling
+applies only to workers and resets at the next deployment. `pause`, `resume`,
+`restart` and `scale` answer with `workloadName`, the new `generation` and
+`acceptedAt`. The change is already saved when the command answers, so there is
+no operation to follow: watch its effect in `get` and `events`, and give the
+returned `generation` to the next control command. Usage includes exact decimal
+costs, integer quantities, and pending evidence.
+
+Every workload command also exists under `app dev containers`, taking a local
+directory in place of the app ID. It uses that directory's saved session:
+
+```bash
+opencloud app dev containers run ./app report --input '{}' --idempotency-key dev-report-1
+opencloud app dev containers get ./app web
+opencloud app dev logs ./app --workload web
+opencloud logs "$APP_ID" --workload web --page
+opencloud agent-feed "$APP_ID" --contract-version 2
+```
+
+Log pages expose source freshness and explicit gaps. Continue a cursor with
+exactly the same filters, `--from`, `--to`, and limit. `logs` without
+`--page` or any compute filter retains its legacy response; `app dev logs`
+always returns a page and accepts `--page` for symmetry. Feed v1 stays the default.
+`--surface` selects where lines came from: `function` (the app's Functions),
+`container`, `http` (the edge), `ai` (the AI gateway) or `platform`;
+`functions` and `containers` work too, `page`, `rest` and `storage` select
+`http`, and `runtime` is the older name for `function` and the only one an
+OpenCloud release from before these names knows. Each is sent as typed, never
+mapped to another name, and OpenCloud decides; where containers don't run it
+refuses `container`. `realtime` and `cron` name lines of two surfaces, so
+they fail with `LOG_SURFACE_UNKNOWN` and both surfaces in `details.use`, as
+any other value does, before a request is sent.
+
+Registry connections belong to one app and one exact host. They authorize
+trusted image fetching; containers never receive the credential:
+
+```bash
+opencloud containers registry create "$APP_ID" --name Images --host registry.example \
+  --username reader --password-stdin --idempotency-key registry-images-1 < registry-password.txt
+opencloud containers registry list "$APP_ID"
+opencloud containers registry remove "$APP_ID" "$CONNECTION_ID"
+```
+
+The password is read only from standard input. The local mutation journal
+keeps a digest of the registry's name, host and username but nothing derived
+from the password, and error reports never include it.
+
+`compute settings`, `compute prices`, and `compute usage --from <iso> --to <iso>`
+use your stored account login and current payer authority. App tokens and Agent
+runtime credentials cannot run these commands. Use the browser for payer
+consent and budget changes. The CLI does not change a budget when resuming work.
+
 ## Agent Feed and alert rules
 
 Read the stable app health, signal, alert, and recent-event contract without
-depending on internal Prometheus, Loki, or Grafana APIs:
+depending on internal Prometheus, Loki, or Grafana APIs. `agent-feed` prints
+OpenCloud's answer as received, so values a newer platform adds appear as they
+are; `--contract-version 2` adds container sources:
 
 ```bash
 "$OPENCLOUD_CLI" agent-feed "$APP_ID"
@@ -538,7 +732,58 @@ depending on internal Prometheus, Loki, or Grafana APIs:
 Custom metrics and rules are bounded platform contracts. Alerts inform an
 agent; they do not authorize automatic rollback or destructive repair.
 
+`metrics` reads a metric's production series, one value per step (60 seconds
+by default). A metric the app records itself, from a container's
+`recordMetric` or the browser SDK, is read by the name the Agent Feed shows,
+`custom.<name>`; a name without `custom.` is always one of the platform's own
+series, even when the app declares a metric of that name. `--aggregation rate`
+gives a counter's increments per second, or a gauge's change per second from
+one step to the next:
+
+```bash
+"$OPENCLOUD_CLI" metrics "$APP_ID" --metric custom.backlog_depth --aggregation max
+```
+
+The answer keeps Prometheus's matrix shape: `data.result` holds one series per
+label set, each with `metric` (its labels) and `values`, a list of
+`[unix seconds, "value"]` points, at most one per step at the step's start. A
+step is `--step` seconds, or longer when a long window would need too many
+points.
+
+On an installation without containers, OpenCloud refuses `custom.` names.
+
 ## Verification
+
+`app request` sends one request to the live app's canonical address through
+the edge and prints its status, type, size and digest; it never retries. It is
+signed out unless it is given an app access token, and the response body is
+printed only with `--show-body`: its first 64 KiB, cut at a whole character.
+The response is read as it arrives, so its size and digest cover all of its
+raw bytes without holding it in memory. Any method a route accepts can
+be sent, with `--body` or `--body-file` and `--content-type` (application/json
+when the body is JSON, otherwise text/plain).
+
+To test a private app's routes, Functions or container services from a
+script, the app's owner approves an app access token in the browser
+(`opencloud app access-token request "$APP_ID" --name "Route tests"` prints the
+approval link) and keeps the revealed `oc_app_…` value wherever they keep
+secrets. Set an environment variable from there, never on a command line, and
+name it with `--access-token-env`; the request then acts as the owner, as
+OpenCloud does for any program the owner gives that token:
+
+```bash
+opencloud app request "$APP_ID" /render --method POST \
+  --content-type text/markdown --body '# Hello' \
+  --access-token-env ROUTE_TEST_TOKEN --show-body
+```
+
+The CLI reads the token only from that variable, sends it only to the app's
+own HTTPS address, and never prints, stores or reports it; output says
+`"credential": "app_access_token"`. With `OPENCLOUD_EDGE_URL` set, which sends
+requests to another host, a request with a token fails with
+`ACCESS_TOKEN_DESTINATION_REFUSED` before anything is sent. It accepts only `oc_app_` tokens, which
+work on deployed app hosts, not development previews, and never authorize
+control-plane commands. Revoke a token with `app access-token revoke`.
 
 Installation-managed runtimes can set `OPENCLOUD_PUBLIC_EDGE_HOST` to route
 `app request` through a local public-edge bridge when public-address loopback

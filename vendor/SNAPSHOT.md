@@ -1,5 +1,161 @@
 # Public platform snapshots
 
+## CLI 3.22.0 container compute
+
+Public Contracts and control-plane client files needed by this release are
+verbatim snapshots from accepted platform commit `f7249b1c`; the compute price
+catalog, settings projection and installed SDK test are from `0f8cb1b0`.
+The bundler and compute-protocol files are from `78d17bf5`. Browser and Function
+SDK source/tests were from `68650784` (SDK 2.8.0), and are now SDK 2.9.0 (see
+the 3.22.0 refreshes at the end of this section); immutable older SDK artifacts
+are untouched. The CLI does not take its default SDK from this snapshot:
+`@opencloud/js` resolves to the CLI-owned `src/sdk-version.ts`, which
+re-exports the vendored browser client but sets `OPEN_CLOUD_SDK_VERSION`, the
+version the vendored bundler gives an unpinned manifest, per manifest: 2.3.0
+(CLI 3.20's default, which every supported OpenCloud installs, and what
+`init` pins), or 2.9.0 when the manifest declares containers.
+Unrelated brand and installer snapshots retain their previous provenance.
+
+The final candidate refresh takes `contracts/src/containers.ts` and its tests
+from platform `37f2ad50`, including exact 413/431 ingress errors and JSON Schema
+serialization with unchanged normalized payloads. `compute-protocol/src/index.ts`
+and its tests are from `3ccc51f2`, including the required explicit null-or-pinned
+digest for guarded unresolved image retention release. These files are also
+verbatim; private platform administration and MCP implementation are not vendored.
+`contracts/src/control-plane.ts` and its tests are refreshed from `56448bad` so
+alert detail can retain container metric provenance while Feed v1 stays unchanged.
+The final resource-sampling refinement takes `compute-protocol/src/index.ts`,
+its tests and `contracts/src/compute-observation.ts` verbatim from `b17c3617`.
+Optional running/terminal metadata preserves each counter's measurement time;
+older samples remain valid without inferred per-counter timestamps.
+`contracts/src/containers.ts` and its tests are subsequently refreshed verbatim
+from `ef62035c`: service-body Base64 validation uses bounded linear work and
+checks the decoded 32 MiB limit without a repeated-group regex stack overflow.
+`compute-protocol/src/index.ts` and its tests are subsequently refreshed verbatim
+from `ff05f2af`. Retired allowances with lost counters have explicit null byte
+measurements and separate full daily-quota forfeiture; measured receipts remain
+readable. This internal transport refinement adds no public CLI authority.
+The same two files are refreshed verbatim from `b21f1d1e` to distinguish proven
+never-started allowances with explicit `unused` accounting. Lost counters still
+require forfeiture; neither receipt is a diagnostic byte measurement.
+`contracts/src/containers.ts` and its tests are then refreshed verbatim from
+platform `8c99de9df` (`feat/container-runtime-exploration`, after the
+container usability fixes): executions carry a required, nullable
+`waitReason`; the catalog adds `COMPUTE_HOST_UNAVAILABLE`, `COMPUTE_NOT_LIVE`,
+`COMPUTE_RELEASE_REPLACED` and `COMPUTE_CAPABILITY_INVALID`; and a Function's
+request body to a service is capped at 4 MiB while responses keep 32 MiB.
+Failed jobs' `details.exitCode` and `details.signal` were already optional
+fields of the error details.
+The same file is refreshed again verbatim from platform `da2040de5`: the
+catalog adds `COMPUTE_NOT_OFFERED`, `COMPUTE_METRIC_INVALID`,
+`COMPUTE_METRIC_LIMIT`, `COMPUTE_OUTPUT_DIRECTORY_MISSING` and
+`COMPUTE_FUNCTION_FAILED` (which replaces `COMPUTE_UPSTREAM_FAILED` on
+container capability calls), and error details gain an optional
+`upstreamStatus`. Its tests are unchanged. `server/src/index.ts` and its
+tests, the Function SDK 2.8.0 source, are refreshed verbatim from the same
+commit: its container types name `waitReason` and every catalog code (a test
+compares them with this catalog), and it refuses a service request body over
+4 MiB, as the contract does. The CLI bundle does not import the Function SDK.
+`contracts/src/{compute-control-plane.ts,containers.ts,control-plane.ts}` and
+`control-plane-client/src/browser.test.ts` are then refreshed verbatim from
+platform `2858c4d11` (`feat/container-runtime-exploration`): pause, resume,
+restart and scale answer with `computeControlReceiptSchema` (`workloadName`,
+the new `generation` and `acceptedAt`), which replaces
+`computeOperationReceiptSchema` and its `operationId`, because the change
+commits at once and has no operation to follow. The log page's `surface`
+filter documents the accepted names and aliases; its shape is unchanged.
+Upstream `compute-observation.test.ts` and `control-plane-client/src/compute.test.ts`
+also changed in that range and are still not copied: they import the private
+administrator contracts and client. The CLI's own tests and
+`test:contract` read the new receipt instead.
+`contracts/src/control-plane-browser.ts` and
+`compute-protocol/src/{index.ts,index.test.ts,host-quiescence.test.ts}` are
+then refreshed verbatim from platform `3fcfd7251` (the same files as at
+`2858c4d11`), which the 3.21 candidate had drifted from: the browser entry
+exports the `ComputeInstanceDiagnostics` type, and the protocol carries the
+platform's current internal transport. The symbols the vendored contracts
+import from it keep their shapes. The trimmed `package.json` stubs and the
+brand and installer snapshots keep their earlier provenance.
+`contracts/src/control-plane.ts` is refreshed verbatim from platform
+`9e3803b49`, the final platform head for this release: `/version` adds
+`contracts.pinnedDraftValidation`, which the CLI requires before it pins
+validation to a revision; the raw log query describes its optional `surface`
+and `developmentSessionId` filters (the CLI's plain `logs` still sends its
+body as before); and the log page's surface lists `page`, `rest` and
+`storage` as names for `http`. Every other vendored file is byte-identical to
+that commit, except the trimmed `package.json` stubs and the brand and
+installer snapshots noted above.
+
+Validation waiting takes `contracts/src/control-plane.test.ts` and
+`control-plane-client/src/{node.ts,browser.ts,browser-entry.test.ts,draft-validation.ts,draft-validation.test.ts}`
+verbatim from accepted platform `151106e207ee5c872bdbdecbbb13a2c05fcdc3c0`.
+`contracts/src/control-plane.ts` and
+`control-plane-client/src/development-readiness.test.ts` are verbatim from
+accepted platform `03bee78b8da592d638bf1565b1c11845c71a50cd`, adding the exact
+validation progress contract and documented development readiness allowance.
+The platform source prefix for these paths is `packages/`; the CLI prefix is
+`vendor/`. The CLI's durable mutation recovery remains in its own `src/`.
+`contracts/src/{control-plane.ts,api.ts}` and
+`control-plane-client/src/browser.test.ts` are then refreshed verbatim from
+platform `ea8759cf4` (`feat/container-runtime-exploration`): log page entries
+keep the optional `fields` a Function logged. The same files bring the
+platform's compute-off operation views (used by MCP only), Agent Feed v2
+schemas factored into named parts with unchanged shapes, and its current
+draft validation descriptions; no parsed shape the CLI reads changes.
+
+For 3.22.0, after the merge of 3.21.0, `contracts/src/{manifest.ts,manifest.test.ts}`
+add SDK 2.9.0 to the installed manifest versions, and
+`contracts/src/{api.ts,containers.ts,containers.test.ts,control-plane.ts}` and
+`server/src/index.ts` follow the platform's container compute fixes. The
+bundler, `compute-protocol/src/{index.ts,index.test.ts}`,
+`contracts/src/ai-capacity.ts`, the browser client (SDK 2.9.0) and the
+Function SDK (`server/src`, SDK 2.9.0) are then refreshed verbatim from platform
+`2214629ca` (`feat/container-runtime-exploration`), and `server/src/index.ts`
+and its tests again from `4f4d1e023`, whose `decodeBase64` takes linear time.
+Platform `b3c1aaa18` changes none of these files. The bundler
+(`bundler/src/{index.ts,index.test.ts}`) and
+`agent-protocol/src/model-choices.ts` are then refreshed verbatim from
+platform `46e12328d`: the bundler's E2E test check reads regular expressions
+the way JavaScript does, and `model-choices.ts` adds `requestedAiModelSchema`
+and `resolveRequestedAiModel`, which nothing vendored imports. The bundler,
+`compute-protocol/src/index.ts` and `server/src/{index.ts,index.test.ts}` are
+then refreshed verbatim from platform `b124a41c8`: the E2E test check refuses
+the shapes it misread, the route table may carry a host-outage reason, and
+`containers.request` refuses a body over 4 MiB with `COMPUTE_REQUEST_TOO_LARGE`.
+`compute-protocol/src/index.ts` and `contracts/src/containers.ts` are then
+refreshed verbatim from platform `434a56677`, which lets a held host recovery
+name its blocker in `details.reason`. `contracts/src/{containers.ts,containers.test.ts}`
+and `server/src/{index.ts,index.test.ts}` are then refreshed verbatim from
+platform `bbc9f77e1`: `containers.request` reads the service's answer as raw
+bytes rather than Base64 inside JSON. `contracts/src/{containers.ts,containers.test.ts}`
+are then refreshed verbatim from platform `83c445952`, which adds the plain
+refusal page a visitor's browser gets, and again from `ddac0e8df`, whose page
+says plainly whether to wait. `contracts/src/{api.ts,control-plane.ts}` are then
+refreshed verbatim from platform `a6bb20216`, whose cron run history lists
+skipped runs, and again from `e32a6189c`, whose skip reasons name a busy
+scheduler, and again from `cb62ad893`, whose Agent Feed lists skipped runs
+as events. Every file this release changed under `vendor/` is byte-identical to
+platform `cb62ad893`.
+The trimmed `package.json` stubs and the brand and installer snapshots keep
+their earlier provenance.
+
+The Contracts public type graph requires the exact `model-choices`, `reasoning`,
+`identifiers`, `task-preparation`, and `platform-ai` Agent protocol files:
+`model-choices` from `46e12328d` (see above), the other four from `f7249b1c`,
+unchanged at `46e12328d`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only
+their public credential-free dependencies; no Agent service implementation is
+included. The public package still contains only the standalone bundle and
+release documents.
+
+Portable compute, manifest, transport and SDK tests run locally. Upstream
+`compute-control-plane.test.ts` and `compute-observation.test.ts` are not copied
+because they import private administrator contracts. The copied feature flag
+test also requires private administrator contracts, and installation-section
+tests compare a platform docs build copy, so Vitest excludes those alongside
+the existing platform packaging tests. `src/compute.test.ts` and
+`scripts/compute-http-contract.mjs` cover public compute validation, routes,
+session isolation, immutable replay, errors, logs and Feed behavior here.
+
 Contracts, the bundler, and the typed control-plane client are copied verbatim
 from the OpenCloud platform source paths
 `packages/{contracts,bundler,control-plane-client}/src`. Structural dashboard,
@@ -13,12 +169,6 @@ The public CLI owns disk upload/download adapters and manifest serialization in
 `src/api-client.ts` and `src/bundle.ts`. Two upstream tests that inspect platform
 package metadata/OpenAPI files are excluded from the public Vitest configuration.
 All portable upstream contract and transport tests run here.
-
-Browser SDK 2.3 source and tests are copied from platform commit
-`d0c223a8f074bcb1c508ed6cc63654a11a5a499a` (`packages/browser-client/src`), including custom-origin session and
-Realtime reconnect behavior. Previous immutable SDK artifacts are not changed.
-Its `OPEN_CLOUD_SDK_VERSION` is the default for `init` and unpinned bundles, so
-this snapshot changes only when the CLI deliberately changes that default.
 
 ## CLI 3.11.0 organisation-built integrations
 

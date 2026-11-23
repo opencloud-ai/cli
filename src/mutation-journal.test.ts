@@ -19,6 +19,8 @@ import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
   MutationJournalError,
+  type SafeMutationCheckpoint,
+  type SafeValidationCheckpoint,
   anchorsDirectoryDescriptors,
   assertAppOwnerMutationJournalDirectory,
   linuxMountInfoContains,
@@ -726,6 +728,226 @@ describe("mutation journal", () => {
     );
   });
 
+  it("digests private request content with its own random key, kept beside its entries", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const first = await MutationJournal.open(binding);
+    const input = { input: { card: "4111 1111 1111 1111" } };
+    // Made once, even by two commands at the same moment.
+    const [one, two] = await Promise.all([first.keyedDigest(input), (await MutationJournal.open(binding)).keyedDigest(input)]);
+    expect(one).toBe(two);
+    expect(one).toMatch(/^[0-9a-f]{64}$/);
+    expect(await (await MutationJournal.open(binding)).keyedDigest(input)).toBe(one);
+    expect(await first.keyedDigest({ input: { card: "4111 1111 1111 1112" } })).not.toBe(one);
+    // Not the plain digest a guess could be tested against, and not another journal's.
+    const { createHash } = await import("node:crypto");
+    expect(one).not.toBe(createHash("sha256").update(JSON.stringify(input)).digest("hex"));
+    const other = await MutationJournal.open({ ...binding, directory: path.join(await temporaryDirectory(), "journal") });
+    expect(await other.keyedDigest(input)).not.toBe(one);
+    const keyFile = path.join(directory, "digest-key.json");
+    expect((await stat(keyFile)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(keyFile, "utf8")).key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("rejects corrupt digest-key.json with CORRUPT_MUTATION_JOURNAL and cleans orphan digest-key temps", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const first = await MutationJournal.open(binding);
+    await first.keyedDigest({ hello: "world" });
+
+    // Orphan temp file left behind by a crashed writer is cleaned on open and load.
+    const orphanOnOpen = path.join(directory, `.digest-key.json.99999.11111111-1111-4111-8111-111111111111.tmp`);
+    await writeFile(orphanOnOpen, "partial", { mode: 0o600 });
+    const reopened = await MutationJournal.open(binding);
+    expect(await readdir(directory)).not.toContain(path.basename(orphanOnOpen));
+
+    const orphanOnLoad = path.join(directory, `.digest-key.json.99998.22222222-2222-4222-8222-222222222222.tmp`);
+    await writeFile(orphanOnLoad, "partial", { mode: 0o600 });
+    await reopened.keyedDigest({ hello: "world" });
+    expect(await readdir(directory)).not.toContain(path.basename(orphanOnLoad));
+
+    const keyFile = path.join(directory, "digest-key.json");
+    for (const corrupt of [
+      "not-json",
+      "null",
+      "[]",
+      JSON.stringify({ schemaVersion: 2, key: "a".repeat(64) }),
+      JSON.stringify({ schemaVersion: 1, key: "a".repeat(64), extra: true }),
+      JSON.stringify({ schemaVersion: 1, key: "not-hex" }),
+    ]) {
+      await writeFile(keyFile, corrupt, { mode: 0o600 });
+      const fresh = await MutationJournal.open(binding);
+      await expect(fresh.keyedDigest({ hello: "world" }), corrupt).rejects.toMatchObject({
+        code: "CORRUPT_MUTATION_JOURNAL",
+      });
+    }
+  });
+
+  it("keeps a validation dispatch whose reply never came, and lets only the same request send it again", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud draft validate" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "validate" } };
+    const dispatched: SafeValidationCheckpoint = { state: "dispatched", draftId: OTHER_APP_ID, revision: 2,
+      requestSha256: "a".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const first = await MutationJournal.open(binding);
+    await expect(first.run(intent, async run => {
+      await run.checkpointValidation(dispatched);
+      throw new Error("process interrupted before response");
+    })).rejects.toThrow("process interrupted before response");
+    const reopened = await MutationJournal.open(binding);
+    await reopened.run(intent, async run => {
+      expect(run.checkpoint?.validation).toEqual(dispatched);
+      // Validating that pinned revision again joins OpenCloud's run for it.
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.checkpointStage({ stage: "draft_ready" });
+      expect(run.checkpoint?.validation).toEqual(dispatched);
+      await run.markAttempted();
+      for (const other of [{ revision: 3 }, { requestSha256: "b".repeat(64) }, { draftId: APP_ID }]) {
+        await expect(run.checkpointValidation({ ...dispatched, ...other })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+      }
+      // The same request, in a fresh window.
+      const again = { ...dispatched, deadline: new Date(Date.now() + 90_000).toISOString() };
+      await run.checkpointValidation(again);
+      await run.checkpointValidation({ ...again, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) });
+      await run.complete();
+    });
+  });
+
+  it("retains acknowledged validation progress and result through workflow checkpoint changes", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "deploy" } };
+    const coordinates = { draftId: OTHER_APP_ID, revision: 2, requestSha256: "b".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() + 60_000).toISOString() };
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      await run.checkpointValidation({ ...coordinates, state: "dispatched" });
+      await expect(run.checkpointValidation({ ...progress, revision: 3 })).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      await run.checkpointValidation(progress);
+      await run.checkpointStage({ stage: "draft_ready", draftId: OTHER_APP_ID, revision: 2 });
+    });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(run.checkpoint?.validation).toEqual(progress);
+      // Not before OpenCloud's own wait is over.
+      await expect(run.checkpointValidation({ ...coordinates, state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+    });
+    vi.useFakeTimers({ now: Date.parse(progress.retryNotBefore) + 1, toFake: ["Date"] });
+    try {
+      await (await MutationJournal.open(binding)).run(intent, async run => {
+        const fresh = { ...coordinates, deadline: new Date(Date.now() + 90_000).toISOString() };
+        await expect(run.checkpointValidation({ ...fresh, revision: 3, state: "dispatched" })).rejects.toMatchObject({ code: "MUTATION_REPLAY_MISMATCH" });
+        await run.checkpointValidation({ ...fresh, state: "dispatched" });
+        const result: SafeValidationCheckpoint = { ...fresh, state: "result", validationId: APP_ID, passed: true, artifactSha256: "c".repeat(64) };
+        // A response belongs to the dispatch it answers, deadline included.
+        await expect(run.checkpointValidation({ ...result, deadline: coordinates.deadline })).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+        await run.checkpointValidation(result);
+        await run.checkpointStage({ stage: "validated", draftId: OTHER_APP_ID, revision: 2 });
+        expect(run.checkpoint?.validation).toEqual(result);
+        await expect(run.checkpointValidation({ ...fresh, state: "dispatched", source: "must not be retained" } as SafeValidationCheckpoint))
+          .rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles a validation wait so it holds nothing back, while the same request rejoins it", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = (artifact: string) => ({ commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "deploy", artifact } });
+    const coordinates = { draftId: OTHER_APP_ID, revision: 2, requestSha256: "d".repeat(64), deadline: new Date(Date.now() + 60_000).toISOString() };
+    const progress: SafeValidationCheckpoint = { ...coordinates, state: "progress", retryNotBefore: new Date(Date.now() - 1_000).toISOString() };
+    let key = "";
+    await (await MutationJournal.open(binding)).run(intent("first"), async run => {
+      key = run.idempotencyKey;
+      await run.checkpointStage({ stage: "draft_ready", draftId: OTHER_APP_ID, revision: 2 });
+      await run.checkpointValidation({ ...coordinates, state: "dispatched" });
+      await run.checkpointValidation(progress);
+      const pending = await run.settleValidation("waiting");
+      expect(pending).toMatchObject({ command: "opencloud deploy", idempotencyKey: key, state: "completed", draftId: OTHER_APP_ID, revision: 2 });
+    });
+    // The very same request, without a key, rejoins it.
+    await (await MutationJournal.open(binding)).run(intent("first"), async run => {
+      expect(run.idempotencyKey).toBe(key);
+      expect(run.checkpoint).toMatchObject({ stage: "validation_waiting", draftId: OTHER_APP_ID, validation: progress });
+      await run.checkpointValidation({ ...coordinates, state: "dispatched", deadline: new Date(Date.now() + 90_000).toISOString() });
+      await run.settleValidation("waiting");
+    });
+    // A changed request is not held back: it starts afresh.
+    await (await MutationJournal.open(binding)).run(intent("changed"), async run => {
+      expect(run.idempotencyKey).not.toBe(key);
+      expect(run.checkpoint).toBeNull();
+      await run.checkpointStage({ stage: "draft_ready", draftId: APP_ID, revision: 1 });
+      await run.checkpointValidation({ ...coordinates, draftId: APP_ID, revision: 1, state: "dispatched" });
+      await run.checkpointValidation({ ...coordinates, draftId: APP_ID, revision: 1, state: "refused" });
+      await run.settleValidation("refused");
+    });
+    // OpenCloud answered that one: even the same request starts afresh.
+    await (await MutationJournal.open(binding)).run(intent("changed"), async run => {
+      expect(run.checkpoint).toBeNull();
+      await run.complete();
+    });
+  });
+
+  it("resumes a validation an earlier candidate marked unknown, instead of refusing it", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud draft validate" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "validate" } };
+    await expect((await MutationJournal.open(binding)).run(intent, async run => {
+      await run.markAttempted();
+      return run.markUnknown("DRAFT_VALIDATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DRAFT_VALIDATION_OUTCOME_UNKNOWN" });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.markAttempted();
+      await run.complete();
+    });
+    await expect((await MutationJournal.open(binding)).run(intent, async run => {
+      await run.markAttempted();
+      return run.markUnknown("MUTATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
+    await (await MutationJournal.open(binding)).run(intent, async run => {
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "MUTATION_OUTCOME_UNKNOWN" }));
+    });
+  });
+
+  it("lets a different keyless request replace a deploy whose outcome is unknown, and only that kind of unknown", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const deploy = (artifactSha256: string) => ({ commandId: "opencloud deploy" as const, safeScope: { appId: APP_ID },
+      safeRequest: { action: "deploy", artifactSha256 } });
+    await expect((await MutationJournal.open(binding)).run(deploy("a".repeat(64)), async run => {
+      await run.markAttempted();
+      return run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEPLOY_OUTCOME_UNKNOWN", retryable: false });
+    // The same request still meets its unknown outcome; nothing is sent again.
+    await (await MutationJournal.open(binding)).run(deploy("a".repeat(64)), async run => {
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DEPLOY_OUTCOME_UNKNOWN" }));
+    });
+    // Changed source, without a key, is a new request in its place.
+    await (await MutationJournal.open(binding)).run(deploy("b".repeat(64)), async run => {
+      expect(run.recovered).toBe(false);
+      expect(run.attempted).toBe(false);
+      expect(() => run.failIfUnknown()).not.toThrow();
+      await run.markAttempted();
+      await run.complete();
+    });
+    // Any other unknown outcome still holds a different request back.
+    await expect((await MutationJournal.open(binding)).run(deploy("c".repeat(64)), async run => {
+      await run.markAttempted();
+      return run.markUnknown("MUTATION_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
+    await expect((await MutationJournal.open(binding)).run(deploy("d".repeat(64)), async () => "sent"))
+      .rejects.toMatchObject({ code: "MUTATION_IN_PROGRESS" });
+    // So does this one for a request that names a key of its own.
+    const keyed = { ...deploy("e".repeat(64)), explicitIdempotencyKey: "deploy-unknown-k1" };
+    await expect((await MutationJournal.open(binding)).run(keyed, async run => {
+      await run.markAttempted();
+      return run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEPLOY_OUTCOME_UNKNOWN" });
+    await expect((await MutationJournal.open(binding)).run({ ...keyed, safeRequest: { action: "deploy", artifactSha256: "f".repeat(64) } }, async () => "sent"))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+  });
+
   it("atomically retains primary and secondary operation coordinates", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const journal = await MutationJournal.open({
@@ -766,6 +988,37 @@ describe("mutation journal", () => {
         );
       },
     );
+  });
+
+  it("retains exact development apply coordinates and uncertainty across reopening", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const binding = { directory, apiUrl: API_URL, appId: APP_ID };
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "start" } };
+    const checkpoint = { stage: "dev_apply_dispatched", artifactSha256: "a".repeat(64), serverArtifactSha256: "b".repeat(64),
+      draftId: OTHER_APP_ID, sessionId: "33333333-3333-4333-8333-333333333333", revision: 2,
+      baseDeploymentId: null, devApplyDeadline: "2026-11-14T12:15:00.000Z" };
+    const first = await MutationJournal.open(binding);
+    await expect(first.run(intent, async run => {
+      await run.checkpointStage(checkpoint);
+      await run.markAttempted();
+      return run.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
+    })).rejects.toMatchObject({ code: "DEV_APPLY_OUTCOME_UNKNOWN" });
+    const reopened = await MutationJournal.open(binding);
+    await reopened.run(intent, async run => {
+      expect(run.recovered).toBe(true);
+      expect(run.checkpoint).toEqual(checkpoint);
+      expect(run.unknownCode).toBe("DEV_APPLY_OUTCOME_UNKNOWN");
+      expect(() => run.failIfUnknown()).toThrowError(expect.objectContaining({ code: "DEV_APPLY_OUTCOME_UNKNOWN" }));
+      for (const invalid of [
+        { ...checkpoint, serverArtifactSha256: "secret" },
+        { ...checkpoint, baseDeploymentId: "arbitrary-text" },
+        { ...checkpoint, devApplyDeadline: "tomorrow" },
+        { ...checkpoint, devApplyDeadline: 123 },
+      ]) {
+        await expect(run.checkpointStage(invalid as SafeMutationCheckpoint)).rejects.toMatchObject({ code: "INVALID_MUTATION_CHECKPOINT" });
+      }
+      expect(run.checkpoint).toEqual(checkpoint);
+    });
   });
 
   it("lets a stopped promotion retire before a changed generated intent proceeds", async () => {
@@ -877,6 +1130,108 @@ describe("mutation journal", () => {
     ).rejects.toMatchObject({ code: "MUTATION_OUTCOME_UNKNOWN" });
   });
 
+  it("names the unresolved request that holds a target, with its key, state and coordinates", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { artifactSha256: "a".repeat(64) } };
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    let pendingKey = "";
+    await expect(journal.run(intent, async (run) => {
+      pendingKey = run.idempotencyKey;
+      await run.checkpointStage({ stage: "dev_session_created", draftId: OTHER_APP_ID, sessionId, revision: 3 });
+      await run.markAttempted();
+      throw new Error("interrupted");
+    })).rejects.toThrow("interrupted");
+    expect(pendingKey).toMatch(/^ocj1:/);
+    const edited = { ...intent, safeRequest: { artifactSha256: "b".repeat(64) } };
+    const conflict = await journal.run(edited, async () => undefined).catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(MutationJournalError);
+    expect(conflict).toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      retryable: true,
+      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} has not finished (state attempted), and this request differs from it. No request was started.`,
+      pending: {
+        command: "opencloud app dev start", idempotencyKey: pendingKey, generatedKey: true, state: "attempted",
+        appId: APP_ID, draftId: OTHER_APP_ID, revision: 3, sessionId,
+      },
+    });
+    // Its own key, given back, resumes that entry instead of starting another.
+    await journal.run({ ...intent, explicitIdempotencyKey: pendingKey }, async (run) => {
+      expect(run.recovered).toBe(true);
+      expect(run.idempotencyKey).toBe(pendingKey);
+      expect(run.checkpoint).toMatchObject({ stage: "dev_session_created", sessionId });
+      await run.complete();
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(1);
+    // A different request under that key is still refused, naming the entry.
+    await journal.run(intent, async (run) => {
+      await run.markAttempted();
+      pendingKey = run.idempotencyKey;
+      return run.markUnknown("DEV_APPLY_OUTCOME_UNKNOWN");
+    }).catch((error: unknown) => expect(error).toMatchObject({
+      code: "DEV_APPLY_OUTCOME_UNKNOWN", pending: { idempotencyKey: pendingKey, state: "unknown", unknownCode: "DEV_APPLY_OUTCOME_UNKNOWN" },
+    }));
+    // Given explicitly, that key names a request that differs from this one: a
+    // reused key, which waiting never clears.
+    await expect(journal.run({ ...edited, explicitIdempotencyKey: pendingKey }, async () => undefined)).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      retryable: false,
+      message: `Idempotency key ${pendingKey} belongs to an earlier \`opencloud app dev start\` request that may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN). No request was started.`,
+      pending: { state: "unknown" },
+    });
+    // Without a key, the same request waits for the unresolved one instead.
+    await expect(journal.run(edited, async () => undefined)).rejects.toMatchObject({
+      code: "MUTATION_IN_PROGRESS",
+      retryable: true,
+      message: `An earlier \`opencloud app dev start\` request with idempotency key ${pendingKey} may have taken effect (DEV_APPLY_OUTCOME_UNKNOWN), and this request differs from it. No request was started.`,
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(1);
+  });
+
+  it("refuses an explicit key whose unfinished request differs, as a reused key", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const explicitIdempotencyKey = "summary-request-1";
+    const intent = { commandId: "opencloud containers run" as const, safeScope: { appId: APP_ID, name: "summarise" },
+      safeRequest: { requestSha256: "a".repeat(64) }, explicitIdempotencyKey };
+    await expect(journal.run(intent, async (run) => {
+      await run.markAttempted();
+      throw new Error("reply lost");
+    })).rejects.toThrow("reply lost");
+    for (const changed of [
+      { ...intent, safeRequest: { requestSha256: "b".repeat(64) } },
+      { ...intent, commandId: "opencloud containers cancel" as const },
+    ]) {
+      await expect(journal.run(changed, async () => undefined)).rejects.toMatchObject({
+        code: "IDEMPOTENCY_KEY_REUSED",
+        retryable: false,
+        message: "Idempotency key summary-request-1 belongs to an earlier `opencloud containers run` request that has not finished (state attempted). No request was started.",
+        pending: { command: "opencloud containers run", idempotencyKey: explicitIdempotencyKey, generatedKey: false, state: "attempted" },
+      });
+    }
+    // The same request with that key still resumes it.
+    await journal.run(intent, async (run) => {
+      expect(run.recovered).toBe(true);
+      await run.complete();
+    });
+  });
+
+  it("keeps an explicit key that is not the pending entry's own on its own entry", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = { commandId: "opencloud app dev start" as const, safeScope: { appId: APP_ID }, safeRequest: { action: "start" } };
+    await expect(journal.run(intent, async (run) => {
+      await run.markAttempted();
+      throw new Error("interrupted");
+    })).rejects.toThrow("interrupted");
+    const unrelated = "ocj1:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    await journal.run({ ...intent, explicitIdempotencyKey: unrelated }, async (run) => {
+      expect(run.recovered).toBe(false);
+      expect(run.idempotencyKey).toBe(unrelated);
+    });
+    expect(await readdir(path.join(directory, "entries"))).toHaveLength(2);
+  });
+
   it("does not reuse an explicit key for a changed completed descriptor", async () => {
     const directory = path.join(await temporaryDirectory(), "journal");
     const journal = await MutationJournal.open({
@@ -911,7 +1266,12 @@ describe("mutation journal", () => {
         },
         async () => undefined,
       ),
-    ).rejects.toMatchObject({ code: "MUTATION_IN_PROGRESS" });
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      retryable: false,
+      message: "Idempotency key explicit-stable-key-1 was already used for a different `opencloud app configure` request, which finished. No request was started.",
+      pending: { idempotencyKey: explicitIdempotencyKey, generatedKey: false, state: "completed", operationId: "44444444-4444-4444-8444-444444444444" },
+    });
     const [entry] = await readdir(path.join(directory, "entries"));
     expect(
       JSON.parse(
@@ -921,6 +1281,63 @@ describe("mutation journal", () => {
       idempotencyKey: explicitIdempotencyKey,
       operationId: "44444444-4444-4444-8444-444444444444",
       state: "completed",
+    });
+  });
+
+  it("takes ordinary keys that only contain a credential prefix's letters, and says why it refuses one that looks like a credential", async () => {
+    const directory = path.join(await temporaryDirectory(), "journal");
+    const journal = await MutationJournal.open({ directory, apiUrl: API_URL, appId: APP_ID });
+    const intent = (explicitIdempotencyKey: string) => ({
+      commandId: "opencloud app configure" as const,
+      safeScope: { appId: APP_ID },
+      safeRequest: { action: "configure", key: explicitIdempotencyKey },
+      explicitIdempotencyKey,
+    });
+    // S5: "desk-deploy-001" and "task-abcdefghij" hold "sk-" and ten more
+    // characters, which is not an API key's shape.
+    for (const key of [
+      "s5-otherdesk-deploy-001",
+      "s5-task-abcdefghij",
+      "OC_FOO-deploy-0001",
+      "OC_APP_TOKEN_0123456789abcdef",
+      "OC_OAUTH_ACCESS_TOKEN_0123456789",
+      "release-sk-2026-11-20-final",
+    ]) {
+      await expect(journal.run(intent(key), async () => "sent"), key).resolves.toBe("sent");
+    }
+    // Built from parts, so no complete synthetic secret sits in the source.
+    const synthetic = "Synthetic0123456789".repeat(3);
+    const openCloudAccessKind =
+      "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_cli_…, oc_platform_cli_…, or oc_run_…)";
+    const openCloudSignInKind = "an OpenCloud refresh token or device code (oc_refresh_… or oc_device_…)";
+    for (const [key, kind] of [
+      [`s${"k-"}proj-${synthetic}`, "an API secret key (sk-…)"],
+      [`deploy:s${"k-"}${synthetic}`, "an API secret key (sk-…)"],
+      [`oc_${"owner_"}synthetic-key`, "an OpenCloud app-owner credential (oc_owner_…)"],
+      [`oc_${"app_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"agent_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"oauth_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"provisional_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"cli_"}${synthetic}`, openCloudAccessKind],
+      [`retry:oc_${"cli_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"platform_cli_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"run_"}${synthetic}`, openCloudAccessKind],
+      [`oc_${"refresh_"}${synthetic}`, openCloudSignInKind],
+      [`oc_${"device_"}${synthetic}`, openCloudSignInKind],
+      [`s${"k_"}live_${synthetic}`, "a Stripe secret key"],
+      [`gh${"p_"}${"A1".repeat(18)}`, "a GitHub token"],
+      [`ey${"J"}hbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.c2lnbmF0dXJl`, "a JSON Web Token"],
+    ] as const) {
+      const refused = journal.run(intent(key), async () => "sent");
+      await expect(refused, key).rejects.toMatchObject({
+        code: "INVALID_IDEMPOTENCY_KEY",
+        message: `This idempotency key looks like ${kind}; don't put credentials in idempotency keys. Choose a key that names the change, such as deploy-2026-11-20-1.`,
+      });
+      expect(String((await refused.catch((error: unknown) => error) as Error).message)).not.toContain(key);
+    }
+    await expect(journal.run(intent("short"), async () => "sent")).rejects.toMatchObject({
+      code: "INVALID_IDEMPOTENCY_KEY",
+      message: "Idempotency keys must be 8 through 200 letters, numbers, dots, colons, underscores, or dashes",
     });
   });
 
@@ -1165,5 +1582,129 @@ describe("mutation journal", () => {
         rejectParentSymlinks: true,
       }),
     ).rejects.toMatchObject({ code: "UNSAFE_MUTATION_JOURNAL_PATH" });
+  });
+
+  it("flags baseDeploymentChanged when an unfinished deploy or app dev start key conflicts only on expectedActiveDeploymentId", async () => {
+    const directory = path.join(await temporaryDirectory(), "base-changed");
+    const journal = await MutationJournal.open({
+      directory,
+      apiUrl: API_URL,
+      appId: APP_ID,
+    });
+    const base1 = "11111111-1111-4111-8111-1111111111a1";
+    const base2 = "11111111-1111-4111-8111-1111111111a2";
+    const artifactSha256 = "a".repeat(64);
+    const otherArtifactSha256 = "b".repeat(64);
+
+    // 1. Base moved from base1 -> base2 after an interrupted deploy with checkpoint updates.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base1 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async (run) => {
+          await run.checkpointStage({ stage: "draft_ready", artifactSha256, draftId: OTHER_APP_ID });
+          throw new Error("simulated crash");
+        },
+      ),
+    ).rejects.toThrow("simulated crash");
+
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      pending: expect.objectContaining({
+        command: "opencloud deploy",
+        idempotencyKey: "deploy-base-move-1",
+        baseDeploymentChanged: true,
+      }),
+    });
+
+    // If the artifact ALSO changed, it is not solely a base-release change.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256: otherArtifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toSatisfy((error: MutationJournalError) =>
+      error.code === "IDEMPOTENCY_KEY_REUSED" && error.pending?.baseDeploymentChanged !== true,
+    );
+
+    // 2. Base moved from absent (no .opencloud/base.json) -> base2 on app dev start.
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud app dev start",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "dev-start", artifactSha256 },
+          explicitIdempotencyKey: "dev-start-base-move-1",
+        },
+        async (run) => {
+          await run.markAttempted();
+          throw new Error("simulated crash");
+        },
+      ),
+    ).rejects.toThrow("simulated crash");
+
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud app dev start",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "dev-start", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "dev-start-base-move-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      pending: expect.objectContaining({
+        command: "opencloud app dev start",
+        idempotencyKey: "dev-start-base-move-1",
+        baseDeploymentChanged: true,
+      }),
+    });
+
+    // 3. A completed deploy does NOT set baseDeploymentChanged when re-run after advancing base.json.
+    await journal.run(
+      {
+        commandId: "opencloud deploy",
+        safeScope: { appId: APP_ID },
+        safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base1 },
+        explicitIdempotencyKey: "deploy-base-done-1",
+      },
+      async (run) => run.complete(),
+    );
+    await expect(
+      journal.run(
+        {
+          commandId: "opencloud deploy",
+          safeScope: { appId: APP_ID },
+          safeRequest: { action: "deploy", artifactSha256, expectedActiveDeploymentId: base2 },
+          explicitIdempotencyKey: "deploy-base-done-1",
+        },
+        async () => undefined,
+      ),
+    ).rejects.toSatisfy((error: MutationJournalError) =>
+      error.code === "IDEMPOTENCY_KEY_REUSED" &&
+      error.pending?.state === "completed" &&
+      error.pending?.baseDeploymentChanged !== true,
+    );
   });
 });

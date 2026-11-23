@@ -36,6 +36,39 @@ describe("browser OpenCloudClient", () => {
     expect(new Headers(init?.headers).get("idempotency-key")).toBe("membership-change-1");
   });
 
+  it("reads a bounded text preview of raw bytes and stops reading there", async () => {
+    let cancelled = false;
+    const chunks = ["Packing list\n", "- Sunscreen\n", "- Towels\n"].map((part) => new TextEncoder().encode(part));
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = vi.fn(async () => new Response(body, { headers: { "content-type": "text/plain" } }));
+    const client = browser(fetcher as typeof fetch);
+
+    await expect(client.readText("/v1/apps/a/files/f/content", { maxBytes: 20 }))
+      .resolves.toEqual({ text: "Packing list\n- Sunsc", truncated: true });
+    expect(cancelled).toBe(true);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(url).toBe("https://dashboard.opencloud.test/v1/apps/a/files/f/content");
+    expect(init).toMatchObject({ method: "GET", credentials: "same-origin" });
+    expect(new Headers(init?.headers).get("accept")).toBe("*/*");
+
+    const whole = browser(vi.fn(async () => new Response("short")) as typeof fetch);
+    await expect(whole.readText("/v1/file", { maxBytes: 20 })).resolves.toEqual({ text: "short", truncated: false });
+
+    const missing = browser(vi.fn(async () => Response.json(
+      { code: "FILE_NOT_FOUND", message: "File not found" }, { status: 404 },
+    )) as typeof fetch);
+    await expect(missing.readText("/v1/file", { maxBytes: 20 })).rejects.toBeInstanceOf(ApiError);
+  });
+
   it("binds the native fetch default to the browser global", async () => {
     vi.stubGlobal("location", { origin: "https://dashboard.opencloud.test" });
     let receiver: unknown;
@@ -119,6 +152,31 @@ describe("browser OpenCloudClient", () => {
     await expect(client.call("listApps", {})).rejects.toMatchObject({
       name: "ZodError",
     });
+  });
+
+  it("keeps the fields a Function logged on a development log page", async () => {
+    const entry = {
+      id: "a".repeat(64),
+      timestamp: "2026-11-19T12:00:00.000Z",
+      level: "info",
+      surface: "function",
+      message: "render job accepted",
+      requestId: "request-1",
+      fields: { executionId: "00000000-0000-4000-8000-000000000003", attempt: 1 },
+    };
+    const client = browser(
+      vi.fn(async () =>
+        Response.json({ entries: [entry], nextCursor: null }),
+      ) as typeof fetch,
+    );
+
+    const page = await client.call("queryDevLogsPage", {
+      appId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      body: { from: "2026-11-19T11:00:00.000Z", to: "2026-11-19T12:00:01.000Z" },
+    });
+
+    expect(page.entries[0]?.fields).toEqual(entry.fields);
   });
 
   it("retains typed request and operation evidence from JSON errors", async () => {

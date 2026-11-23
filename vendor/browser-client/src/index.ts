@@ -6,7 +6,7 @@
  * HTTP responses deliberately stay behind this module.
  */
 
-export const OPEN_CLOUD_SDK_VERSION = "2.3.0";
+export const OPEN_CLOUD_SDK_VERSION = "2.9.0";
 
 export type OpenCloudEnvironment = "dev" | "production";
 export type OpenCloudVisibility = "public" | "private";
@@ -132,6 +132,33 @@ export interface OpenCloudFileDownload {
   size: number;
 }
 
+/** Resumable input upload, bounded by one declared container job. */
+export interface OpenCloudFileUploadInput {
+  workloadName: string;
+  name: string;
+  contentType: string;
+  sizeBytes: string;
+  sha256: string;
+  idempotencyKey: string;
+}
+export interface OpenCloudFileUploadSession {
+  uploadSessionId: string;
+  fileId: string;
+  path: string;
+  sizeBytes: string;
+  sha256: string;
+  offsetBytes: string;
+  chunkBytes: number;
+  state: "uploading" | "complete" | "published" | "aborted";
+  expiresAt: string;
+}
+export interface OpenCloudFileStreamDownload {
+  data: ReadableStream<Uint8Array>;
+  name: string;
+  contentType: string;
+  size: number;
+}
+
 export interface OpenCloudFileAttachmentColumns {
   id?: string;
   name?: string;
@@ -234,8 +261,14 @@ export interface OpenCloudDataClient {
 
 export interface OpenCloudFilesClient {
   upload(input: OpenCloudFileInput): Promise<OpenCloudFile>;
+  beginUpload(input: OpenCloudFileUploadInput): Promise<OpenCloudFileUploadSession>;
+  uploadStatus(uploadSessionId: string): Promise<OpenCloudFileUploadSession>;
+  uploadChunk(uploadSessionId: string, input: { offsetBytes: string; data: Blob; sha256: string }): Promise<OpenCloudFileUploadSession>;
+  completeUpload(uploadSessionId: string): Promise<OpenCloudFileUploadSession>;
+  abortUpload(uploadSessionId: string): Promise<void>;
   info(value: OpenCloudFileRef | string): Promise<OpenCloudFile>;
   download(value: OpenCloudFileRef | string): Promise<OpenCloudFileDownload>;
+  downloadStream(value: OpenCloudFileRef | string): Promise<OpenCloudFileStreamDownload>;
   save(value: OpenCloudFileRef | string): Promise<void>;
   replace(
     value: OpenCloudFileRef | string,
@@ -790,23 +823,34 @@ async function responseError(
       parsed = source;
     }
   }
-  const requestId =
-    response.headers.get("x-request-id") ??
-    response.headers.get("x-opencloud-request-id");
   const parsedObject =
     parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : undefined;
+  const nestedError =
+    parsedObject?.error && typeof parsedObject.error === "object" &&
+    !Array.isArray(parsedObject.error)
+      ? parsedObject.error as Record<string, unknown>
+      : undefined;
+  // Functions serialize typed failures under `error`; other platform APIs
+  // return the same fields at the top level.
+  const errorFields = typeof parsedObject?.code === "string"
+    ? parsedObject
+    : nestedError ?? parsedObject;
+  const requestId =
+    response.headers.get("x-request-id") ??
+    response.headers.get("x-opencloud-request-id") ??
+    (typeof errorFields?.requestId === "string" ? bounded(errorFields.requestId, 128) : null);
   const platformCode =
-    typeof parsedObject?.code === "string" &&
-    /^[A-Z][A-Z0-9_]{1,79}$/.test(parsedObject.code)
-      ? parsedObject.code
+    typeof errorFields?.code === "string" &&
+    /^[A-Z][A-Z0-9_]{1,79}$/.test(errorFields.code)
+      ? errorFields.code
       : undefined;
   const rawDetails =
-    parsedObject?.details &&
-    typeof parsedObject.details === "object" &&
-    !Array.isArray(parsedObject.details)
-      ? (parsedObject.details as Record<string, unknown>)
+    errorFields?.details &&
+    typeof errorFields.details === "object" &&
+    !Array.isArray(errorFields.details)
+      ? (errorFields.details as Record<string, unknown>)
       : undefined;
   return new OpenCloudError(
     responseMessage(parsed, `OpenCloud ${surface} returned HTTP ${response.status}`),
@@ -816,8 +860,12 @@ async function responseError(
       status: response.status,
       requestId,
       retryable:
-        retryableStatus(response.status) || rawDetails?.retryable === true,
-      ...(parsed && typeof parsed === "object" ? { details: parsed } : {}),
+        typeof errorFields?.retryable === "boolean"
+          ? errorFields.retryable
+          : retryableStatus(response.status) || rawDetails?.retryable === true,
+      ...(errorFields === nestedError
+        ? (errorFields?.details === undefined ? {} : { details: errorFields.details })
+        : parsed && typeof parsed === "object" ? { details: parsed } : {}),
     },
   );
 }
@@ -1404,6 +1452,54 @@ class FilesClient {
     private readonly data: DataClient,
   ) {}
 
+  private async uploadSessionRequest(suffix: string, init: RequestInit = {}): Promise<OpenCloudFileUploadSession> {
+    await this.assertAvailable();
+    await this.runtime.requireUser();
+    const response = await this.runtime.hostRequest(`/_opencloud/files/uploads${suffix}`, init, "files");
+    await requireOk(response, "files");
+    const value = await response.json() as OpenCloudFileUploadSession;
+    if (!value || !UUID.test(value.uploadSessionId) || !UUID.test(value.fileId)
+      || !/^(0|[1-9][0-9]*)$/.test(value.offsetBytes) || !/^(0|[1-9][0-9]*)$/.test(value.sizeBytes)
+      || BigInt(value.offsetBytes) > BigInt(value.sizeBytes) || BigInt(value.sizeBytes) > 10n * 1024n ** 3n
+      || value.chunkBytes !== 8 * 1024 ** 2 || !/^[a-f0-9]{64}$/.test(value.sha256)
+      || !["uploading", "complete", "published", "aborted"].includes(value.state)) {
+      throw invalidResponse("OpenCloud Files returned an invalid upload session", "files");
+    }
+    return value;
+  }
+
+  beginUpload(input: OpenCloudFileUploadInput): Promise<OpenCloudFileUploadSession> {
+    if (!input || !UUID.test(input.idempotencyKey) || !/^[a-z][a-z0-9-]{0,62}$/.test(input.workloadName)
+      || !/^(0|[1-9][0-9]*)$/.test(input.sizeBytes) || BigInt(input.sizeBytes) > 10n * 1024n ** 3n
+      || !/^[a-f0-9]{64}$/.test(input.sha256)) throw invalidArgument("Upload declaration is invalid", "files");
+    return this.uploadSessionRequest("", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+  }
+
+  uploadStatus(uploadSessionId: string): Promise<OpenCloudFileUploadSession> {
+    return this.uploadSessionRequest(`/${fileReference(uploadSessionId).id}`);
+  }
+
+  uploadChunk(uploadSessionId: string, input: { offsetBytes: string; data: Blob; sha256: string }): Promise<OpenCloudFileUploadSession> {
+    if (!input || !(input.data instanceof Blob) || input.data.size < 1 || input.data.size > 8 * 1024 ** 2
+      || !/^(0|[1-9][0-9]*)$/.test(input.offsetBytes) || BigInt(input.offsetBytes) > 10n * 1024n ** 3n
+      || !/^[a-f0-9]{64}$/.test(input.sha256)) throw invalidArgument("Upload chunk is invalid", "files");
+    return this.uploadSessionRequest(`/${fileReference(uploadSessionId).id}/chunks`, {
+      method: "PUT", headers: { "content-type": "application/octet-stream", "x-opencloud-upload-offset": input.offsetBytes,
+        "x-opencloud-chunk-sha256": input.sha256 }, body: input.data,
+    });
+  }
+
+  completeUpload(uploadSessionId: string): Promise<OpenCloudFileUploadSession> {
+    return this.uploadSessionRequest(`/${fileReference(uploadSessionId).id}/complete`, { method: "POST" });
+  }
+
+  async abortUpload(uploadSessionId: string): Promise<void> {
+    await this.assertAvailable();
+    await this.runtime.requireUser();
+    const response = await this.runtime.hostRequest(`/_opencloud/files/uploads/${fileReference(uploadSessionId).id}`, { method: "DELETE" }, "files");
+    await requireOk(response, "files");
+  }
+
   async upload(input: OpenCloudFileInput): Promise<OpenCloudFile> {
     const checkedInput = fileInput(input);
     const source = checkedInput.data;
@@ -1463,6 +1559,19 @@ class FilesClient {
       contentType: response.headers.get("content-type") || blob.type || "application/octet-stream",
       size: blob.size,
     };
+  }
+
+  async downloadStream(value: OpenCloudFileRef | string): Promise<OpenCloudFileStreamDownload> {
+    const file = fileReference(value);
+    await this.assertAvailable();
+    const response = await this.runtime.hostRequest(`/_opencloud/files/${file.id}`, { headers: { accept: "*/*" } }, "files");
+    await requireOk(response, "files");
+    const size = Number(response.headers.get("content-length"));
+    if (!response.body || !Number.isSafeInteger(size) || size < 0) throw invalidResponse("File stream is unavailable", "files");
+    let name = "file";
+    try { name = decodeURIComponent(response.headers.get("x-opencloud-file-name") ?? "file"); }
+    catch { throw invalidResponse("File name is invalid", "files"); }
+    return { data: response.body, name, size, contentType: response.headers.get("content-type") ?? "application/octet-stream" };
   }
 
   async save(value: OpenCloudFileRef | string): Promise<void> {

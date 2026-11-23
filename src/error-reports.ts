@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { CommanderError, type Command } from "commander";
 import { ApiError } from "./api-client.js";
+import { computeErrorCatalog, computeErrorCodeSchema, computeErrorSchema } from "@opencloud/contracts/containers";
 import {
   COMMAND_VARIABLE,
   PRODUCT_NAME_VARIABLE,
@@ -193,24 +194,35 @@ export function errorReportStatus(settings: ErrorReportSettings): {
  * ran. Every other code is reported.
  */
 const CALLER_OUTCOME_CODES = new Set([
+  "ACCESS_TOKEN_DESTINATION_REFUSED",
+  "ACCESS_TOKEN_INVALID",
+  "ACCESS_TOKEN_MISSING",
   "ACTIVE_DEPLOYMENT_CHANGED",
   "APP_MISMATCH",
   "APP_OWNER_IDEMPOTENCY_KEY_REQUIRED",
   "APP_REQUIRED",
   "BACKUP_NOT_FOUND",
   "DEPLOYMENT_REQUIRED",
+  "DEV_REVISION_NOT_APPLIED",
+  "DEV_SESSION_EXPIRED",
   "DEV_SESSION_NOT_FOUND",
+  "DEV_SESSION_STALE",
+  "DEV_SESSION_STOPPED",
   "DEV_VERIFICATION_FAILED",
+  "DRAFT_REVISION_CHANGED",
   "DRAFT_VALIDATION_FAILED",
+  "IDEMPOTENCY_KEY_REUSED",
   "INVALID_DRAFT_CHANGES",
   "INVALID_IDEMPOTENCY_KEY",
   "INVALID_INTEGRATION_EVENT",
   "INVALID_INTEGRATION_NAME",
   "INVALID_JSON",
   "INVALID_JSON_SHAPE",
+  "INVALID_MANIFEST",
   "INVALID_OPTION",
   "INVALID_OPTIONS",
   "LOCAL_CHANGES",
+  "LOG_SURFACE_UNKNOWN",
   "MUTATION_APP_BINDING_MISMATCH",
   "MUTATION_AUTHORITY_SOURCE_CONFLICT",
   "MUTATION_IN_PROGRESS",
@@ -221,6 +233,8 @@ const CALLER_OUTCOME_CODES = new Set([
   "SECRET_TOO_LARGE",
   "SOURCE_TOO_LARGE",
   "TOKEN_FILE_EXISTS",
+  "VALIDATION_INTERRUPTED",
+  "WORKSPACE_NOT_CONNECTED",
 ]);
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -235,6 +249,22 @@ function isCommanderError(error: unknown): boolean {
   return typeof code === "string" && code.startsWith("commander.");
 }
 
+/** Release failures that are the app's own to fix: its migrations, or its containers. */
+const CALLER_RELEASE_CODES = new Set(["RUNTIME_MIGRATION_HISTORY_INVALID", "RUNTIME_MIGRATION_POLICY_INVALID"]);
+
+/**
+ * A compensated deploy or rollback whose release failed for the app's own
+ * reason (a container that exited or never became ready, by the compute
+ * catalog's origin, or a migration OpenCloud refused) is the caller's
+ * outcome, not a fault to report.
+ */
+function callerCausedRelease(cause: Record<string, unknown> | undefined): boolean {
+  if (!cause || typeof cause.code !== "string") return false;
+  if (CALLER_RELEASE_CODES.has(cause.code)) return true;
+  const code = computeErrorCodeSchema.safeParse(cause.code);
+  return code.success && ["app", "policy"].includes(computeErrorCatalog[code.data].origin);
+}
+
 /**
  * A failure is reported when the CLI itself failed, OpenCloud answered 5xx
  * or not at all, or a durable operation failed or has an unknown outcome.
@@ -244,10 +274,16 @@ function isCommanderError(error: unknown): boolean {
 export function isReportableFailure(error: unknown): boolean {
   if (isCommanderError(error) || isCallerFailure(error)) return false;
   if (error instanceof ApiError) {
+    const compute = computeErrorSchema.safeParse({
+      statusCode: error.status, code: error.code, message: error.message, details: error.details,
+    });
+    if (compute.success) {
+      return ["platform", "unknown"].includes(compute.data.details.origin);
+    }
     return error.status >= 500 || record(error.operation)?.state === "failed";
   }
   if (error instanceof OperationTerminalError) {
-    return error.operation.state === "failed";
+    return error.operation.state === "failed" && !callerCausedRelease(error.deployment?.error);
   }
   return !CALLER_OUTCOME_CODES.has(String(structuredCliError(error).error.code));
 }

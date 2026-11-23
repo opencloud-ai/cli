@@ -1,12 +1,53 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentFeedV1Output,
   controlPlaneAppDeploymentTruthSchema,
   controlPlaneAppSchema,
   controlPlaneOperations,
+  draftValidationInProgressSchema,
   type ControlPlaneOperationId,
 } from "./control-plane.js";
 
 describe("controlPlaneOperations", () => {
+  it("pins optional draft revisions and distinguishes explicit validation progress from generic rate limits", () => {
+    const appId = "11111111-1111-4111-8111-111111111111", draftId = "22222222-2222-4222-8222-222222222222";
+    const input = { appId, draftId, body: { expectedRevision: 2 } };
+    expect(controlPlaneOperations.validateDraft.input.parse(input)).toEqual(input);
+    expect(controlPlaneOperations.validateDraft.input.parse({ appId, draftId, body: {} }).body).toEqual({});
+    expect(controlPlaneOperations.validateDraft.input.safeParse({ ...input, body: { expectedRevision: 0 } }).success).toBe(false);
+    const busy = { code: "DRAFT_VALIDATION_IN_PROGRESS", retryable: true, details: { appId, draftId, revision: 2, retryAfterSeconds: 2 } };
+    expect(draftValidationInProgressSchema.parse(busy)).toEqual(busy);
+    for (const invalid of [ { code: busy.code }, { ...busy, retryable: false }, { ...busy, details: { ...busy.details, revision: 0 } },
+      { ...busy, details: { ...busy.details, retryAfterSeconds: 11 } }, { ...busy, details: { ...busy.details, secret: "unexpected" } } ]) {
+      expect(draftValidationInProgressSchema.safeParse(invalid).success).toBe(false);
+    }
+  });
+  it("reads container alert detail provenance without widening Agent Feed v1", () => {
+    const appId = "22222222-2222-4222-8222-222222222222";
+    const at = "2026-11-14T00:00:00Z";
+    const detail = {
+      rule: { id: "backlog", appId, name: "Backlog", metric: "backlog_depth", aggregation: "latest", operator: "gt", threshold: 10,
+        window: "5m", minimumSamples: 1, severity: "warning", enabled: true, origin: "manifest", createdAt: at, updatedAt: at },
+      metric: { name: "backlog_depth", type: "gauge", unit: "items", description: null },
+      evaluation: { state: "firing", value: 12, samples: 1, source: "container", observedAt: at, firstFiredAt: at, resolvedAt: null,
+        lastEvaluatedAt: at, lastTransitionAt: at },
+      points: [{ value: 12, recordedAt: at, source: "container" }], delivery: null,
+    };
+    expect(controlPlaneOperations.getAlertRule.output.parse(detail)).toEqual(detail);
+    for (const source of ["browser", "authenticated", "function"]) {
+      expect(controlPlaneOperations.getAlertRule.output.safeParse({ ...detail, evaluation: { ...detail.evaluation, source },
+        points: [{ ...detail.points[0], source }] }).success).toBe(true);
+    }
+    expect(controlPlaneOperations.getAlertRule.output.safeParse({ ...detail, points: [{ ...detail.points[0], source: "worker" }] }).success).toBe(false);
+    const alert = { id: "backlog", kind: "custom_metric", state: "firing", severity: "warning", title: "Backlog", observedAt: at,
+      lastTransitionAt: at, metric: { name: "backlog_depth", type: "gauge", value: 12, unit: "items", aggregation: "latest", window: "5m", samples: 1, source: "container" } };
+    const feed = { contractVersion: "1", app: { id: appId, name: "Example", slug: "example", state: "active", activeDeployment: null },
+      observedAt: at, telemetry: { status: "available", latestIngestedAt: at, ingestionLagSeconds: 0, stale: false }, signals: [],
+      alerts: [alert], recentBreaches: [], breachesTruncated: false, events: [], eventsTruncated: false, nextSince: at };
+    expect(agentFeedV1Output.safeParse(feed).success).toBe(false);
+    expect(agentFeedV1Output.safeParse({ ...feed, alerts: [{ ...alert, metric: { ...alert.metric, source: "function" } }] }).success).toBe(true);
+  });
+
   it("exposes exact organisation capacity to typed user callers without subject identities", () => {
     const operation = controlPlaneOperations.getOrganisationCapacity;
     expect(operation).toMatchObject({ method: "GET", path: "/v1/organisations/{organisationId}/capacity", auth: "user", scopes: [], idempotency: "none" });
@@ -152,7 +193,7 @@ describe("controlPlaneOperations", () => {
     for (const operationId of operationIds) {
       expect(controlPlaneOperations[operationId]).toMatchObject({
         idempotency: "required",
-        mcp: { idempotentHint: false },
+        ...(["mutateDevData", "invokeDevFunction"].includes(operationId) ? {} : { mcp: { idempotentHint: false } }),
       });
     }
     expect(
@@ -603,8 +644,6 @@ describe("controlPlaneOperations", () => {
       },
       deploy_draft: { destructiveHint: true },
       apply_dev_revision: { destructiveHint: true },
-      mutate_dev_data: { destructiveHint: true, idempotentHint: false },
-      invoke_dev_function: { destructiveHint: true, idempotentHint: false },
       inject_dev_email: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -619,7 +658,6 @@ describe("controlPlaneOperations", () => {
       create_backup: { idempotentHint: false },
       configure_backup_schedule: { destructiveHint: true },
       restore_backup: { idempotentHint: false },
-      invoke_cron: { destructiveHint: true },
       put_alert_rule: { destructiveHint: true },
       request_dev_app: {
         readOnlyHint: true,
@@ -638,11 +676,9 @@ describe("controlPlaneOperations", () => {
     for (const [name, annotations] of Object.entries(expected)) {
       expect(tools.get(name), `${name} annotations`).toMatchObject(annotations);
     }
-    for (const name of ["request_dev_app", "mutate_dev_data"]) {
-      expect(tools.get(name)?.description, `${name} API reference`).toContain(
-        "https://docs.opencloud.ai/openapi.yaml",
-      );
-    }
+    expect(tools.get("request_dev_app")?.description).toContain(
+      "https://docs.opencloud.ai/openapi.yaml",
+    );
     expect(tools.get("request_dev_app")?.description).toContain(
       "does not create, deploy, or modify an app",
     );
@@ -657,9 +693,7 @@ describe("controlPlaneOperations", () => {
     expect(tools.get("get_agent_feed")?.description).toContain(
       "without persisting alert state",
     );
-    expect(tools.get("mutate_dev_data")?.description).toContain(
-      "raw REST paths are not accepted",
-    );
+    expect(tools.has("mutate_dev_data")).toBe(false);
     expect(tools.get("inject_dev_email")?.description).toContain(
       "may change isolated data or external systems",
     );
@@ -744,9 +778,7 @@ describe("controlPlaneOperations", () => {
         body: { paths: [] },
       }),
     ).toEqual({ appId, draftId, body: { paths: [] } });
-    expect(controlPlaneOperations.mutateDevData.mcp?.description).toContain(
-      "synthetic-user-A fixture rows",
-    );
+    expect(controlPlaneOperations.mutateDevData.mcp).toBeUndefined();
   });
 
   it("requires the exact development capability vector", () => {
@@ -789,6 +821,41 @@ describe("controlPlaneOperations", () => {
         capabilities: { ...session.capabilities, files: false },
       }),
     ).toThrow();
+  });
+
+  it("lists captured and injected development email together", () => {
+    const binding = {
+      schemaVersion: 1,
+      appId: "22222222-2222-4222-8222-222222222222",
+      devSessionId: "33333333-3333-4333-8333-333333333333",
+      revisionId: "44444444-4444-4444-8444-444444444444",
+      subject: "Hello",
+      createdAt: "2026-10-26T12:00:00.000Z",
+    };
+    const captured = {
+      ...binding,
+      id: "55555555-5555-4555-8555-555555555555",
+      address: "support",
+      from: "support-app-abc123@m.opencloud.test",
+      to: ["owner@example.test"],
+      cc: [],
+      bcc: [],
+      status: "captured",
+      idempotencyKey: "welcome-1",
+      attachmentCount: 0,
+    };
+    const injected = {
+      ...binding,
+      id: "66666666-6666-4666-8666-666666666666",
+      direction: "inbound",
+      address: { name: "support", value: "support-app-abc123@m.opencloud.test" },
+      from: "visitor@example.test",
+      status: "processed",
+    };
+
+    expect(
+      controlPlaneOperations.listDevEmailCaptures.output.parse([captured, injected]),
+    ).toEqual([captured, injected]);
   });
 });
 
@@ -1734,8 +1801,6 @@ describe("controlPlaneOperations", () => {
       },
       deploy_draft: { destructiveHint: true },
       apply_dev_revision: { destructiveHint: true },
-      mutate_dev_data: { destructiveHint: true },
-      invoke_dev_function: { destructiveHint: true },
       inject_dev_email: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -1749,7 +1814,6 @@ describe("controlPlaneOperations", () => {
       create_backup: { idempotentHint: false },
       configure_backup_schedule: { destructiveHint: true },
       restore_backup: { idempotentHint: false },
-      invoke_cron: { destructiveHint: true },
       put_alert_rule: { destructiveHint: true },
       request_dev_app: {
         readOnlyHint: true,
@@ -1768,11 +1832,9 @@ describe("controlPlaneOperations", () => {
     for (const [name, annotations] of Object.entries(expected)) {
       expect(tools.get(name), `${name} annotations`).toMatchObject(annotations);
     }
-    for (const name of ["request_dev_app", "mutate_dev_data"]) {
-      expect(tools.get(name)?.description, `${name} API reference`).toContain(
-        "https://docs.opencloud.ai/openapi.yaml",
-      );
-    }
+    expect(tools.get("request_dev_app")?.description).toContain(
+      "https://docs.opencloud.ai/openapi.yaml",
+    );
     expect(tools.get("request_dev_app")?.description).toContain(
       "does not create, deploy, or modify an app",
     );
@@ -1787,9 +1849,7 @@ describe("controlPlaneOperations", () => {
     expect(tools.get("get_agent_feed")?.description).toContain(
       "without persisting alert state",
     );
-    expect(tools.get("mutate_dev_data")?.description).toContain(
-      "raw REST paths are not accepted",
-    );
+    expect(tools.has("mutate_dev_data")).toBe(false);
     expect(tools.get("inject_dev_email")?.description).toContain(
       "may change isolated data or external systems",
     );
@@ -1874,9 +1934,7 @@ describe("controlPlaneOperations", () => {
         body: { paths: [] },
       }),
     ).toEqual({ appId, draftId, body: { paths: [] } });
-    expect(controlPlaneOperations.mutateDevData.mcp?.description).toContain(
-      "synthetic-user-A fixture rows",
-    );
+    expect(controlPlaneOperations.mutateDevData.mcp).toBeUndefined();
   });
 
   it("requires the exact development capability vector", () => {

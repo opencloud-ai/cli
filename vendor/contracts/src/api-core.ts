@@ -181,6 +181,20 @@ export const customMetricNameSchema = z
   .max(63)
   .regex(/^[a-z][a-z0-9_]*$/, "metric names must use lowercase snake_case");
 
+export const customMetricDimensionsSchema = z.record(
+  z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+  z.string().min(1).max(40),
+);
+export const customMetricMeasurementSchema = z.object({
+  name: customMetricNameSchema,
+  value: z.number().finite().min(-1e15).max(1e15),
+  dimensions: customMetricDimensionsSchema.default({}),
+  idempotencyKey: z.string().min(8).max(120).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+});
+export const ingestCustomMetricsRequestSchema = z.object({
+  measurements: z.array(customMetricMeasurementSchema).min(1).max(20),
+});
+
 export const alertRuleIdSchema = z
   .string()
   .min(1)

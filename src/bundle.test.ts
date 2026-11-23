@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as tar from "tar";
 import {
   buildBundle,
+  cliBundleWarnings,
   OPEN_CLOUD_E2E_TEST_MAX_BYTES,
   OPEN_CLOUD_E2E_TEST_PATH,
 } from "./bundle.js";
@@ -60,6 +61,81 @@ async function readArchivedManifest(
 }
 
 describe("bundle builder", () => {
+  it("bundles a container frontend without static files or running image code", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(path.join(root, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  container: web
+containers:
+  - name: web
+    kind: service
+    image: registry.example/web:latest
+    service:
+      startupProbe: { path: /ready }
+      readinessProbe: { path: /ready }
+`);
+    const bundle = await buildBundle(root, { platformFrontend: true });
+    const archived = await readArchivedManifest(root, bundle.archive);
+    expect(archived.frontend).toEqual({ container: "web" });
+    expect(bundle.manifest.containers?.[0]?.name).toBe("web");
+    expect(bundle.manifest.runtime.sdk.version).toBe("2.9.0");
+    expect(bundle.files).toEqual(["opencloud.json"]);
+  });
+  it("gives a manifest that pins no SDK 3.20's default, or 2.9.0 when it declares containers, and keeps a pin", async () => {
+    const plain = await temporaryDirectory();
+    await mkdir(path.join(plain, "frontend"));
+    await writeFile(path.join(plain, "frontend", "index.html"), "hello");
+    await writeFile(path.join(plain, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  directory: frontend
+`);
+    const containers = await temporaryDirectory();
+    const containerManifest = (pin = "") => `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+frontend:
+  container: web
+${pin}containers:
+  - name: web
+    kind: service
+    image: registry.example/web:latest
+    service:
+      startupProbe: { path: /ready }
+      readinessProbe: { path: /ready }
+`;
+    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest());
+    // Built together, each still gets its own default.
+    const [plainBundle, containerBundle] = await Promise.all([
+      buildBundle(plain), buildBundle(containers, { platformFrontend: true }),
+    ]);
+    expect(plainBundle.manifest.runtime.sdk.version).toBe("2.3.0");
+    expect(containerBundle.manifest.runtime.sdk.version).toBe("2.9.0");
+    await writeFile(path.join(containers, "opencloud.yaml"), containerManifest("runtime:\n  sdk:\n    version: 2.8.0\n"));
+    const pinnedOlder = await buildBundle(containers, { platformFrontend: true });
+    expect(pinnedOlder.manifest.runtime.sdk.version).toBe("2.8.0");
+    // OpenCloud accepts it, so it is a warning that names the fix.
+    expect(cliBundleWarnings(pinnedOlder)).toEqual([{
+      code: "CONTAINERS_NEED_SDK_2_9", path: "opencloud.yaml",
+      message: "opencloud.yaml declares containers but pins runtime SDK 2.8.0; Functions can call containers only from SDK 2.9.0. Set runtime.sdk.version: 2.9.0 in opencloud.yaml.",
+    }]);
+    expect(cliBundleWarnings(containerBundle)).toEqual([]);
+    expect(cliBundleWarnings(plainBundle)).toEqual([]);
+    await writeFile(path.join(plain, "opencloud.yaml"), `
+schemaVersion: 3
+appId: aeea1c71-72a3-4b1d-a32e-213900735091
+runtime:
+  sdk:
+    version: 2.9.0
+frontend:
+  directory: frontend
+`);
+    expect((await buildBundle(plain)).manifest.runtime.sdk.version).toBe("2.9.0");
+  });
+
   it("omits empty directories so file-only draft reconstruction is byte-identical", async () => {
     const root = await temporaryDirectory();
     await mkdir(path.join(root, "frontend", "evidence"), { recursive: true });
@@ -281,6 +357,7 @@ functions:
 
     const first = await buildBundle(root);
     expect(first.manifest.migrations[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    // CLI 3.20's default, which every supported OpenCloud installs.
     expect(first.manifest.runtime).toEqual({
       sdk: {
         version: "2.3.0",

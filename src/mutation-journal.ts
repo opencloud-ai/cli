@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -7,6 +7,7 @@ import {
   type Stats,
 } from "node:fs";
 import {
+  link,
   lstat,
   mkdir,
   open,
@@ -29,8 +30,34 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{8,200}$/;
-const CREDENTIAL_LIKE =
-  /(?:\bBearer\b|(?:oc_(?:owner|agent|app)|sk|gh[pousr])[-_][A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})/i;
+/**
+ * Credentials by their real prefixes and lengths, each with the kind a refusal
+ * names instead of repeating the value. Apart from the app-owner credential,
+ * which OpenCloud itself refuses anywhere but Authorization, a prefix counts
+ * only at the start or after a character that is not a letter or digit, so
+ * words that merely contain one ("s5-task-abcdefghij", "otherdesk-deploy",
+ * a variable named OC_FOO) are not taken for a key.
+ */
+const CREDENTIAL_SHAPES: ReadonlyArray<readonly [kind: string, shape: RegExp]> = [
+  ["an OpenCloud app-owner credential (oc_owner_…)", /oc_owner_[A-Za-z0-9_-]{8,}/],
+  [
+    "an OpenCloud access token (oc_app_…, oc_agent_…, oc_oauth_…, oc_provisional_…, oc_cli_…, oc_platform_cli_…, or oc_run_…)",
+    /(?<![A-Za-z0-9])oc_(?:app|agent|oauth|provisional|cli|platform_cli|run)_[A-Za-z0-9_-]{16,}/,
+  ],
+  [
+    "an OpenCloud refresh token or device code (oc_refresh_… or oc_device_…)",
+    /(?<![A-Za-z0-9])oc_(?:refresh|device)_[A-Za-z0-9_-]{16,}/,
+  ],
+  ["an API secret key (sk-…)", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{32,}/],
+  ["a Stripe secret key", /(?<![A-Za-z0-9])[rs]k_(?:live|test)_[A-Za-z0-9]{24,}/],
+  ["a GitHub token", /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{70,})/],
+  ["a JSON Web Token", /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/],
+];
+
+/** The kind of credential a value contains, if it looks like it holds one. */
+export function credentialShape(value: string): string | undefined {
+  return CREDENTIAL_SHAPES.find(([, shape]) => shape.test(value))?.[0];
+}
 const LOCK_STALE_MS = 30_000;
 const LOCK_UPDATE_MS = 5_000;
 const JOURNAL_ROOT_ENTRIES = new Set([
@@ -40,6 +67,7 @@ const JOURNAL_ROOT_ENTRIES = new Set([
   ".identity-lock-target.lock",
   ".identity.json",
   "binding.json",
+  "digest-key.json",
   "entries",
   "locks",
 ]);
@@ -47,6 +75,8 @@ const ORPHAN_BINDING_TEMP =
   /^\.binding\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 const ORPHAN_IDENTITY_TEMP =
   /^\.\.identity\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+const ORPHAN_DIGEST_KEY_TEMP =
+  /^\.digest-key\.json\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 
 export const MUTATION_JOURNAL_ENV = "OPENCLOUD_MUTATION_JOURNAL_DIR";
 export const APP_OWNER_MUTATION_JOURNAL_DIRECTORY =
@@ -64,6 +94,26 @@ export function assertAppOwnerMutationJournalDirectory(
   return APP_OWNER_MUTATION_JOURNAL_DIRECTORY;
 }
 
+/**
+ * The unresolved mutation an error is about, so a person can resume or check
+ * it: only the retained, non-secret coordinates, never request content.
+ */
+export interface PendingMutation {
+  command: MutationCommandId;
+  idempotencyKey: string;
+  /** Whether the CLI chose the key because none was given. */
+  generatedKey: boolean;
+  state: "prepared" | "attempted" | "unknown" | "completed";
+  unknownCode?: string;
+  appId: string;
+  operationId?: string;
+  draftId?: string;
+  revision?: number;
+  sessionId?: string;
+  /** True when the reused key conflicts only because .opencloud/base.json moved to another release. */
+  baseDeploymentChanged?: boolean;
+}
+
 export class MutationJournalError extends Error {
   readonly retryable: boolean;
 
@@ -71,11 +121,95 @@ export class MutationJournalError extends Error {
     readonly code: string,
     message: string,
     retryable = false,
+    readonly pending?: PendingMutation,
   ) {
     super(message);
     this.name = "MutationJournalError";
     this.retryable = retryable;
   }
+}
+
+const GENERATED_KEY = /^ocj1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A workflow settled while OpenCloud may still be validating its draft. */
+const VALIDATION_WAITING_STAGE = "validation_waiting";
+
+/**
+ * Unknown outcomes that hold back only their own request. Nothing is ever
+ * sent again for them (DEPLOY_OUTCOME_UNKNOWN: OpenCloud deployed the draft
+ * but won't say which release that made), so the very same request still
+ * meets the unknown outcome, while a different one without a key of its own,
+ * such as a deploy of changed source, replaces the entry instead of waiting
+ * for a resolution that never comes.
+ */
+const UNKNOWN_HOLDING_ONLY_ITS_REQUEST = new Set(["DEPLOY_OUTCOME_UNKNOWN"]);
+
+/**
+ * A completed entry is forgotten by the next run without a key, except one
+ * settled while OpenCloud may still be validating: the very same request
+ * rejoins that validation instead of uploading a new draft. Any other request
+ * starts afresh, so a settled validation never holds one back.
+ */
+function rejoinsValidation(entry: MutationJournalEntry, commandId: string, scopeDigest: string, requestDigest: string): boolean {
+  return entry.checkpoint?.stage === VALIDATION_WAITING_STAGE && entry.checkpoint.validation !== undefined &&
+    entry.commandId === commandId && entry.scopeDigest === scopeDigest && entry.requestDigest === requestDigest;
+}
+
+function expectedActiveDeploymentIdOf(safeRequest: unknown): string | undefined {
+  if (!safeRequest || typeof safeRequest !== "object" || Array.isArray(safeRequest)) return undefined;
+  const value = (safeRequest as Record<string, unknown>).expectedActiveDeploymentId;
+  return typeof value === "string" && UUID.test(value) ? value : undefined;
+}
+
+/**
+ * True when an unfinished deploy or app dev start entry differs from the new
+ * request only because .opencloud/base.json advanced to another release.
+ */
+function differsOnlyByExpectedBaseDeployment(
+  entry: MutationJournalEntry,
+  spec: MutationIntentSpec,
+  scopeDigest: string,
+): boolean {
+  if (entry.state === "completed") return false;
+  if (entry.commandId !== spec.commandId || entry.scopeDigest !== scopeDigest) return false;
+  if (!spec.safeRequest || typeof spec.safeRequest !== "object" || Array.isArray(spec.safeRequest)) return false;
+  const currentRequest = spec.safeRequest as Record<string, unknown>;
+  const currentBase = expectedActiveDeploymentIdOf(currentRequest);
+  if (currentBase === undefined) return false;
+  const recordedBase = entry.checkpoint?.baseDeploymentId;
+  const rest: Record<string, unknown> = { ...currentRequest };
+  delete rest.expectedActiveDeploymentId;
+  if (typeof recordedBase === "string" && recordedBase !== currentBase) {
+    return mutationDigest({ ...rest, expectedActiveDeploymentId: recordedBase }) === entry.requestDigest;
+  }
+  if (recordedBase === undefined || recordedBase === null) {
+    return mutationDigest(rest) === entry.requestDigest;
+  }
+  return false;
+}
+
+function pendingMutation(
+  entry: MutationJournalEntry,
+  appId: string,
+  options: { baseDeploymentChanged?: boolean } = {},
+): PendingMutation {
+  const checkpoint = entry.checkpoint;
+  const operationId = entry.operationId ?? checkpoint?.deploymentOperationId ?? checkpoint?.operationId;
+  const draftId = checkpoint?.draftId ?? checkpoint?.validation?.draftId;
+  const revision = checkpoint?.revision ?? checkpoint?.validation?.revision;
+  return {
+    command: entry.commandId,
+    idempotencyKey: entry.idempotencyKey,
+    generatedKey: GENERATED_KEY.test(entry.idempotencyKey),
+    state: entry.state,
+    ...(entry.unknownCode ? { unknownCode: entry.unknownCode } : {}),
+    appId,
+    ...(operationId ? { operationId } : {}),
+    ...(draftId ? { draftId } : {}),
+    ...(revision ? { revision } : {}),
+    ...(checkpoint?.sessionId ? { sessionId: checkpoint.sessionId } : {}),
+    ...(options.baseDeploymentChanged ? { baseDeploymentChanged: true } : {}),
+  };
 }
 
 export interface MutationJournalDirectoryInput {
@@ -112,9 +246,27 @@ export interface MutationJournalAuthorityBinding {
   familyId: string;
 }
 
+interface ValidationCoordinates {
+  draftId: string;
+  revision: number;
+  requestSha256: string;
+  deadline: string;
+}
+
+/** Only bounded receipt coordinates, never manifests, diagnostics or source. */
+export type SafeValidationCheckpoint = ValidationCoordinates & (
+  | { state: "dispatched" | "refused" }
+  | { state: "progress"; retryNotBefore: string }
+  | { state: "result"; validationId: string; passed: boolean; artifactSha256: string | null }
+);
+
 export interface SafeMutationCheckpoint {
   stage: string;
+  validation?: SafeValidationCheckpoint | undefined;
   artifactSha256?: string | undefined;
+  serverArtifactSha256?: string | undefined;
+  baseDeploymentId?: string | null | undefined;
+  devApplyDeadline?: string | undefined;
   draftId?: string | undefined;
   sessionId?: string | undefined;
   activeRevisionId?: string | undefined;
@@ -228,7 +380,11 @@ const ENTRY_KEYS = [
 ].sort();
 const CHECKPOINT_KEYS = new Set([
   "stage",
+  "validation",
   "artifactSha256",
+  "serverArtifactSha256",
+  "baseDeploymentId",
+  "devApplyDeadline",
   "draftId",
   "sessionId",
   "activeRevisionId",
@@ -356,10 +512,19 @@ export function mutationDigest(value: unknown): string {
 
 function validateIdempotencyKey(value: string): string {
   const key = value.trim();
-  if (!SAFE_IDEMPOTENCY_KEY.test(key) || CREDENTIAL_LIKE.test(key)) {
+  if (!SAFE_IDEMPOTENCY_KEY.test(key)) {
     throw new MutationJournalError(
       "INVALID_IDEMPOTENCY_KEY",
-      "Idempotency keys must be 8 through 200 credential-safe letters, numbers, dots, colons, underscores, or dashes",
+      "Idempotency keys must be 8 through 200 letters, numbers, dots, colons, underscores, or dashes",
+    );
+  }
+  // Keys are kept in the journal and sent with each request, so one that
+  // looks like a pasted credential is refused, and never repeated.
+  const credential = credentialShape(key);
+  if (credential) {
+    throw new MutationJournalError(
+      "INVALID_IDEMPOTENCY_KEY",
+      `This idempotency key looks like ${credential}; don't put credentials in idempotency keys. Choose a key that names the change, such as deploy-2026-11-20-1.`,
     );
   }
   return key;
@@ -484,6 +649,22 @@ function isIsoDate(value: unknown): value is string {
   );
 }
 
+function validValidationCheckpoint(value: unknown): value is SafeValidationCheckpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  const keys = ["state", "draftId", "revision", "requestSha256", "deadline"];
+  if (item.state === "progress") keys.push("retryNotBefore");
+  else if (item.state === "result") keys.push("validationId", "passed", "artifactSha256");
+  else if (item.state !== "dispatched" && item.state !== "refused") return false;
+  if (!exactKeys(item, keys.sort()) || typeof item.draftId !== "string" || !UUID.test(item.draftId) ||
+      !Number.isSafeInteger(item.revision) || Number(item.revision) <= 0 || typeof item.requestSha256 !== "string" ||
+      !SHA256.test(item.requestSha256) || !isIsoDate(item.deadline)) return false;
+  if (item.state === "progress" && !isIsoDate(item.retryNotBefore)) return false;
+  if (item.state === "result" && (typeof item.validationId !== "string" || !UUID.test(item.validationId) ||
+      typeof item.passed !== "boolean" || (item.artifactSha256 !== null && (typeof item.artifactSha256 !== "string" || !SHA256.test(item.artifactSha256))))) return false;
+  return true;
+}
+
 function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -495,6 +676,7 @@ function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
   ) {
     return null;
   }
+  if (candidate.validation !== undefined && !validValidationCheckpoint(candidate.validation)) return null;
   for (const key of [
     "draftId",
     "sessionId",
@@ -509,12 +691,11 @@ function parseCheckpoint(value: unknown): SafeMutationCheckpoint | null {
       return null;
     }
   }
-  if (
-    candidate.artifactSha256 !== undefined &&
-    !SHA256.test(String(candidate.artifactSha256))
-  ) {
-    return null;
+  for (const key of ["artifactSha256", "serverArtifactSha256"]) {
+    if (candidate[key] !== undefined && !SHA256.test(String(candidate[key]))) return null;
   }
+  if (candidate.baseDeploymentId !== undefined && candidate.baseDeploymentId !== null && !UUID.test(String(candidate.baseDeploymentId))) return null;
+  if (candidate.devApplyDeadline !== undefined && !isIsoDate(candidate.devApplyDeadline)) return null;
   for (const key of ["revision", "offset"]) {
     if (
       candidate[key] !== undefined &&
@@ -696,7 +877,8 @@ async function secureDirectory(
       (entry) =>
         !JOURNAL_ROOT_ENTRIES.has(entry) &&
         !ORPHAN_BINDING_TEMP.test(entry) &&
-        !ORPHAN_IDENTITY_TEMP.test(entry),
+        !ORPHAN_IDENTITY_TEMP.test(entry) &&
+        !ORPHAN_DIGEST_KEY_TEMP.test(entry),
     );
     if (unexpected.length > 0) {
       throw new MutationJournalError(
@@ -1155,6 +1337,39 @@ export class MutationRun {
   }
 
   async checkpointStage(checkpoint: SafeMutationCheckpoint): Promise<void> {
+    // Workflow stages cannot erase a validation dispatch/progress receipt or initial base release.
+    await this.saveCheckpoint({
+      ...(this.checkpoint?.baseDeploymentId !== undefined
+        ? { baseDeploymentId: this.checkpoint.baseDeploymentId }
+        : {}),
+      ...checkpoint,
+      ...(this.checkpoint?.validation ? { validation: this.checkpoint.validation } : {}),
+    });
+  }
+
+  async checkpointValidation(validation: SafeValidationCheckpoint): Promise<void> {
+    const previous = this.checkpoint?.validation;
+    if (!validValidationCheckpoint(validation)) {
+      throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Invalid validation receipt coordinates");
+    }
+    const samePinned = previous !== undefined && previous.draftId === validation.draftId && previous.revision === validation.revision &&
+      previous.requestSha256 === validation.requestSha256;
+    const sameRequest = samePinned && previous.deadline === validation.deadline;
+    if (validation.state !== "dispatched" && (!sameRequest || previous?.state !== "dispatched")) {
+      throw new MutationJournalError("INVALID_MUTATION_CHECKPOINT", "Validation response has no matching dispatched request");
+    }
+    // Validating a pinned revision again joins OpenCloud's run for it, so a
+    // dispatch whose reply never came may be sent again, as may one OpenCloud
+    // said is still running once its wait is over. Either way only for the
+    // same draft, revision and request; its deadline may be a fresh one.
+    if (validation.state === "dispatched" && (previous?.state === "dispatched" || previous?.state === "progress") &&
+        (!samePinned || (previous.state === "progress" && Date.now() < Date.parse(previous.retryNotBefore)))) {
+      throw new MutationJournalError("MUTATION_REPLAY_MISMATCH", "Validation retry must retain its exact request and acknowledged wait");
+    }
+    await this.saveCheckpoint({ ...(this.checkpoint ?? { stage: "validating" }), validation });
+  }
+
+  private async saveCheckpoint(checkpoint: SafeMutationCheckpoint): Promise<void> {
     await this.assertAnchored();
     if (!parseCheckpoint(checkpoint)) {
       throw new MutationJournalError(
@@ -1197,14 +1412,20 @@ export class MutationRun {
     throw new MutationJournalError(
       code,
       "The previous request may have taken effect, but this endpoint has no safe replay coordinate. Inspect current app state, then retry with a new explicit --idempotency-key only when a new mutation is intended.",
+      false,
+      pendingMutation(this.entry, this.journal.appId),
     );
   }
 
   failIfUnknown(): void {
-    if (this.entry.state === "unknown") {
+    // An earlier candidate marked a validation whose reply was lost unknown;
+    // validating that pinned revision again is safe, so it resumes instead.
+    if (this.entry.state === "unknown" && this.entry.unknownCode !== "DRAFT_VALIDATION_OUTCOME_UNKNOWN") {
       throw new MutationJournalError(
         this.entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN",
         "The previous request may have taken effect, and the CLI will not retry it blindly. Inspect current app state, then use a new explicit --idempotency-key only when a new mutation is intended.",
+        false,
+        pendingMutation(this.entry, this.journal.appId),
       );
     }
   }
@@ -1222,10 +1443,41 @@ export class MutationRun {
     await atomicWrite(this.file, this.entry);
     await this.assertAnchored();
   }
+
+  /**
+   * Forgets a kept validation that no longer describes its draft, so the
+   * workflow applies its source again and validates the new revision.
+   * OpenCloud's run for the old revision, if any, ends on its own; nothing
+   * waits on it.
+   */
+  async dropValidation(): Promise<void> {
+    const { validation: _dropped, ...rest } = this.checkpoint ?? { stage: "validating" };
+    await this.saveCheckpoint(rest);
+  }
+
+  /**
+   * Ends the workflow at its validation, which changed nothing live: records
+   * why and completes the entry, so it holds nothing back. "waiting" means
+   * OpenCloud may still be validating; running the very same request again
+   * rejoins that validation (see MutationJournal.run). "refused" means it
+   * answered, so the next run starts afresh.
+   */
+  async settleValidation(outcome: "waiting" | "refused"): Promise<PendingMutation> {
+    await this.saveCheckpoint({
+      ...(this.checkpoint ?? { stage: "validating" }),
+      stage: outcome === "waiting" ? VALIDATION_WAITING_STAGE : "validation_refused",
+    });
+    await this.complete();
+    return pendingMutation(this.entry, this.journal.appId);
+  }
 }
+
+/** The journal's own random key for keyed digests; see MutationJournal.keyedDigest. */
+const DIGEST_KEY_FILE = "digest-key.json";
 
 export class MutationJournal {
   readonly directory: string;
+  private digestKey: Promise<Buffer> | null = null;
   private readonly rootHandle: number | null;
   private readonly entriesHandle: number | null;
   private readonly locksHandle: number | null;
@@ -1670,6 +1922,7 @@ export class MutationJournal {
       await this.assertIdentityWitness();
       if (requireExternalIdentity) await this.assertRootIdentity();
       await cleanupOrphanBindingTemps(this.anchoredDirectory);
+      await cleanupOrphanAtomicTemps(this.anchoredDirectory, DIGEST_KEY_FILE);
       const bindingFile = path.join(this.anchoredDirectory, "binding.json");
       const raw = await readOptional(bindingFile);
       if (raw === null) {
@@ -1704,6 +1957,118 @@ export class MutationJournal {
     return this.now().toISOString();
   }
 
+  /** The exact app this journal is bound to. */
+  get appId(): string {
+    return this.binding.appId;
+  }
+
+  /**
+   * A keyed digest (HMAC-SHA256) of request content that may be private, such
+   * as a job's input, so the journal can tell requests apart without keeping
+   * anything a guess could be tested against offline. The key is random, made
+   * once per journal and kept beside its entries with the same protection.
+   */
+  async keyedDigest(value: unknown): Promise<string> {
+    this.digestKey ??= this.loadDigestKey().catch((error: unknown) => {
+      this.digestKey = null;
+      throw error;
+    });
+    return createHmac("sha256", await this.digestKey).update(canonicalJson(value)).digest("hex");
+  }
+
+  private async withDigestKeyLock<T>(work: () => Promise<T>): Promise<T> {
+    const lockTarget = path.join(this.anchoredDirectory, ".binding-lock");
+    await ensureLockTarget(lockTarget);
+    const release = await lockfile.lock(lockTarget, {
+      realpath: false,
+      stale: LOCK_STALE_MS,
+      update: LOCK_UPDATE_MS,
+      retries: {
+        retries: 100,
+        factor: 1.2,
+        minTimeout: 20,
+        maxTimeout: 500,
+      },
+    });
+    try {
+      return await work();
+    } finally {
+      await release();
+    }
+  }
+
+  private async loadDigestKey(): Promise<Buffer> {
+    const file = path.join(this.anchoredDirectory, DIGEST_KEY_FILE);
+    const parse = (raw: string): Buffer => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      const record = parsed as Record<string, unknown>;
+      const keys = Object.keys(record).sort();
+      if (
+        keys.length !== 2 ||
+        keys[0] !== "key" ||
+        keys[1] !== "schemaVersion" ||
+        record.schemaVersion !== 1 ||
+        typeof record.key !== "string" ||
+        !/^[0-9a-f]{64}$/.test(record.key)
+      ) {
+        throw new MutationJournalError(
+          "CORRUPT_MUTATION_JOURNAL",
+          "The mutation journal's digest key is invalid",
+        );
+      }
+      return Buffer.from(record.key, "hex");
+    };
+    const read = async (): Promise<Buffer | null> => {
+      const raw = await readOptional(file);
+      if (raw === null) return null;
+      return parse(raw);
+    };
+    await this.assertAnchoredPersistence();
+    const resolved = await this.withDigestKeyLock(async () => {
+      await cleanupOrphanAtomicTemps(this.anchoredDirectory, DIGEST_KEY_FILE);
+      const existing = await read();
+      if (existing) return existing;
+      // Written in full, then linked into place: it never exists half written,
+      // and when two commands make one at once, both use the first.
+      const temporary = path.join(this.anchoredDirectory, `.${DIGEST_KEY_FILE}.${process.pid}.${randomUUID()}.tmp`);
+      try {
+        const handle = await open(temporary, "wx", 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, key: randomBytes(32).toString("hex") })}\n`, "utf8");
+          if (process.platform !== "win32") await handle.chmod(0o600);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await link(temporary, file).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        });
+        await syncDirectory(this.anchoredDirectory);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+      const created = await read();
+      if (!created) throw new MutationJournalError("CORRUPT_MUTATION_JOURNAL", "The mutation journal's digest key could not be kept");
+      return created;
+    });
+    await this.assertAnchoredPersistence();
+    return resolved;
+  }
+
   async run<T>(
     spec: MutationIntentSpec,
     callback: (run: MutationRun) => Promise<T>,
@@ -1731,13 +2096,28 @@ export class MutationJournal {
         true,
       );
     }
-    const slot = createHash("sha256")
-      .update(
-        explicitKey === null
-          ? `generated\0${spec.commandId}\0${scopeDigest}`
-          : `explicit\0${explicitKey}`,
-      )
-      .digest("hex");
+    const slotOf = (identity: string) => createHash("sha256").update(identity).digest("hex");
+    const generatedSlot = slotOf(`generated\0${spec.commandId}\0${scopeDigest}`);
+    let slot = explicitKey === null ? generatedSlot : slotOf(`explicit\0${explicitKey}`);
+    if (explicitKey !== null && GENERATED_KEY.test(explicitKey)) {
+      // A key the journal generated, given back, names its own retained entry.
+      // Resume that entry rather than start a second one that would send the
+      // same server keys again, and repeat a request with no replay key, such
+      // as a development apply. Its identity is checked again under the lock;
+      // a file that changes while being peeked at leaves the key explicit.
+      const entryPath = (candidate: string) => path.join(this.entriesDirectory, `${candidate}.json`);
+      // Anything but a definite absence keeps the explicit slot, whose own
+      // processing reports an unreadable entry as before.
+      const explicitAbsent = (await readOptional(entryPath(slot)).catch(() => "")) === null;
+      const generated = explicitAbsent ? await readOptional(entryPath(generatedSlot)).catch(() => null) : null;
+      let generatedKey: string | null = null;
+      try {
+        generatedKey = generated === null ? null : parseEntry(generated, entryPath(generatedSlot)).idempotencyKey;
+      } catch {
+        generatedKey = null;
+      }
+      if (generatedKey === explicitKey) slot = generatedSlot;
+    }
     const lockTarget = path.join(this.locksDirectory, slot);
     const entryFile = path.join(this.entriesDirectory, `${slot}.json`);
     await ensureLockTarget(lockTarget);
@@ -1787,7 +2167,17 @@ export class MutationJournal {
       if (
         entry?.state === "completed" &&
         !concurrentCompletion &&
-        explicitKey === null
+        explicitKey === null &&
+        !rejoinsValidation(entry, spec.commandId, scopeDigest, requestDigest)
+      ) {
+        entry = null;
+      }
+      if (
+        entry?.state === "unknown" &&
+        explicitKey === null &&
+        entry.unknownCode !== null &&
+        UNKNOWN_HOLDING_ONLY_ITS_REQUEST.has(entry.unknownCode) &&
+        (entry.commandId !== spec.commandId || entry.scopeDigest !== scopeDigest || entry.requestDigest !== requestDigest)
       ) {
         entry = null;
       }
@@ -1817,15 +2207,46 @@ export class MutationJournal {
           retainedIdentityChanged ||
           (!mayInspectRetainedDevWorkflow && retainedDescriptorChanged)
         ) {
+          // Name the request that holds this target, so it can be resumed with
+          // its own key or checked; the CLI adds the exact commands.
+          const baseDeploymentChanged = differsOnlyByExpectedBaseDeployment(entry, spec, scopeDigest);
+          const pending = pendingMutation(entry, this.binding.appId, { baseDeploymentChanged });
+          const unknown = entry.unknownCode ?? "MUTATION_OUTCOME_UNKNOWN";
+          if (explicitKey !== null && entry.idempotencyKey === explicitKey) {
+            // The given key already names another request. That never clears
+            // by waiting: only a new key sends this one, as the platform's own
+            // reused-key conflicts say, so it is not retryable.
+            throw new MutationJournalError(
+              "IDEMPOTENCY_KEY_REUSED",
+              entry.state === "completed"
+                ? `Idempotency key ${entry.idempotencyKey} was already used for a different \`${entry.commandId}\` request, which finished. No request was started.`
+                : entry.state === "unknown"
+                  ? `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that may have taken effect (${unknown}). No request was started.`
+                  : baseDeploymentChanged
+                    ? `Idempotency key ${entry.idempotencyKey} was recorded against an earlier workspace base release (.opencloud/base.json has since changed), so this \`${entry.commandId}\` request differs from it (state ${entry.state}). No request was started.`
+                    : `Idempotency key ${entry.idempotencyKey} belongs to an earlier \`${entry.commandId}\` request that has not finished (state ${entry.state}). No request was started.`,
+              false,
+              pending,
+            );
+          }
+          // Without a key of its own, this request waits for the target's
+          // unresolved one; running it again works once that one is resolved.
+          const holder = `\`${entry.commandId}\` request with idempotency key ${entry.idempotencyKey}`;
           throw new MutationJournalError(
             "MUTATION_IN_PROGRESS",
-            "A different unresolved mutation already owns this exact target. Recover it before starting another request.",
+            entry.state === "completed"
+              ? `An earlier \`${entry.commandId}\` request for this target finished just as this one started, so no request was started. Run the command again.`
+              : entry.state === "unknown"
+                ? `An earlier ${holder} may have taken effect (${unknown}), and this request differs from it. No request was started.`
+                : `An earlier ${holder} has not finished (state ${entry.state}), and this request differs from it. No request was started.`,
             true,
+            pending,
           );
         }
       } else {
         const now = this.timestamp();
         const entryId = randomUUID();
+        const initialBaseDeploymentId = expectedActiveDeploymentIdOf(spec.safeRequest);
         entry = {
           schemaVersion: 1,
           entryId,
@@ -1840,7 +2261,9 @@ export class MutationJournal {
           attemptCount: 0,
           attemptedAt: null,
           operationId: null,
-          checkpoint: null,
+          checkpoint: initialBaseDeploymentId
+            ? { stage: "prepared", baseDeploymentId: initialBaseDeploymentId }
+            : null,
           unknownCode: null,
           createdAt: now,
           updatedAt: now,

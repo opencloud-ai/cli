@@ -49,7 +49,7 @@ describe("browser package boundary", () => {
 
     expect(
       [...graph.keys()].map((file) => file.slice(sourceRoot.length + 1)),
-    ).toEqual(["browser.ts", "transport.ts", "request-signal.ts", "errors.ts"]);
+    ).toEqual(["browser.ts", "transport.ts", "request-signal.ts", "errors.ts", "draft-validation.ts"]);
     for (const [file, source] of graph) {
       expect(source, file).not.toMatch(/\bBuffer\b|\bprocess\.|\brequire\s*\(/);
     }

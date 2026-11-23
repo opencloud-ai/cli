@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -17,7 +17,6 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Argument, Command, Option } from "commander";
 import YAML from "yaml";
-import { OPEN_CLOUD_SDK_VERSION } from "@opencloud/js";
 import {
   OPEN_CLOUD_FAVICON_DATA_URI,
   OPEN_CLOUD_LOGO_DATA_URI,
@@ -25,11 +24,15 @@ import {
   appDomainAddSchema,
   appImportReviewSchema,
   installAppPackageRequestSchema,
+  installationViewSchema,
   portabilityLimits,
   type AgentOnboardingResponse,
 } from "@opencloud/contracts";
+import { isExpectedComputeError, unsupportedComputeCapabilities } from "@opencloud/contracts/containers";
 import { ApiError, OpenCloudClient } from "./api-client.js";
-import { requestApp } from "./app-edge.js";
+import { validateDraftWithProgress } from "./draft-validation.js";
+import { applyDevRevisionOnce, resumeDevApply } from "./dev-readiness.js";
+import { APP_REQUEST_METHODS, requestApp, type AppRequestMethod } from "./app-edge.js";
 import {
   withDevStateLock,
   withDevWorkflowLock,
@@ -45,10 +48,12 @@ import {
 } from "./account-auth.js";
 import {
   buildBundle,
+  cliBundleWarnings,
   OPEN_CLOUD_E2E_TEST_PATH,
   serializeBundleManifest,
 } from "./bundle.js";
 import { CredentialStore } from "./credential-store.js";
+import { DEFAULT_SDK_VERSION } from "./sdk-version.js";
 import {
   lastUsedApiUrl,
   setCliVersion,
@@ -91,6 +96,7 @@ import {
   integrationSlotName,
 } from "./integrations.js";
 import { backgroundJobPath, backgroundJobsQuery } from "./jobs.js";
+import { computeInput, computeJson, computeKey, computeLogBody, computeQuery, controlGeneration, workerReplicas } from "./compute.js";
 import { devNotificationCaptureLimit, notificationHistoryQuery } from "./notifications.js";
 import {
   deleteSession,
@@ -130,7 +136,9 @@ import { planPull, readReleaseArchive, type ReleaseKind } from "./pull.js";
 import {
   MUTATION_JOURNAL_ENV,
   MutationJournal,
+  MutationJournalError,
   assertAppOwnerMutationJournalDirectory,
+  credentialShape,
   mutationDigest,
   resolveMutationJournalDirectory,
   type MutationIntentSpec,
@@ -143,19 +151,25 @@ import {
   downloadToFile,
   followOperation,
   jsonOption,
+  OperationTerminalError,
+  OperationWaitTimeoutError,
   operationFrom,
   parseBoundedNumber,
   parseCommaList,
+  isDefiniteRefusal,
   persistCredentialToken,
   secretFromStdin,
   structuredCliError,
   type OperationOptions,
 } from "./owner-parity.js";
 import { callerFailure, isCallerFailure } from "./caller-failure.js";
+import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
+import { commandLine, journalHint, notConnectedMessage, shellArgument } from "./guidance.js";
+import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.21.0";
+const CLI_VERSION = "3.22.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -202,6 +216,12 @@ const invocation: {
   undescribed: boolean;
 } = { route: null, optionNames: [], privateValues: [], workspace: null, undescribed: false };
 
+/**
+ * The running command, for guidance printed on this terminal only: its path
+ * below the program and its arguments by name. Error reports never use it.
+ */
+const runningCommand: { route: string[]; args: Map<string, string> } = { route: [], args: new Map() };
+
 program.hook("preAction", (_program, actionCommand) => {
   try {
     Object.assign(invocation, describeInvocation(actionCommand));
@@ -209,7 +229,50 @@ program.hook("preAction", (_program, actionCommand) => {
     // Report bookkeeping never stops a command.
     invocation.undescribed = true;
   }
+  const route: string[] = [];
+  for (let current: Command | null = actionCommand; current?.parent; current = current.parent) {
+    route.unshift(current.name());
+  }
+  runningCommand.route = route;
+  runningCommand.args = new Map(
+    actionCommand.registeredArguments.flatMap((argument, index) => {
+      const value: unknown = actionCommand.processedArgs[index];
+      return typeof value === "string" ? [[argument.name(), value] as const] : [];
+    }),
+  );
 });
+
+/**
+ * No credential applies to an app command: the folder has no app connection,
+ * and perhaps there is no account login either. The top-level handler words
+ * the message once it knows which, since checking the login reads the OS
+ * credential store, which nothing else here needs.
+ */
+class WorkspaceNotConnectedError extends Error {
+  readonly code = "WORKSPACE_NOT_CONNECTED";
+
+  constructor(readonly cwd: string | undefined) {
+    super(notConnectedMessage({ signedIn: null }));
+    this.name = "WorkspaceNotConnectedError";
+  }
+
+  async describe(): Promise<void> {
+    let signedIn: boolean | null;
+    try {
+      signedIn = Boolean(await credentialStore.loadAccount(normalizeApiUrl(targetApiUrl(this.cwd))));
+    } catch {
+      signedIn = null;
+    }
+    const directory = runningCommand.args.get("directory");
+    const here = process.env.INIT_CWD ?? process.cwd();
+    this.message = notConnectedMessage({
+      signedIn,
+      appId: runningCommand.args.get("app-id"),
+      // A directory argument of "." is this folder.
+      directory: directory !== undefined && path.resolve(here, directory) !== path.resolve(here) ? directory : undefined,
+    });
+  }
+}
 
 function sessionFile(): string {
   return resolveSessionFile(
@@ -336,13 +399,61 @@ function client(cwd?: string): OpenCloudClient {
         : { token: legacy.token }),
     });
   }
-  throw callerFailure(new Error(
-    legacy?.state === "awaiting_email_verification"
-      ? "Email verification is still pending. Run opencloud onboard-complete after confirming the email."
-      : legacy?.state === "starting"
-        ? "Onboarding has not completed. Re-run the same opencloud onboard command."
-        : "Run opencloud login, then opencloud app connect <app-id> in this directory.",
-  ));
+  if (legacy?.state === "awaiting_email_verification") {
+    throw callerFailure(new Error(
+      "Email verification is still pending. Run opencloud onboard-complete after confirming the email.",
+    ));
+  }
+  if (legacy?.state === "starting") {
+    throw callerFailure(new Error("Onboarding has not completed. Re-run the same opencloud onboard command."));
+  }
+  throw callerFailure(new WorkspaceNotConnectedError(cwd));
+}
+
+/**
+ * For reads OpenCloud lets an account login make (scope app:read: an app's
+ * deployments and operations): the folder's own credential when it is
+ * connected to this app (or --token, or an Agent session), otherwise the
+ * person's account login, so the command works from the app ID anywhere.
+ * Container, log and metric reads need app:observe, and changes need the
+ * app's own credential: OpenCloud grants an account login neither, so those
+ * commands still need a connected folder.
+ */
+async function appReadClient(appId?: string): Promise<OpenCloudClient> {
+  const binding = availableWorkspace();
+  const session = availableSession();
+  if (program.opts<{ token?: string }>().token || session?.state === "ready" ||
+      (binding && appId !== undefined && binding.appId.toLowerCase() === String(appId).toLowerCase())) {
+    return client();
+  }
+  const login = await ownerAccountLogin();
+  return login ? login.control : client();
+}
+
+/**
+ * `operation get` names no app, so the folder's own credential (or --token,
+ * or an Agent session) reads the operation first, as 3.21 did: an expired
+ * account login never stands in its way, and MUTATION_IN_PROGRESS hints
+ * point here. Only when OpenCloud refuses the folder's credential (403 or
+ * 404: another app's operation) does the account login read it, and a
+ * folder that is not connected uses the login directly.
+ */
+async function readOperation(operationId: string): Promise<{ control: OpenCloudClient; started: unknown }> {
+  const route = `/v1/operations/${encoded(operationId)}`;
+  if (program.opts<{ token?: string }>().token || availableSession()?.state === "ready" || !availableWorkspace()) {
+    const control = await appReadClient();
+    return { control, started: await control.get(route) };
+  }
+  const own = client();
+  try {
+    return { control: own, started: await own.get(route) };
+  } catch (error) {
+    if (!(error instanceof ApiError) || (error.status !== 403 && error.status !== 404)) throw error;
+    // The folder's refusal says more than a login that can't be used.
+    const login = await ownerAccountLogin().catch(() => null);
+    if (!login) throw error;
+    return { control: login.control, started: await login.control.get(route) };
+  }
 }
 
 /**
@@ -619,6 +730,19 @@ interface JournalMutationInput {
   /** Owner-only commands an app credential cannot run; see ownerAccountLogin. */
   ownerAccountLogin?: boolean | undefined;
   cwd?: string | undefined;
+  /**
+   * Request content that may be private, such as a job's input: the journal
+   * keeps only its keyed digest (see MutationJournal.keyedDigest), never a
+   * plain one a guess could be tested against.
+   */
+  privateRequest?: unknown;
+  /**
+   * Settle the entry when OpenCloud definitely refuses the request (see
+   * isDefiniteRefusal), so a corrected request for the same target, such as
+   * a control with the generation `get` now shows, is not held behind it.
+   * Only for requests that run no app code.
+   */
+  settleRefusals?: boolean | undefined;
 }
 
 function mutationIntent(input: JournalMutationInput): MutationIntentSpec {
@@ -643,13 +767,268 @@ async function outputReplayMutation<T>(
   const context = input.ownerAccountLogin === true
     ? await ownerMutationContext(input.appId, input.cwd)
     : await exactAppMutationContext(input.appId, input.cwd);
-  await context.journal.run(mutationIntent(input), async (run) => {
+  const intent = input.privateRequest === undefined
+    ? mutationIntent(input)
+    : mutationIntent({ ...input, safeRequest: { request: input.safeRequest, keyedSha256: await context.journal.keyedDigest(input.privateRequest) } });
+  await context.journal.run(intent, async (run) => {
     run.failIfUnknown();
     await run.markAttempted();
-    const result = await start(context.control, run.idempotencyKey);
+    let result: T;
+    try {
+      result = await start(context.control, run.idempotencyKey);
+    } catch (error) {
+      // OpenCloud refused it, so nothing happened and nothing waits on it.
+      if (input.settleRefusals === true && isDefiniteRefusal(error)) await run.complete();
+      throw error;
+    }
     await outputAsync(await render(result));
     await run.complete();
   });
+}
+
+const PLATFORM_VERIFICATION_FAILURE_CODES = new Set([
+  "APP_EXECUTION_AUTHORITY_REVOKED",
+  "APP_VERIFICATION_FAILED",
+  "ARTIFACT_INTEGRITY_FAILED",
+  "RUNTIME_SDK_MISMATCH",
+  "RUNTIME_SDK_MISSING",
+]);
+
+function isObserveScopeDenial(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 403) return false;
+  const code = error.code?.toUpperCase() ?? "";
+  if (code === "INSUFFICIENT_SCOPE" || code === "MISSING_SCOPE" || code === "SCOPE_REQUIRED") {
+    return true;
+  }
+  if (code !== "" && code !== "HTTP_403" && code !== "FORBIDDEN") return false;
+  return /scope|observe|not authorized|cannot perform|forbidden/i.test(error.message);
+}
+
+function isCallerVerificationFailure(
+  verification: {
+    state: string;
+    deploymentId?: string | null;
+    diagnostics?: ReadonlyArray<{ level: string; code?: string | undefined; message?: string | undefined }>;
+  },
+  operationError?: Record<string, unknown>,
+  expectedDeploymentId?: string | null,
+): boolean {
+  // Another release (or a rollback, or a pause) replaced this one before it
+  // was verified: a conflict the caller sees, not a platform fault.
+  if (expectedDeploymentId && verification.deploymentId !== expectedDeploymentId) return true;
+  if (verification.state !== "failed") return false;
+  const diagnostic = verification.diagnostics?.find((item) => item.level === "error");
+  const code = diagnostic?.code ?? (typeof operationError?.code === "string" ? operationError.code : null);
+  if (code === "ACTIVE_DEPLOYMENT_MISMATCH") return true;
+  if (code === "CANONICAL_HEAD_FAILED") {
+    // The app answered HEAD / itself, such as a container frontend's 404, 405
+    // or 500. No answer at all (a timeout, a refused connection, a missing
+    // Auth redirect) is the platform's, and so is 502, 503 or 504: the
+    // platform's own router answers those when it can't reach the app.
+    const message = diagnostic?.message ?? operationError?.message;
+    const status = typeof message === "string" ? /\breturned HTTP (\d{3})\b/.exec(message)?.[1] : undefined;
+    return status !== undefined && !["502", "503", "504"].includes(status);
+  }
+  if (!code || PLATFORM_VERIFICATION_FAILURE_CODES.has(code)) return false;
+  if (code.startsWith("COMPUTE_")) return isExpectedComputeError(code);
+  return true;
+}
+
+function isTerminalVerificationOutcome(error: unknown): boolean {
+  return (
+    (error instanceof CliContractError && error.code === "VERIFICATION_FAILED") ||
+    isDefiniteRefusal(error)
+  );
+}
+
+/** A verification that found another release live in place of this one. */
+function isReplacedRelease(error: unknown): boolean {
+  return error instanceof CliContractError && error.code === "VERIFICATION_FAILED" &&
+    error.fields?.verificationCode === "ACTIVE_DEPLOYMENT_MISMATCH";
+}
+
+/**
+ * Runs OpenCloud's production verification (verify_app) on a release that
+ * just went live, as `app dev promote` does. A worker starts only after the
+ * switch, so the deploy's own success can't say whether it runs; the
+ * verification can. The release stays live either way: a failed
+ * verification exits non-zero with its code, its reason and the ways forward.
+ */
+async function verifyLiveRelease(control: OpenCloudClient, input: {
+  appId: string;
+  idempotencyKey: string;
+  options: OperationOptions;
+  deploymentId: string | null;
+  /** The release to go back to, when this command knows it. */
+  previousDeploymentId: string | null;
+  /** When the command started, for the logs window. */
+  since: string;
+  /** Active journal run, so verification coordinates survive interruption. */
+  run?: MutationRun | undefined;
+  /** The command records the release as its copy's base once verified (deploy). */
+  recordsBase?: boolean | undefined;
+}): Promise<unknown> {
+  const { appId } = input;
+  const totalBudgetMs = parseBoundedNumber(input.options.timeout, "--timeout", 1, 1_800, false) * 1_000;
+  // Keep the verifyApp request timeout deterministic from --timeout rather than
+  // elapsed wall-clock time; local followOperation still enforces the remaining budget.
+  const verifyRequestTimeoutMs = Math.min(120_000, Math.round(totalBudgetMs));
+  // Verification gets its own --timeout, as the deploy's wait did, so an
+  // upload, a validation or a container build before it can't use it up.
+  const deadlineMs = Date.now() + totalBudgetMs;
+  const skippedVerification = {
+    state: "skipped" as const,
+    reason: "MISSING_OBSERVE_SCOPE" as const,
+    message: "Production verification was skipped because this credential does not have the app:observe scope. Grant app:observe or pass --no-verify.",
+  };
+  let verificationId = input.run?.checkpoint?.verificationId;
+  const checkpointOperationId = input.run?.checkpoint?.verificationOperationId;
+  let started: unknown;
+  if (verificationId && checkpointOperationId) {
+    started = await control.get(`/v1/operations/${encoded(checkpointOperationId)}`);
+  } else {
+    let created;
+    try {
+      created = await control.call(
+        "verifyApp",
+        { appId },
+        { idempotencyKey: input.idempotencyKey, timeoutMs: verifyRequestTimeoutMs },
+      );
+    } catch (error) {
+      if (isObserveScopeDenial(error)) {
+        process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
+        return skippedVerification;
+      }
+      throw error;
+    }
+    verificationId = created.verification.id;
+    started = created;
+    if (input.run && created.operation?.id) {
+      await input.run.checkpointStage({
+        ...(input.run.checkpoint ?? {}),
+        stage: "verifying_production",
+        verificationId,
+        verificationOperationId: created.operation.id,
+      });
+    }
+  }
+  /**
+   * The release is live and OpenCloud goes on verifying it. The journal entry
+   * stays open, so the same command run again rejoins this verification and
+   * then settles: for a deploy, it also records the release as the copy's base.
+   */
+  const stillVerifying = (operation: { id: string }) => new CliContractError("OPERATION_WAIT_TIMEOUT",
+    `The release is live, but OpenCloud's verification of it (operation ${operation.id}) did not finish within --timeout.`, {
+      retryable: true,
+      fields: {
+        operationId: operation.id,
+        ...(verificationId ? { verificationId } : {}),
+        ...(input.deploymentId ? { deploymentId: input.deploymentId } : {}),
+      },
+      hint: input.run
+        ? `To finish waiting for it${input.recordsBase ? " and record the release as this copy's base (.opencloud/base.json)" : ""}, run ${rerunCommand(input.run)} again: it rejoins this verification and sends nothing twice.`
+        : `To keep waiting for it, run \`opencloud operation get ${operation.id} --follow\`.`,
+    });
+  const remainingForFollowMs = deadlineMs - Date.now();
+  const startedOperation = operationFrom(started);
+  if (
+    startedOperation &&
+    !["succeeded", "failed", "cancelled"].includes(startedOperation.state) &&
+    remainingForFollowMs <= 0
+  ) {
+    throw stillVerifying(startedOperation);
+  }
+  let terminalError: OperationTerminalError | null = null;
+  try {
+    await followOperation({
+      client: control,
+      started,
+      options: {
+        ...input.options,
+        follow: true,
+        timeout: String(Math.max(1, Math.min(1_800, remainingForFollowMs / 1_000))),
+      },
+    });
+  } catch (error) {
+    if (error instanceof OperationWaitTimeoutError) throw stillVerifying(error.operation);
+    if (!(error instanceof OperationTerminalError)) throw error;
+    terminalError = error;
+  }
+  let verification;
+  try {
+    verification = await control.call("getVerification", { appId, verificationId });
+  } catch (error) {
+    if (isObserveScopeDenial(error)) {
+      process.stderr.write("The release went live, but production verification was skipped because this credential lacks app:observe scope.\n");
+      return skippedVerification;
+    }
+    throw error;
+  }
+  const deploymentMismatch = Boolean(input.deploymentId && verification.deploymentId !== input.deploymentId);
+  if (!terminalError && !deploymentMismatch && verification.state === "passed") return verification;
+  const operationError = (terminalError?.operation.error && typeof terminalError.operation.error === "object"
+    ? terminalError.operation.error
+    : {}) as Record<string, unknown>;
+  const diagnostic = verification.diagnostics.find((item) => item.level === "error");
+  const code = diagnostic?.code ?? (typeof operationError.code === "string" ? operationError.code : "APP_VERIFICATION_FAILED");
+  const reason = diagnostic?.message ?? (typeof operationError.message === "string" ? operationError.message : `verification ${verification.state}`);
+  const deploymentId = input.deploymentId ?? verification.deploymentId ?? null;
+  if (deploymentMismatch || code === "ACTIVE_DEPLOYMENT_MISMATCH") {
+    // Someone deployed, rolled back or paused the app in between: the
+    // caller's conflict to look at, and a release no longer live is not the
+    // copy's base (see isReplacedRelease).
+    const directory = runningCommand.args.get("directory");
+    throw callerFailure(new CliContractError(
+      "VERIFICATION_FAILED",
+      deploymentMismatch
+        ? `The release went live, but it was replaced before OpenCloud verified it: OpenCloud verified deployment ${verification.deploymentId ?? "none"} instead of ${input.deploymentId}.`
+        : `The release went live, but it was no longer the app's active release when OpenCloud verified it: ${reason}`,
+      {
+        fields: {
+          verificationId: verification.id,
+          verificationCode: "ACTIVE_DEPLOYMENT_MISMATCH",
+          ...(deploymentId ? { deploymentId } : {}),
+          ...(deploymentMismatch && verification.deploymentId ? { verifiedDeploymentId: verification.deploymentId } : {}),
+        },
+        hint: `Another release, a rollback or a pause changed the app meanwhile. To see what is live, run \`opencloud deployment list ${appId}\`.` +
+          (input.recordsBase
+            ? ` This copy's base (.opencloud/base.json) still names the release it was based on; to bring in the live one before deploying again, run \`opencloud pull ${directory === undefined ? "<directory>" : shellArgument(directory)}\`.`
+            : ""),
+      },
+    ));
+  }
+  const window = `--from ${input.since} --to ${new Date().toISOString()}`;
+  const logs = code.startsWith("COMPUTE_")
+    ? `\`opencloud logs ${appId} --page --surface container ${window}\``
+    : `\`opencloud logs ${appId} --page ${window}\``;
+  const back = input.previousDeploymentId
+    ? `\`opencloud deployment rollback ${appId} ${input.previousDeploymentId}\``
+    : `\`opencloud deployment rollback ${appId} <release-id>\` (\`opencloud deployment list ${appId}\` names them)`;
+  const failure = new CliContractError("VERIFICATION_FAILED",
+    `The release went live, but OpenCloud's verification of it failed with ${code}: ${reason}`, {
+      fields: {
+        verificationId: verification.id,
+        verificationCode: code,
+        ...(deploymentId ? { deploymentId } : {}),
+      },
+      hint: `The release is live. To see why, run ${logs}. To check it again, run \`opencloud app verify ${appId}\`. To go back to the earlier release, run ${back}.`,
+    });
+  // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+  throw isCallerVerificationFailure(verification, operationError, input.deploymentId) ? callerFailure(failure) : failure;
+}
+
+/**
+ * Follows a journaled operation. One OpenCloud ended as failed or cancelled
+ * is settled: its outcome is known and nothing waits on it, so the next
+ * request (with fixed source, say) is not held behind it.
+ */
+async function followJournaledOperation(run: MutationRun, input: Parameters<typeof followOperation>[0]): Promise<unknown> {
+  try {
+    return await followOperation(input);
+  } catch (error) {
+    if (error instanceof OperationTerminalError) await run.complete();
+    throw error;
+  }
 }
 
 async function outputDurableMutation(
@@ -659,6 +1038,13 @@ async function outputDurableMutation(
     control: OpenCloudClient,
     idempotencyKey: string,
   ) => Promise<unknown>,
+  /**
+   * After the operation succeeded, before its entry is settled: what to print
+   * instead. The entry settles once this returns or fails with a definite
+   * verification outcome; a timeout or a lost reply leaves it open, so the
+   * same command run again replays the operation and rejoins this step.
+   */
+  finish?: (completed: unknown, control: OpenCloudClient, run: MutationRun) => Promise<unknown>,
 ): Promise<void> {
   const context = input.ownerAccountLogin === true
     ? await ownerMutationContext(input.appId, input.cwd)
@@ -687,11 +1073,23 @@ async function outputDurableMutation(
       }
       await run.checkpointOperation(operation.id);
     }
-    const completed = await followOperation({
+    const completed = await followJournaledOperation(run, {
       client: context.control,
       started,
       options,
     });
+    if (finish) {
+      let finished: unknown;
+      try {
+        finished = await finish(completed, context.control, run);
+      } catch (error) {
+        if (isTerminalVerificationOutcome(error)) await run.complete();
+        throw error;
+      }
+      await run.complete();
+      await outputAsync(finished);
+      return;
+    }
     await outputAsync(completed);
     await run.complete();
   });
@@ -740,6 +1138,7 @@ interface DevSessionWire {
   appId: string;
   draftId: string;
   status: string;
+  baseDeploymentId: string | null;
   previewUrl: string;
   browserPreviewUrl: string;
   activeRevision: {
@@ -842,6 +1241,17 @@ async function removeDevStateIfMatching(
 function localBundle(sourceRoot: string) {
   return buildBundle(sourceRoot, { platformFrontend: true }).catch(
     (error: unknown) => {
+      if (isZodError(error)) {
+        // One line per problem in the author's manifest, not Zod's issue tree.
+        const problems = readableIssues(error.issues);
+        if (problems.length) {
+          throw callerFailure(new CliContractError(
+            "INVALID_MANIFEST",
+            issueSummary(authorManifestName(sourceRoot), problems),
+            { issues: problems },
+          ));
+        }
+      }
       // An invalid manifest or source tree is the caller's to fix, and its
       // details describe their files; a bundler or system fault is reported.
       throw isSourceValidationError(error) ? callerFailure(error) : error;
@@ -849,12 +1259,17 @@ function localBundle(sourceRoot: string) {
   );
 }
 
-function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {
-  return bundle.manifest.frontend.build !== undefined;
+/** The manifest the bundler reads, in its order; the YAML name when none exists. */
+function authorManifestName(sourceRoot: string): string {
+  return ["opencloud.yaml", "opencloud.yml", "opencloud.json"].find((name) =>
+    existsSync(path.join(sourceRoot, name)),
+  ) ?? "opencloud.yaml";
 }
 
-const PLATFORM_BUILD_VALIDATION_TIMEOUT_MS = 9 * 60_000;
-const PLATFORM_BUILD_BUSY_RETRIES = 20;
+function platformBuilt(bundle: Awaited<ReturnType<typeof buildBundle>>): boolean {
+  return "directory" in bundle.manifest.frontend && bundle.manifest.frontend.build !== undefined;
+}
+
 
 type DraftFiles = Map<string, { content: Buffer; sha256: string }>;
 
@@ -901,12 +1316,44 @@ function sourceOnlyFields(upload: DraftUpload): Partial<ReturnType<typeof source
   return upload.mode === "source" ? sourceOnlyResult(upload.sourceOnlyFiles) : {};
 }
 
+const COMPUTE_CAPABILITY_NAMES: Readonly<Record<string, string>> = {
+  jobs: "container jobs", services: "container services", workers: "container workers", containerFrontend: "a container frontend",
+};
+
+/**
+ * A manifest with containers, sent to an installation that doesn't run them,
+ * fails its validation with generic SDK-version and unknown-key diagnostics
+ * (2.35.x). The public /v1/installation names what an installation runs, so
+ * say it plainly first. An installation without that answer, or one this CLI
+ * can't read, is left to its own validation.
+ */
+async function assertContainersOffered(control: OpenCloudClient, bundle: Awaited<ReturnType<typeof buildBundle>>): Promise<void> {
+  const manifest = bundle.manifest;
+  if (manifest.schemaVersion !== 3 || (!manifest.containers?.length && !("container" in manifest.frontend))) return;
+  let installation: unknown;
+  try {
+    installation = await control.get("/v1/installation", { cacheControl: "no-cache" });
+  } catch {
+    return;
+  }
+  const view = installationViewSchema.safeParse(installation);
+  if (!view.success) return;
+  const compute = view.data.capabilities.compute;
+  const unsupported = unsupportedComputeCapabilities({ containers: manifest.containers ?? [], frontend: manifest.frontend }, compute);
+  if (!unsupported.length) return;
+  const missing = unsupported.map((name) => COMPUTE_CAPABILITY_NAMES[name] ?? name);
+  throw callerFailure(new CliContractError("COMPUTE_NOT_OFFERED", Object.values(compute).some(Boolean)
+    ? `This installation doesn't run ${missing.join(" or ")}. Remove them from ${bundle.sourceManifest} to use this app here.`
+    : `This installation doesn't run containers. Remove the containers, and a container frontend, from ${bundle.sourceManifest} to use this app here.`));
+}
+
 /** Chooses how a draft is uploaded, from what this API supports. */
 async function planDraftUpload(
   control: OpenCloudClient,
   sourceRoot: string,
   bundle: Awaited<ReturnType<typeof buildBundle>>,
 ): Promise<DraftUpload> {
+  await assertContainersOffered(control, bundle);
   const bundleOnly = async (): Promise<DraftUpload> => ({
     mode: "bundle",
     files: await bundleDraftFiles(sourceRoot, bundle),
@@ -922,10 +1369,10 @@ async function planDraftUpload(
     );
   }
   if (!contracts.releaseSource) return bundleOnly();
-  const output = `${bundle.manifest.frontend.directory}/`;
+  const output = "directory" in bundle.manifest.frontend ? `${bundle.manifest.frontend.directory}/` : null;
   const collected = await collectSourceTree(sourceRoot);
   // OpenCloud builds this directory itself, so a local build is never sent.
-  const tree = built
+  const tree = built && output !== null
     ? { ...collected, files: collected.files.filter((file) => !file.path.startsWith(output)) }
     : collected;
   const files: DraftFiles = new Map(
@@ -1010,6 +1457,131 @@ async function settleStaleReleaseRefusal<T>(
   }
 }
 
+/**
+ * The way forward from a deploy OpenCloud refused with ACTIVE_DEPLOYMENT_CHANGED,
+ * with this copy's directory and the release to base it on. After a
+ * rollback (this copy's base is now rolled_back), recording the live release
+ * as the base is enough: it is older, so this copy already has it. After
+ * someone else's newer release, pull that release first.
+ */
+async function withStaleReleaseHint<T>(
+  control: OpenCloudClient,
+  appId: string,
+  directory: string,
+  request: Promise<T>,
+  action: "deploy" | "dev-start" = "deploy",
+): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409 && error.code === "ACTIVE_DEPLOYMENT_CHANGED") {
+      const details = (error.details && typeof error.details === "object" ? error.details : {}) as Record<string, unknown>;
+      const uuid = (value: unknown) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+      const latest = uuid(details.latestDeploymentId) ?? uuid(details.actualActiveDeploymentId);
+      const base = uuid(details.expectedActiveDeploymentId);
+      if (latest) {
+        const release = typeof details.latestVersion === "string" ? `release ${details.latestVersion} (${latest})` : `release ${latest}`;
+        const baseState = base
+          ? await control.get(`/v1/apps/${encoded(appId)}/deployments/${encoded(base)}`)
+            .then((value) => (value as { state?: unknown }).state, () => null)
+          : null;
+        const dir = shellArgument(directory);
+        if (action === "dev-start") {
+          withHint(error, baseState === "rolled_back"
+            ? `The release this copy is based on was rolled back, and ${release} is live. To start a dev session over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then run \`opencloud app dev start ${dir}\` again; or pass --force.`
+            : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then run \`opencloud app dev start ${dir}\` again; or pass --force.`);
+        } else {
+          withHint(error, baseState === "rolled_back"
+            ? `The release this copy is based on was rolled back, and ${release} is live. To deploy this copy over it, run \`opencloud pull ${dir} --deployment ${latest} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`
+            : `${release[0]!.toUpperCase()}${release.slice(1)} replaced the one this copy is based on. Run \`opencloud pull ${dir}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${dir} --deployment ${latest} --merged\`), then deploy again; or deploy with --force to replace it.`);
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+/** The command that failed with its journal entry's key: running it again resumes that entry. */
+function rerunCommand(run: MutationRun): string {
+  return `\`${commandLine(runningCommand.route, [...runningCommand.args.values()])} --idempotency-key ${shellArgument(run.idempotencyKey)}\``;
+}
+
+/**
+ * The draft an earlier run of this deploy validated and may already have
+ * sent to deployDraft: its reply was lost (a timeout, a reset connection) or
+ * the run was killed before it saved the operation. While the draft still
+ * holds the revision that run validated, and is validated or deployed, the
+ * deploy is sent again with its own key (see resendDeploy), never
+ * synchronized again: OpenCloud refuses to update a deployed draft, which
+ * used to settle the entry, and the next run then released the same source a
+ * second time. The contract's `deploying` status, which OpenCloud doesn't
+ * write today, is taken the same way, so it can never lead there either.
+ * Null when the deploy can't have been sent, or the draft changed since, so
+ * the run applies and validates as usual.
+ */
+async function sentDeployDraft(
+  control: OpenCloudClient,
+  run: MutationRun,
+  appId: string,
+): Promise<string | null> {
+  const checkpoint = run.checkpoint;
+  if (!run.attempted || checkpoint?.stage !== "validated" || !checkpoint.draftId || checkpoint.revision === undefined) {
+    return null;
+  }
+  const draft = await control.call("getDraft", { appId, draftId: checkpoint.draftId }).catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  });
+  return draft && draft.revision === checkpoint.revision && ["validated", "deploying", "deployed"].includes(draft.status)
+    ? draft.id
+    : null;
+}
+
+/**
+ * Sends a deploy an earlier run may have sent (see sentDeployDraft) again
+ * with the same key: OpenCloud looks the key up first and answers with the
+ * release that request started, or starts it if the request never arrived.
+ * The entry is not settled on the way, so no later run deploys the source a
+ * second time; an answer this can't read is thrown with the entry kept, and
+ * the next run sends it again. ACTIVE_DEPLOYMENT_CHANGED may come from the
+ * first request still starting its release; sent again, the key answers with
+ * that release, so only a second refusal of a draft that never deployed is
+ * the stale copy it says, settled as any other.
+ */
+async function resendDeploy(
+  control: OpenCloudClient,
+  run: MutationRun,
+  input: { appId: string; draftId: string; query?: { expectedActiveDeploymentId: string } },
+  options: OperationOptions,
+  directory: string,
+): Promise<unknown> {
+  const intervalMs = parseBoundedNumber(options.interval, "--interval", 0.05, 60, false) * 1_000;
+  await run.markAttempted();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await control.call("deployDraft", input, {
+        idempotencyKey: childIdempotencyKey(run, "deploy"),
+        timeoutMs: 120_000,
+      });
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 409) throw error;
+      const stale = error.code === "ACTIVE_DEPLOYMENT_CHANGED";
+      if (stale && attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        continue;
+      }
+      const current = (await control.call("getDraft", { appId: input.appId, draftId: input.draftId })).status;
+      if (stale && current === "validated") {
+        return withStaleReleaseHint(control, input.appId, directory, settleStaleReleaseRefusal(run, Promise.reject(error)));
+      }
+      // A deployed draft's release is OpenCloud's to name; refused, this
+      // command can't tell what that deploy did.
+      if (current === "deployed" && (stale || isDefiniteRefusal(error))) await run.markUnknown("DEPLOY_OUTCOME_UNKNOWN");
+      throw error;
+    }
+  }
+}
+
 /** Records the release a working copy now matches, after it went live. */
 async function recordReleaseBase(
   control: OpenCloudClient,
@@ -1051,6 +1623,26 @@ async function recordReleaseBase(
   });
 }
 
+/**
+ * The development session's draft can't take changes any more: a promotion
+ * deployed it (a release OpenCloud compensated leaves it deployed too) or it
+ * was discarded. `app dev start` resumes the folder's session, so it can't
+ * be the way out; stopping that session clears the folder, and a start then
+ * begins a new session from a new draft. Start doesn't stop it by itself:
+ * the folder's state is the only handle on that session, which may still be
+ * running containers.
+ */
+function devDraftClosed(draftId: string, status: string): Error {
+  const directory = runningCommand.args.get("directory");
+  const dir = directory === undefined ? "<directory>" : shellArgument(directory);
+  const why = status === "discarded" ? "it was discarded" : "a promotion deployed it (one whose release then failed does too)";
+  return callerFailure(new CliContractError("DEV_DRAFT_CLOSED",
+    `This folder's development session works on draft ${draftId}, which is ${status}, so it can't take changes: ${why}.`, {
+      fields: { draftId },
+      hint: `Run \`opencloud app dev stop ${dir}\` to stop that session, then \`opencloud app dev start ${dir}\` to start a new one from this copy.`,
+    }));
+}
+
 async function synchronizeValidatedDraft(
   control: OpenCloudClient,
   sourceRoot: string,
@@ -1063,10 +1655,36 @@ async function synchronizeValidatedDraft(
   appId: string;
   draftId: string;
   artifactSha256: string;
+  revision: number;
   validation: unknown;
 }> {
+  run.failIfUnknown();
+  // A validation OpenCloud may still be running (one it said is running, or
+  // one whose reply never came) is rejoined for its exact draft and revision.
+  const retainedValidation = run.checkpoint?.validation;
+  let validationProgress = retainedValidation?.state === "progress" || retainedValidation?.state === "dispatched"
+    ? retainedValidation : null;
+  // A deploy finds its draft only through the validation it rejoins; a
+  // development workflow names its own.
+  const hadExplicitDraft = existingDraftId !== undefined;
+  const draftFromRejoin = validationProgress !== null && !hadExplicitDraft;
+  /**
+   * The kept validation no longer describes the draft (edited elsewhere, or
+   * holding other files): forget it and resume as an ordinary run, which
+   * applies this source again and validates the new revision.
+   */
+  const dropKeptValidation = async () => {
+    await run.dropValidation();
+    validationProgress = null;
+  };
+  if (validationProgress) {
+    if (existingDraftId && existingDraftId !== validationProgress.draftId) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress belongs to a different source draft");
+    }
+    existingDraftId = validationProgress.draftId;
+  }
   printBundleFiles(bundle.files);
-  printBundleWarnings(bundle.warnings);
+  printBundleWarnings([...bundle.warnings, ...cliBundleWarnings(bundle)]);
   const note = sourceOnlyNote(upload.sourceOnlyFiles, platformBuilt(bundle));
   if (note) process.stderr.write(`${note}\n`);
   if (
@@ -1092,13 +1710,26 @@ async function synchronizeValidatedDraft(
     const existing = await control.call("getDraft", {
       appId: bundle.manifest.appId,
       draftId: existingDraftId,
+    }).catch(async (error: unknown) => {
+      if (draftFromRejoin && error instanceof ApiError && error.status === 404) {
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The draft this command was waiting on (${existingDraftId}) no longer exists, so its validation can't be rejoined. Nothing was sent; run the command again to start from a new draft.`));
+      }
+      throw error;
     });
     if (["deploying", "deployed", "discarded"].includes(existing.status)) {
-      throw callerFailure(new Error(
-        `The local dev draft is ${existing.status}; start a new dev session for the next change.`,
-      ));
+      if (draftFromRejoin) {
+        // Closed elsewhere after this command stopped waiting: there is
+        // nothing to rejoin, so the next run starts from a new draft.
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The draft this command was waiting on (${existing.id}) is ${existing.status} now, so its validation can't be rejoined. Nothing was sent; run the command again to start from a new draft.`));
+      }
+      throw devDraftClosed(existing.id, existing.status);
     }
     draft = { id: existing.id, revision: existing.revision };
+    if (validationProgress && draft.revision !== validationProgress.revision) await dropKeptValidation();
   } else {
     await run.markAttempted();
     const created = await control.call(
@@ -1131,16 +1762,34 @@ async function synchronizeValidatedDraft(
   });
   let revision = draft.revision;
   let appliedCount = 0;
-  const applyAndValidate = async (local: DraftFiles) => {
+  /**
+   * The source with OpenCloud's canonical opencloud.json in place of the
+   * author manifest, as stored when OpenCloud resolves that manifest
+   * differently from this CLI (usually an unpinned runtime.sdk.version).
+   */
+  const canonicalFiles = (): DraftFiles => {
+    const canonical: DraftFiles = new Map(upload.files);
+    canonical.delete(bundle.sourceManifest);
+    const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
+    canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
+    return canonical;
+  };
+  const sameFiles = (local: DraftFiles, remote: Map<string, { sha256: string }>) =>
+    local.size === remote.size && [...local].every(([file, value]) => remote.get(file)?.sha256 === value.sha256);
+  const applyAndValidate = async (source: DraftFiles) => {
+  let local = source;
   for (let iteration = 0; iteration < 10_000; iteration += 1) {
     const current = await control.call("getDraft", {
       appId: bundle.manifest.appId,
       draftId: draft.id,
     });
     if (["deploying", "deployed", "discarded"].includes(current.status)) {
-      throw callerFailure(new Error(
-        `The source draft is ${current.status}; start a new workflow for the next change.`,
-      ));
+      if (!hadExplicitDraft || draftFromRejoin) {
+        await run.settleValidation("refused");
+        throw callerFailure(new CliContractError("DRAFT_NOT_OPEN",
+          `The source draft (${draft.id}) is ${current.status} now, so it can't be updated or validated. Run the command again to start from a new draft.`));
+      }
+      throw devDraftClosed(draft.id, current.status);
     }
     revision = current.revision;
     const remoteFiles = await control.call("listDraftFiles", {
@@ -1178,6 +1827,15 @@ async function synchronizeValidatedDraft(
     }
     changes.sort((left, right) => left.path.localeCompare(right.path));
     if (!changes.length) break;
+    if (validationProgress) {
+      // The kept validation is of this source's canonical manifest (a second
+      // validation stopped): rejoin it as the draft holds it.
+      if (upload.mode === "source" && sameFiles(canonicalFiles(), remote)) {
+        local = canonicalFiles();
+        break;
+      }
+      await dropKeptValidation();
+    }
     const batch = changes.slice(0, 200);
     await run.checkpointStage({
       stage: "applying",
@@ -1212,15 +1870,23 @@ async function synchronizeValidatedDraft(
     });
   }
   await run.markAttempted();
-  const result = await validateWithPlatformBuild(control, bundle, draft.id).catch(
-    async (error: unknown) => {
-      // A build that never started changed nothing; the next attempt starts afresh.
-      if (error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY") {
-        await run.complete();
-      }
-      throw error;
-    },
-  );
+  const result = await validateDraftWithProgress(control, {
+    appId: bundle.manifest.appId, draftId: draft.id, revision, journal: run,
+    pinned: (await releaseContracts(control)).pinnedDraftValidation,
+    manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: platformBuilt(bundle) },
+  });
+  if (validationProgress) {
+    const receipt = run.checkpoint?.validation;
+    if (receipt?.state !== "result" || receipt.draftId !== validationProgress.draftId ||
+        receipt.revision !== validationProgress.revision || receipt.requestSha256 !== validationProgress.requestSha256 ||
+        receipt.validationId !== result.id ||
+        receipt.passed !== result.passed || receipt.artifactSha256 !== result.artifactSha256) {
+      throw new CliContractError("MUTATION_REPLAY_MISMATCH", "Validation progress has no matching durable result; no files were overwritten");
+    }
+    // Canonical manifest normalization is a new deliberate edit after the
+    // exact pending validation has returned and its result is durable.
+    validationProgress = null;
+  }
   if (!result.passed) {
     printValidationErrors(result.diagnostics);
     // A definite validation failure changed nothing live, so the next attempt,
@@ -1246,6 +1912,7 @@ async function synchronizeValidatedDraft(
       appId: bundle.manifest.appId,
       draftId: draft.id,
       artifactSha256: validation.artifactSha256!,
+      revision: validation.revision,
       validation,
     };
   }
@@ -1261,14 +1928,13 @@ async function synchronizeValidatedDraft(
     process.stderr.write(brandText(
       `OpenCloud resolved ${bundle.sourceManifest} differently from this CLI (${identity.comparison.manifestKeys.join(", ")}); storing the canonical opencloud.json with the release source.\n`,
     ));
-    const canonical: DraftFiles = new Map(upload.files);
-    canonical.delete(bundle.sourceManifest);
-    const manifest = Buffer.from(serializeBundleManifest(bundle.manifest));
-    canonical.set("opencloud.json", { content: manifest, sha256: sha256Hex(manifest) });
-    validation = await applyAndValidate(canonical);
+    validation = await applyAndValidate(canonicalFiles());
     identity = await validatedArtifactIdentity(control, bundle, draft.id, validation);
   }
   if (identity.artifactSha256 === null) {
+    // Nothing went live, and the next attempt, usually with changed source,
+    // starts afresh instead of being held behind this one until a new key.
+    await run.complete();
     throw new CliContractError(
       "ARTIFACT_MISMATCH",
       describeArtifactMismatch(
@@ -1291,6 +1957,7 @@ async function synchronizeValidatedDraft(
     appId: bundle.manifest.appId,
     draftId: draft.id,
     artifactSha256: identity.artifactSha256,
+    revision: validation.revision,
     validation,
   };
 }
@@ -1350,30 +2017,6 @@ async function validatedArtifactIdentity(
     comparison,
     draftChanged: current.revision !== validation.revision,
   };
-}
-
-/** Validates a draft, allowing for a platform frontend build and waiting while another runs. */
-async function validateWithPlatformBuild(
-  control: OpenCloudClient,
-  bundle: Awaited<ReturnType<typeof buildBundle>>,
-  draftId: string,
-) {
-  const built = platformBuilt(bundle);
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await control.call(
-        "validateDraft",
-        { appId: bundle.manifest.appId, draftId, body: {} },
-        built ? { timeoutMs: PLATFORM_BUILD_VALIDATION_TIMEOUT_MS } : {},
-      );
-    } catch (error) {
-      const busy =
-        built && error instanceof ApiError && error.code === "FRONTEND_BUILD_BUSY";
-      if (!busy || attempt >= PLATFORM_BUILD_BUSY_RETRIES) throw error;
-      process.stderr.write("Another frontend build for this app is running; retrying.\n");
-      await new Promise((resolve) => setTimeout(resolve, 6_000));
-    }
-  }
 }
 
 function printValidationErrors(
@@ -1470,6 +2113,15 @@ function idempotencyKey(options: { idempotencyKey?: string }): string {
     throw new CliContractError(
       "INVALID_IDEMPOTENCY_KEY",
       "--idempotency-key must contain 8 through 200 characters",
+    );
+  }
+  // Sent as a header and kept by OpenCloud with the request, so a pasted
+  // credential is refused here too, as the journal refuses it, never repeated.
+  const credential = credentialShape(key);
+  if (credential) {
+    throw new CliContractError(
+      "INVALID_IDEMPOTENCY_KEY",
+      `This idempotency key looks like ${credential}; don't put credentials in idempotency keys. Choose a key that names the change, such as import-2026-11-20-1.`,
     );
   }
   return key;
@@ -2284,7 +2936,8 @@ app
         storedIn: connected.stored.location,
         expiresAt: connected.stored.credential.expiresAt,
       },
-      next: brandText("Codex can now build, validate, preview, and deploy this app with the OpenCloud CLI."),
+      // People and every kind of agent run this command; name neither.
+      next: brandText("This folder is connected. OpenCloud CLI commands run here can now build, validate, preview, and deploy this app."),
     });
   });
 
@@ -2455,12 +3108,40 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
+        const hints = { directory: String(directory), command: "start" } as const;
+        /**
+         * After a refused or unconfirmed apply, the session this start made
+         * stays usable. Keep it in the folder, which named none, so the next
+         * start retries with it instead of leaving it behind, and status,
+         * containers, logs and stop reach it. Never while an apply may still
+         * be running: only once the journal settled it or its time ran out.
+         */
+        const keepSession = async (error: unknown) => {
+          const sessionId = run.checkpoint?.sessionId;
+          const settled = run.completed || (error instanceof MutationJournalError && error.code === "DEV_APPLY_OUTCOME_UNKNOWN");
+          if (previous || !sessionId || !settled) return;
+          try {
+            const kept = (await context.control.call("getDevSession", { appId, sessionId })) as DevSessionWire;
+            if (kept.appId === appId && kept.id === sessionId) await storeDevSession(sourceRoot, bundle.sha256, kept);
+          } catch {
+            // Best effort: the failure being reported matters more.
+          }
+        };
+        try {
+        const recovered = await resumeDevApply(context.control, run, { appId, artifactSha256: bundle.sha256, ...hints });
+        if (recovered) {
+          await storeDevSession(sourceRoot, bundle.sha256, recovered);
+          await outputAsync({ session: recovered, validation: null, reconciled: true, localState: devStatePath(sourceRoot), ...sourceOnlyFields(upload) });
+          await run.complete();
+          return;
+        }
         run.failIfUnknown();
         const retained = run.checkpoint;
         let synchronized: {
           appId: string;
           draftId: string;
           artifactSha256: string;
+          revision: number;
           validation: unknown;
         };
         if (
@@ -2469,10 +3150,11 @@ dev
           retained.draftId &&
           retained.artifactSha256 === bundle.sha256
         ) {
-          const validation = await context.control.call("validateDraft", {
-            appId,
-            draftId: retained.draftId,
-            body: {},
+          const validation = await validateDraftWithProgress(context.control, {
+            appId, draftId: retained.draftId, pinned: (await releaseContracts(context.control)).pinnedDraftValidation,
+            revision: retained.revision ?? (await context.control.call("getDraft", { appId, draftId: retained.draftId })).revision,
+            journal: run,
+            manifest: { containerCount: bundle.manifest.schemaVersion === 3 ? bundle.manifest.containers?.length ?? 0 : 0, frontendBuild: false },
           });
           const identity = validation.passed
             ? await validatedArtifactIdentity(
@@ -2492,6 +3174,7 @@ dev
             appId,
             draftId: retained.draftId,
             artifactSha256: identity.artifactSha256,
+            revision: validation.revision,
             validation,
           };
         } else {
@@ -2505,37 +3188,47 @@ dev
           );
         }
         await run.markAttempted();
-        const session = (await settleStaleReleaseRefusal(run, context.control.call(
-          "startDevSession",
-          {
-            appId,
-            draftId: synchronized.draftId,
-            body: {
-              apply: true,
-              ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+        const created = (await withStaleReleaseHint(
+          context.control,
+          appId,
+          String(directory),
+          settleStaleReleaseRefusal(run, context.control.call(
+            "startDevSession",
+            {
+              appId,
+              draftId: synchronized.draftId,
+              body: {
+                apply: false,
+                ...(expectedActiveDeploymentId ? { expectedActiveDeploymentId } : {}),
+              },
             },
-          },
-          { idempotencyKey: childIdempotencyKey(run, "dev-start") },
-        ))) as DevSessionWire;
+            { idempotencyKey: childIdempotencyKey(run, "dev-start") },
+          )),
+          "dev-start",
+        )) as DevSessionWire;
         if (
-          session.appId !== appId ||
-          session.draftId !== synchronized.draftId ||
-          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
-          (retained?.sessionId && retained.sessionId !== session.id)
+          created.appId !== appId ||
+          created.draftId !== synchronized.draftId ||
+          (retained?.sessionId && retained.sessionId !== created.id)
         ) {
           throw new CliContractError(
             "MUTATION_REPLAY_MISMATCH",
-            "OpenCloud did not return the exact journaled development session and artifact",
+            "OpenCloud did not return the exact journaled development session",
           );
         }
         await run.checkpointStage({
-          stage: "session_started",
+          stage: "dev_session_created",
           artifactSha256: bundle.sha256,
+          serverArtifactSha256: synchronized.artifactSha256,
           draftId: synchronized.draftId,
-          sessionId: session.id,
-          activeRevisionId: session.activeRevision.id,
-          revision: session.activeRevision.draftRevision,
+          sessionId: created.id,
+          baseDeploymentId: created.baseDeploymentId,
+          revision: synchronized.revision,
         });
+        const session = await applyDevRevisionOnce(context.control, run, {
+          appId, draftId: synchronized.draftId, sessionId: created.id, revision: synchronized.revision,
+          artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: created.baseDeploymentId,
+        }, childIdempotencyKey(run, "dev-apply"), hints);
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,
@@ -2551,6 +3244,10 @@ dev
           ...sourceOnlyFields(upload),
         });
         await run.complete();
+        } catch (error) {
+          await keepSession(error);
+          throw error;
+        }
       },
     );
     });
@@ -2587,8 +3284,16 @@ dev
         cwd: sourceRoot,
       }),
       async (run) => {
+        const hints = { directory: String(directory), command: "sync" } as const;
+        const recovered = await resumeDevApply(context.control, run, { appId: state.appId, artifactSha256: bundle.sha256,
+          sessionId: state.sessionId, draftId: state.draftId, ...hints });
+        if (recovered) {
+          await storeDevSession(sourceRoot, bundle.sha256, recovered);
+          await outputAsync({ session: recovered, validation: null, reconciled: true, ...sourceOnlyFields(upload) });
+          await run.complete();
+          return;
+        }
         run.failIfUnknown();
-        const retained = run.checkpoint;
         const synchronized = await synchronizeValidatedDraft(
           context.control,
           sourceRoot,
@@ -2597,31 +3302,11 @@ dev
           upload,
           state.draftId,
         );
-        await run.markAttempted();
-        const session = (await context.control.call(
-          "applyDevRevision",
-          { appId: state.appId, sessionId: state.sessionId },
-          { idempotencyKey: childIdempotencyKey(run, "dev-apply") },
-        )) as DevSessionWire;
-        if (
-          session.id !== state.sessionId ||
-          session.draftId !== state.draftId ||
-          session.activeRevision?.artifactSha256 !== synchronized.artifactSha256 ||
-          (retained?.sessionId && retained.sessionId !== session.id)
-        ) {
-          throw new CliContractError(
-            "MUTATION_REPLAY_MISMATCH",
-            "OpenCloud did not apply the exact journaled development revision",
-          );
-        }
-        await run.checkpointStage({
-          stage: "session_applied",
-          artifactSha256: bundle.sha256,
-          draftId: state.draftId,
-          sessionId: session.id,
-          activeRevisionId: session.activeRevision.id,
-          revision: session.activeRevision.draftRevision,
-        });
+        const current = await context.control.call("getDevSession", { appId: state.appId, sessionId: state.sessionId });
+        const session = await applyDevRevisionOnce(context.control, run, {
+          appId: state.appId, draftId: state.draftId, sessionId: state.sessionId, revision: synchronized.revision,
+          artifactSha256: bundle.sha256, serverArtifactSha256: synchronized.artifactSha256, baseDeploymentId: current.baseDeploymentId,
+        }, childIdempotencyKey(run, "dev-apply"), hints);
         await storeDevSession(sourceRoot, bundle.sha256, session);
         await outputAsync({
           session,
@@ -3209,6 +3894,15 @@ dev
           sessionId: state.sessionId,
         })) as DevSessionWire;
         const checkpoint = run.checkpoint;
+        if (!checkpoint && !session.activeRevision) {
+          // A start whose apply was refused keeps its session for the retry.
+          await run.complete();
+          throw callerFailure(new CliContractError(
+            "DEV_REVISION_NOT_APPLIED",
+            "The development session has no applied revision yet, so there is nothing to verify. No verification was started.",
+            { hint: `Run \`${commandLine(["app", "dev", "sync"], [String(directory)])}\` to apply your files, then verify.` },
+          ));
+        }
         const activeRevisionId =
           checkpoint?.activeRevisionId ?? session.activeRevision?.id;
         const artifactSha256 =
@@ -3528,12 +4222,18 @@ dev
           return;
         }
 
-        const deploymentOperation = await followDurableOperation(
-          context.control,
-          promotionOperation.id,
-          intervalMs,
-          timeoutMs,
-        );
+        let deploymentOperation: NonNullable<ReturnType<typeof operationFrom>>;
+        try {
+          deploymentOperation = await followDurableOperation(
+            context.control,
+            promotionOperation.id,
+            intervalMs,
+            timeoutMs,
+          );
+        } catch (error) {
+          if (error instanceof OperationTerminalError) await run.complete();
+          throw error;
+        }
         await run.checkpointStage({
           stage: "promoted",
           artifactSha256: bundle.sha256,
@@ -3619,9 +4319,8 @@ dev
             "VERIFICATION_FAILED",
             "Production verification failed; dev remains available for repair",
           );
-          // An app that failed its checks is the caller's to repair; anything else is a fault.
-          throw finalVerification.state === "failed" &&
-            finalVerification.deploymentId === result.deployment.id
+          // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+          throw isCallerVerificationFailure(finalVerification, undefined, result.deployment.id)
             ? callerFailure(failure)
             : failure;
         }
@@ -3835,30 +4534,99 @@ dev
     });
   });
 
+/** The most a request body read for `app request` may hold: a container route's limit. */
+const APP_REQUEST_BODY_LIMIT = 32 * 1024 * 1024;
+
 app
   .command("request")
   .description(
-    "Request an app path through the edge without printing the response body",
+    "Send one request to the live app through the edge, signed out or with an app access token; the response body is printed only with --show-body",
   )
   .argument("<app-id>")
   .argument("[path]", "same-origin app path", "/")
   .addOption(
     new Option("--method <method>", "HTTP method")
-      .choices(["GET", "HEAD"])
+      .choices([...APP_REQUEST_METHODS])
       .default("GET"),
   )
+  .option("--body <text>", "request body; not with GET or HEAD")
+  .option("--body-file <path>", "read the request body from this file instead")
+  .option("--content-type <type>", "request body type (default application/json for JSON, otherwise text/plain)")
+  .option(
+    "--access-token-env <name>",
+    "name of an environment variable holding an app access token (oc_app_…) the owner revealed in the browser; the request then acts as the owner. Never pass the token itself",
+  )
+  .option("--show-body", "print up to 64 KiB of the response body")
+  .option("--timeout <seconds>", "maximum wait for the response", "30")
   .action(async (appId, requestPath, options) => {
+    const method = options.method as AppRequestMethod;
+    if (options.body !== undefined && options.bodyFile !== undefined) {
+      throw new CliContractError("INVALID_OPTION", "Pass --body or --body-file, not both");
+    }
+    const hasBody = options.body !== undefined || options.bodyFile !== undefined;
+    if (hasBody && (method === "GET" || method === "HEAD")) {
+      throw new CliContractError("INVALID_OPTION", `A ${method} request has no body; choose another --method`);
+    }
+    if (options.contentType !== undefined && !hasBody) {
+      throw new CliContractError("INVALID_OPTION", "--content-type needs --body or --body-file");
+    }
+    const timeoutMs = parseBoundedNumber(options.timeout, "--timeout", 1, 600) * 1_000;
+    let body: { content: Buffer; contentType: string } | undefined;
+    if (hasBody) {
+      const content = options.body !== undefined
+        ? Buffer.from(String(options.body))
+        : await readFile(callerPath(String(options.bodyFile))).catch((error: unknown) => {
+          throw callerFailure(error);
+        });
+      if (content.length > APP_REQUEST_BODY_LIMIT) {
+        throw new CliContractError("INVALID_OPTION", `The request body exceeds ${APP_REQUEST_BODY_LIMIT} bytes`);
+      }
+      body = { content, contentType: options.contentType ?? (isJsonText(content) ? "application/json" : "text/plain; charset=utf-8") };
+    }
+    // Read from the environment the person named, never from an argument, so
+    // it stays out of process listings, shell history and this command's output.
+    let accessToken: string | undefined;
+    if (options.accessTokenEnv !== undefined) {
+      const name = String(options.accessTokenEnv);
+      // A token given here by mistake is refused without being repeated. Only
+      // a value shaped like one is taken for it: OC_FOO is a variable's name.
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || credentialShape(name)) {
+        throw new CliContractError("INVALID_OPTION", "--access-token-env takes the name of an environment variable, not the token");
+      }
+      accessToken = process.env[name]?.trim() || undefined;
+      if (!accessToken) {
+        throw new CliContractError("ACCESS_TOKEN_MISSING", `The environment variable ${name} is not set. Put the app access token the owner revealed in the browser there; never on the command line.`);
+      }
+      if (!/^oc_app_[A-Za-z0-9_-]{16,500}$/.test(accessToken)) {
+        throw new CliContractError("ACCESS_TOKEN_INVALID", `The environment variable ${name} does not hold an app access token (oc_app_…); only those are sent to the app.`);
+      }
+      // Kept out of an error report too, whatever a message might quote.
+      invocation.privateValues = [...invocation.privateValues, accessToken];
+    }
     const value = await client().get(`/v1/apps/${appId}`);
     const edgeUrl = process.env.OPENCLOUD_EDGE_URL;
     const publicEdgeHost = process.env.OPENCLOUD_PUBLIC_EDGE_HOST;
     output(
       await requestApp(value, requestPath, {
-        method: options.method as "GET" | "HEAD",
+        method,
+        ...(body ? { body } : {}),
+        ...(accessToken ? { accessToken } : {}),
+        showBody: options.showBody === true,
+        timeoutMs,
         ...(edgeUrl ? { edgeUrl } : {}),
         ...(publicEdgeHost ? { publicEdgeHost } : {}),
       }),
     );
   });
+
+function isJsonText(content: Buffer): boolean {
+  try {
+    JSON.parse(content.toString("utf8"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 addOperationOptions(
   app
@@ -3926,7 +4694,7 @@ addOperationOptions(
         });
         started = response;
       }
-      const completed = await followOperation({
+      const completed = await followJournaledOperation(run, {
         client: context.control,
         started,
         options,
@@ -3947,12 +4715,13 @@ addOperationOptions(
         verificationId,
       });
       if (result.state !== "passed") {
+        await run.complete();
         const failure = new CliContractError(
           "VERIFICATION_FAILED",
           `OpenCloud verification ${result.id} finished in state ${result.state}`,
         );
-        // An app that failed its checks is the caller's to repair; anything else is a fault.
-        throw result.state === "failed" ? callerFailure(failure) : failure;
+        // Only app- or policy-caused verification failures are the caller's to repair; platform faults are reported.
+        throw isCallerVerificationFailure(result) ? callerFailure(failure) : failure;
       }
       await outputAsync({
         ...(completed as Record<string, unknown>),
@@ -4526,11 +5295,11 @@ draft
           await run.checkpointStage({ stage: "validating", revision });
         }
         await run.markAttempted();
-        const result = await context.control.post(
-          `/v1/apps/${encoded(appId)}/drafts/${encoded(draftId)}/validate`,
-          legacyVersion ? { version: legacyVersion } : {},
-          run.idempotencyKey,
-        );
+        const result = await validateDraftWithProgress(context.control, {
+          appId: String(appId), draftId: String(draftId), revision, journal: run,
+          pinned: (await releaseContracts(context.control)).pinnedDraftValidation,
+          ...(legacyVersion ? { version: legacyVersion } : {}), idempotencyKey: run.idempotencyKey,
+        });
         if (
           !result ||
           typeof result !== "object" ||
@@ -4656,7 +5425,7 @@ program
         frontend: { directory: "frontend", spa: true },
         runtime: {
           sdk: {
-            version: OPEN_CLOUD_SDK_VERSION,
+            version: DEFAULT_SDK_VERSION,
           },
         },
         files: { access: "user", maxUploadBytes: 50 * 1024 * 1024 },
@@ -4704,9 +5473,11 @@ addOperationOptions(
     .option(
       "--force",
       "Deploy even if a newer release replaced the one this copy is based on",
-    ),
+    )
+    .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
 ).action(
-  async (directory, options: OperationOptions & { force?: boolean }) => {
+  async (directory, options: OperationOptions & { force?: boolean; verify?: boolean }) => {
+    const since = new Date().toISOString();
     const sourceRoot = callerPath(directory);
     const bundle = await localBundle(sourceRoot);
     process.stderr.write(
@@ -4753,7 +5524,7 @@ addOperationOptions(
               "The deployment checkpoint is missing its source draft",
             );
           }
-          started = await settleStaleReleaseRefusal(
+          started = await withStaleReleaseHint(context.control, appId, String(directory), settleStaleReleaseRefusal(
             run,
             context.control.call(
               "deployDraft",
@@ -4763,7 +5534,7 @@ addOperationOptions(
                 timeoutMs: 120_000,
               },
             ),
-          );
+          ));
           if (operationFrom(started)?.id !== run.operationId) {
             throw new CliContractError(
               "MUTATION_REPLAY_MISMATCH",
@@ -4771,28 +5542,34 @@ addOperationOptions(
             );
           }
         } else {
-          const synchronized = await synchronizeValidatedDraft(
-            context.control,
-            sourceRoot,
-            bundle,
-            run,
-            upload,
-            undefined,
-            "CLI",
-          );
-          draftId = synchronized.draftId;
-          await run.markAttempted();
-          started = await settleStaleReleaseRefusal(
-            run,
-            context.control.call(
-              "deployDraft",
-              deployInput(draftId),
-              {
-                idempotencyKey: childIdempotencyKey(run, "deploy"),
-                timeoutMs: 120_000,
-              },
-            ),
-          );
+          const sentDraftId = await sentDeployDraft(context.control, run, appId);
+          if (sentDraftId) {
+            draftId = sentDraftId;
+            started = await resendDeploy(context.control, run, deployInput(draftId), options, String(directory));
+          } else {
+            const synchronized = await synchronizeValidatedDraft(
+              context.control,
+              sourceRoot,
+              bundle,
+              run,
+              upload,
+              undefined,
+              "CLI",
+            );
+            draftId = synchronized.draftId;
+            await run.markAttempted();
+            started = await withStaleReleaseHint(context.control, appId, String(directory), settleStaleReleaseRefusal(
+              run,
+              context.control.call(
+                "deployDraft",
+                deployInput(draftId),
+                {
+                  idempotencyKey: childIdempotencyKey(run, "deploy"),
+                  timeoutMs: 120_000,
+                },
+              ),
+            ));
+          }
           const operation = operationFrom(started);
           if (!operation) {
             throw new CliContractError(
@@ -4807,26 +5584,56 @@ addOperationOptions(
             operationId: operation.id,
           });
         }
-        const completed = await followOperation({
+        const completed = await followJournaledOperation(run, {
           client: context.control,
           started,
           options,
         });
-        if (operationFrom(completed)?.state === "succeeded" && draftId) {
-          await recordReleaseBase(
-            context.control,
-            sourceRoot,
-            appId,
-            draftId,
-            (started as { deployment?: unknown }).deployment,
-          );
+        const live = operationFrom(completed)?.state === "succeeded";
+        const settleDeployedRelease = async () => {
+          if (live && draftId) {
+            await recordReleaseBase(
+              context.control,
+              sourceRoot,
+              appId,
+              draftId,
+              (started as { deployment?: unknown }).deployment,
+            );
+          }
+          await run.complete();
+        };
+        const deployed =
+          (started as { deployment?: { id?: unknown } }).deployment?.id ??
+          operationFrom(completed)?.deploymentId;
+        let verification: unknown;
+        if (live && options.follow !== false && options.verify !== false) {
+          try {
+            verification = await verifyLiveRelease(context.control, {
+              appId, idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since, recordsBase: true,
+              deploymentId: typeof deployed === "string" ? deployed : null,
+              previousDeploymentId: expectedActiveDeploymentId ?? null,
+              run,
+            });
+          } catch (error) {
+            // The release is already live; settle base.json and the journal once
+            // verification reaches a definite outcome, while leaving them unsettled
+            // across timeouts, transport failures, or SIGKILL so replay rejoins cleanly.
+            if (isReplacedRelease(error)) {
+              // No longer live, so not this copy's base: the next deploy is
+              // refused as stale and says to pull the live release.
+              await run.complete();
+            } else if (isTerminalVerificationOutcome(error)) {
+              await settleDeployedRelease();
+            }
+            throw error;
+          }
         }
+        await settleDeployedRelease();
         await outputAsync(
           completed && typeof completed === "object" && !Array.isArray(completed)
-            ? { ...completed, ...sourceOnlyFields(upload) }
+            ? { ...completed, ...sourceOnlyFields(upload), ...(verification ? { verification } : {}) }
             : completed,
         );
-        await run.complete();
       },
     );
   },
@@ -4857,12 +5664,18 @@ program
       functions: bundle.manifest.functions.length,
       queues: bundle.manifest.queues.length,
       cron: bundle.manifest.cron.filter((item) => item.enabled).length,
+      // Named, so authors can see their containers and routes were read.
+      containers:
+        bundle.manifest.schemaVersion === 3
+          ? (bundle.manifest.containers ?? []).map(({ name, kind, image }) => ({ name, kind, image }))
+          : [],
+      routes: bundle.manifest.schemaVersion === 3 ? (bundle.manifest.routes ?? []) : [],
       secrets: bundle.manifest.secrets,
       files: bundle.files,
       e2eTest: bundle.e2eTest
         ? { path: bundle.e2eTest.path, sha256: bundle.e2eTest.sha256 }
         : null,
-      warnings: bundle.warnings,
+      warnings: [...bundle.warnings, ...cliBundleWarnings(bundle)],
       archivePath,
       next: archivePath
         ? "Use app dev start/sync for authoritative server validation."
@@ -4957,8 +5770,7 @@ operation
   .option("--interval <seconds>", "poll interval", "2")
   .option("--timeout <seconds>", "maximum follow time", "900")
   .action(async (operationId, options) => {
-    const control = client();
-    const started = await control.get(`/v1/operations/${encoded(operationId)}`);
+    const { control, started } = await readOperation(String(operationId));
     output(
       await followOperation({
         client: control,
@@ -4986,12 +5798,12 @@ operation
         limit: options.limit, cursor: options.cursor,
         type: options.type, state: options.state,
       });
-      output(await client().call("listAppOperationsPage", { appId, query }));
+      output(await (await appReadClient(appId)).call("listAppOperationsPage", { appId, query }));
       return;
     }
     const limit = parseBoundedNumber(options.limit, "--limit", 1, 100);
     output(
-      await client().get(
+      await (await appReadClient(appId)).get(
         `/v1/apps/${encoded(appId)}/operations?limit=${limit}`,
       ),
     );
@@ -5183,7 +5995,7 @@ deployment
   .command("list")
   .argument("<app-id>")
   .action(async (appId) =>
-    output(await client().get(`/v1/apps/${appId}/deployments`)),
+    output(await (await appReadClient(appId)).get(`/v1/apps/${encoded(appId)}/deployments`)),
   );
 
 deployment
@@ -5191,15 +6003,17 @@ deployment
   .argument("<app-id>")
   .argument("<deployment-id>")
   .action(async (appId, deploymentId) =>
-    output(await client().get(`/v1/apps/${appId}/deployments/${deploymentId}`)),
+    output(await (await appReadClient(appId)).get(`/v1/apps/${encoded(appId)}/deployments/${encoded(deploymentId)}`)),
   );
 
 addOperationOptions(
   deployment
     .command("rollback")
     .argument("<app-id>")
-    .argument("<deployment-id>"),
-).action(async (appId, deploymentId, options: OperationOptions) => {
+    .argument("<deployment-id>")
+    .option("--no-verify", "skip OpenCloud's verification after the release goes live"),
+).action(async (appId, deploymentId, options: OperationOptions & { verify?: boolean }) => {
+  const since = new Date().toISOString();
   await outputDurableMutation(
     {
       commandId: "opencloud deployment rollback",
@@ -5215,6 +6029,15 @@ addOperationOptions(
         {},
         key,
       ),
+    // The release that went live gets OpenCloud's verification, as a deploy's does.
+    async (completed, control, run) => {
+      if (options.follow === false || options.verify === false || operationFrom(completed)?.state !== "succeeded") return completed;
+      const verification = await verifyLiveRelease(control, {
+        appId: String(appId), idempotencyKey: childIdempotencyKey(run, "production-verify"), options, since,
+        deploymentId: String(deploymentId), previousDeploymentId: null, run,
+      });
+      return completed && typeof completed === "object" && !Array.isArray(completed) ? { ...completed, verification } : completed;
+    },
   );
 });
 
@@ -5248,8 +6071,8 @@ cron
   .command("history")
   .argument("<app-id>")
   .option("--name <name>")
-  .option("--state <state>", "running, succeeded, or failed")
-  .option("--after <iso>", "only invocations started at or after this time")
+  .option("--state <state>", "running, succeeded, failed, or skipped")
+  .option("--after <iso>", "only runs started, and skipped runs scheduled, at or after this time")
   .option("--limit <number>", "result limit", "50")
   .action(async (appId, options) => {
     const query = new URLSearchParams({
@@ -5332,6 +6155,8 @@ secret
   .action(async (appId, name, options) => {
     const context = await exactAppMutationContext(appId);
     const value = await secretFromStdin();
+    // Kept out of an error report, whatever a message might quote.
+    invocation.privateValues = [...invocation.privateValues, value];
     await context.journal.run(
       mutationIntent({
         commandId: "opencloud secret set",
@@ -6037,9 +6862,483 @@ integration
     );
   });
 
+async function computePayerClient(): Promise<OpenCloudClient> {
+  const login = await ownerAccountLogin();
+  if (!login) throw callerFailure(new Error("Compute payer reads require your account login. Run opencloud login and remove --token; an app credential grants no billing authority."));
+  return login.control;
+}
+
+const compute = program.command("compute")
+  .description("Read compute payer settings and usage with your account login");
+
+compute.command("settings")
+  .description("Read rates, limits and funding for your authorized payer")
+  .action(async () => output(await (await computePayerClient()).call("getComputeSettings", {})));
+
+compute.command("prices")
+  .description("Read immutable rates available for explicit compute consent")
+  .action(async () => output(await (await computePayerClient()).call("getComputePrices", {})));
+
+compute.command("usage")
+  .description("Read ledger quantities, costs, credits and reservations for your payer")
+  .requiredOption("--from <iso>")
+  .requiredOption("--to <iso>", "exclusive end, at most 31 days after from")
+  .action(async (options) => {
+    const input = computeInput("getComputePayerUsage", { query: { from: options.from, to: options.to } });
+    output(await (await computePayerClient()).call("getComputePayerUsage", input));
+  });
+
+const containers = program.command("containers")
+  .description("Manage production jobs, services, and workers");
+
+containers
+  .command("list")
+  .description("List workload revisions, instances, and ledger usage")
+  .argument("<app-id>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainers", { ...scope, query: computeQuery(options) });
+    output(await client().call("listContainers", input));
+  });
+
+containers
+  .command("executions")
+  .description("List job executions without input or credentials")
+  .argument("<app-id>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainerExecutions", { ...scope, query: computeQuery(options) });
+    output(await client().call("listContainerExecutions", input));
+  });
+
+containers
+  .command("get")
+  .description("Inspect limits, controls, instances, and usage")
+  .argument("<app-id>")
+  .argument("<name>")
+  .action(async (appId, name) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("getContainer", { ...scope, name: String(name) });
+    output(await client().call("getContainer", input));
+  });
+
+containers
+  .command("execution")
+  .description("Inspect an execution, safe error, outputs, and completion delivery")
+  .argument("<app-id>")
+  .argument("<execution-id>")
+  .action(async (appId, executionId) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("getContainerExecution", { ...scope, executionId: String(executionId) });
+    output(await client().call("getContainerExecution", input));
+  });
+
+containers
+  .command("run")
+  .description("Accept one declared job; reuse the key to recover the same execution")
+  .argument("<app-id>")
+  .argument("<name>")
+  .option("--input <json>", "JSON input, at most 64 KiB", "{}")
+  .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission (required)")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("submitContainerJob", { ...scope, name: String(name),
+      body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers run", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: { action: "run-job" }, privateRequest: input.body,
+      explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("submitContainerJob", input, { idempotencyKey }));
+  });
+
+containers
+  .command("cancel")
+  .description("Request cancellation; inspect the execution for confirmed stop")
+  .argument("<app-id>")
+  .argument("<execution-id>")
+  .option("--idempotency-key <key>")
+  .action(async (appId, executionId, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("cancelContainerExecution", { ...scope, executionId: String(executionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers cancel", appId: scope.appId, settleRefusals: true,
+      safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("cancelContainerExecution", input, { idempotencyKey }));
+  });
+
+containers
+  .command("pause")
+  .description("Pause a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("pauseContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers pause", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("pauseContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("resume")
+  .description("Resume a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("resumeContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers resume", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("resumeContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("restart")
+  .description("Restart a workload at its observed control generation")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("restartContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers restart", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("restartContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("scale")
+  .description("Set worker replicas within the declared ceiling")
+  .argument("<app-id>")
+  .argument("<name>")
+  .requiredOption("--replicas <number>", "worker replicas, 0-20")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("scaleContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers scale", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("scaleContainer", input, { idempotencyKey }));
+  });
+
+containers
+  .command("events")
+  .description("Read a bounded lifecycle event timeline")
+  .argument("<app-id>")
+  .argument("<name>")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (appId, name, options) => {
+    const scope = { appId: String(appId) };
+    const input = computeInput("listContainerEvents", { ...scope, name: String(name), query: computeQuery(options) });
+    output(await client().call("listContainerEvents", input));
+  });
+
+const devContainers = dev.command("containers")
+  .description("Manage containers in the saved development session");
+
+devContainers
+  .command("list")
+  .description("List workload revisions, instances, and ledger usage")
+  .argument("<directory>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainers", { ...scope, query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainers", input));
+  });
+
+devContainers
+  .command("executions")
+  .description("List job executions without input or credentials")
+  .argument("<directory>")
+  .option("--workload <name>", "exact workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--state <state>", "exact state")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainerExecutions", { ...scope, query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainerExecutions", input));
+  });
+
+devContainers
+  .command("get")
+  .description("Inspect limits, controls, instances, and usage")
+  .argument("<directory>")
+  .argument("<name>")
+  .action(async (directory, name) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("getDevContainer", { ...scope, name: String(name) });
+    output(await client(sourceRoot).call("getDevContainer", input));
+  });
+
+devContainers
+  .command("execution")
+  .description("Inspect an execution, safe error, outputs, and completion delivery")
+  .argument("<directory>")
+  .argument("<execution-id>")
+  .action(async (directory, executionId) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("getDevContainerExecution", { ...scope, executionId: String(executionId) });
+    output(await client(sourceRoot).call("getDevContainerExecution", input));
+  });
+
+devContainers
+  .command("run")
+  .description("Accept one declared job; reuse the key to recover the same execution")
+  .argument("<directory>")
+  .argument("<name>")
+  .option("--input <json>", "JSON input, at most 64 KiB", "{}")
+  .option("--input-file <id>", "declared input File ID; repeat at most 16 times", collectOption, [])
+  .requiredOption("--idempotency-key <key>", "stable key for this logical submission (required)")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("submitDevContainerJob", { ...scope, name: String(name),
+      body: { input: computeJson(options.input), inputFileIds: options.inputFile } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers run", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: { action: "run-job" }, privateRequest: input.body,
+      explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("submitDevContainerJob", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("cancel")
+  .description("Request cancellation; inspect the execution for confirmed stop")
+  .argument("<directory>")
+  .argument("<execution-id>")
+  .option("--idempotency-key <key>")
+  .action(async (directory, executionId, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("cancelDevContainerExecution", { ...scope, executionId: String(executionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers cancel", appId: scope.appId, settleRefusals: true,
+      safeScope: input, safeRequest: { action: "cancel" }, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("cancelDevContainerExecution", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("pause")
+  .description("Pause a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("pauseDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers pause", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("pauseDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("resume")
+  .description("Resume a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("resumeDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers resume", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("resumeDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("restart")
+  .description("Restart a workload at its observed control generation")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("restartDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers restart", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("restartDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("scale")
+  .description("Set worker replicas within the declared ceiling")
+  .argument("<directory>")
+  .argument("<name>")
+  .requiredOption("--replicas <number>", "worker replicas, 0-20")
+  .requiredOption("--generation <number>", "expected control generation from containers get")
+  .option("--idempotency-key <key>")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("scaleDevContainer", { ...scope, name: String(name),
+      body: { expectedGeneration: controlGeneration(options.generation), replicas: workerReplicas(options.replicas) } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud app dev containers scale", appId: scope.appId, settleRefusals: true,
+      safeScope: { ...scope, name: input.name }, safeRequest: input.body, explicitIdempotencyKey: key, cwd: sourceRoot,
+    }, (control, idempotencyKey) => control.call("scaleDevContainer", input, { idempotencyKey }));
+  });
+
+devContainers
+  .command("events")
+  .description("Read a bounded lifecycle event timeline")
+  .argument("<directory>")
+  .argument("<name>")
+  .option("--from <iso>")
+  .option("--to <iso>")
+  .option("--cursor <cursor>")
+  .option("--limit <number>", "page size, 1-100", "50")
+  .action(async (directory, name, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const scope = { appId: state.appId, sessionId: state.sessionId };
+    const input = computeInput("listDevContainerEvents", { ...scope, name: String(name), query: computeQuery(options) });
+    output(await client(sourceRoot).call("listDevContainerEvents", input));
+  });
+
+const containerRegistry = containers.command("registry")
+  .description("Manage app-bound registry credentials used only by trusted image fetching");
+
+containerRegistry.command("list").argument("<app-id>")
+  .action(async (appId) => {
+    const input = computeInput("listContainerRegistries", { appId: String(appId) });
+    output(await client().call("listContainerRegistries", input));
+  });
+
+containerRegistry.command("create").argument("<app-id>")
+  .requiredOption("--name <name>")
+  .requiredOption("--host <host>", "exact lowercase registry host, optionally with port")
+  .requiredOption("--username <username>")
+  .requiredOption("--password-stdin", "read the registry password from standard input")
+  .option("--idempotency-key <key>")
+  .action(async (appId, options) => {
+    const password = await secretFromStdin();
+    // Kept out of an error report, whatever a message might quote.
+    invocation.privateValues = [...invocation.privateValues, password];
+    const input = computeInput("createContainerRegistry", { appId: String(appId), body: {
+      name: options.name, registryHost: options.host, username: options.username, password,
+    } });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers registry create", appId: input.appId, settleRefusals: true,
+      // Each registry is its own target. The journal digests only what names
+      // the connection, never the password: an unsalted digest of a weak one
+      // could be guessed offline. OpenCloud compares the password itself when
+      // the same key is sent again.
+      safeScope: { appId: input.appId, name: input.body.name },
+      safeRequest: { action: "create-registry", registryHost: input.body.registryHost, username: input.body.username },
+      explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("createContainerRegistry", input, { idempotencyKey }));
+  });
+
+containerRegistry.command("remove").argument("<app-id>").argument("<connection-id>")
+  .description("Revoke future resolutions; already-pinned images remain retained")
+  .option("--idempotency-key <key>")
+  .action(async (appId, connectionId, options) => {
+    const input = computeInput("deleteContainerRegistry", { appId: String(appId), connectionId: String(connectionId) });
+    const key = computeKey(options.idempotencyKey);
+    await outputReplayMutation({
+      commandId: "opencloud containers registry remove", appId: input.appId, settleRefusals: true,
+      safeScope: input, safeRequest: { action: "revoke-registry" }, explicitIdempotencyKey: key,
+    }, (control, idempotencyKey) => control.call("deleteContainerRegistry", input, { idempotencyKey }));
+  });
+
+
+/** Both log commands filter by the platform's surface names; see logSurface. */
+const LOG_SURFACE_HELP =
+  "where the lines came from: function (the app's Functions), container, http (the edge), ai (the AI gateway) or platform; functions and containers also work, page, rest and storage select http, and runtime is the older name for function and the only one an older OpenCloud knows";
+
 program
   .command("logs")
+  .description("Read the app's production logs: a normalized page with --page or any page filter, otherwise the raw query answer earlier CLIs printed")
   .argument("<app-id>")
+  .option("--page", "return a normalized page with cursor and source freshness, as app dev logs always does")
+  .option("--surface <surface>", LOG_SURFACE_HELP)
+  .option("--workload <name>", "container workload name")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--execution <id>", "container execution ID")
+  .option("--instance <id>", "container instance ID")
+  .option("--cursor <cursor>", "continue the exact same filters and time range")
   .option(
     "--from <iso>",
     "ISO time",
@@ -6049,30 +7348,68 @@ program
   .option("--contains <text>")
   .option("--level <level>")
   .option("--limit <number>", "result limit", "200")
-  .action(async (appId, options) =>
-    output(
-      await client().post(`/v1/apps/${appId}/logs/query`, {
+  .action(async (appId, options) => {
+    if (options.page || [options.surface, options.workload, options.kind, options.execution, options.instance, options.cursor].some(value => value !== undefined)) {
+      const input = computeInput("queryLogsPage", { appId: String(appId), body: computeLogBody(options) });
+      output(await client().call("queryLogsPage", input));
+      return;
+    }
+    output(await client().post(`/v1/apps/${encoded(appId)}/logs/query`, {
         from: options.from,
         to: options.to,
         contains: options.contains,
         level: options.level,
         limit: Number(options.limit),
-      }),
-    ),
-  );
+      }));
+  });
+
+dev.command("logs")
+  .description("Read logs only from the development session saved in this directory, always as a normalized page with cursor and source freshness")
+  .argument("<directory>")
+  .option("--page", "accepted, as logs takes it: this command always returns a page")
+  .option("--from <iso>", "ISO time", new Date(Date.now() - 60 * 60 * 1000).toISOString())
+  .option("--to <iso>", "ISO time", new Date().toISOString())
+  .option("--contains <text>")
+  .option("--level <level>")
+  .option("--surface <surface>", LOG_SURFACE_HELP)
+  .option("--workload <name>")
+  .option("--kind <kind>", "job, service, or worker")
+  .option("--execution <id>")
+  .option("--instance <id>")
+  .option("--cursor <cursor>", "continue the exact same filters and time range")
+  .option("--limit <number>", "page size, 1-200", "200")
+  .action(async (directory, options) => {
+    const sourceRoot = callerPath(directory);
+    const state = await requireDevState(sourceRoot);
+    const input = computeInput("queryDevLogsPage", { appId: state.appId, sessionId: state.sessionId, body: computeLogBody(options) });
+    output(await client(sourceRoot).call("queryDevLogsPage", input));
+  });
 
 program
   .command("metrics")
+  .description("Read one metric's production series")
   .argument("<app-id>")
-  .requiredOption("--metric <name>")
+  .requiredOption(
+    "--metric <name>",
+    "a platform series, or custom.<name> for a metric the app records (a container's recordMetric or the browser SDK)",
+  )
   .option(
     "--from <iso>",
     "ISO time",
     new Date(Date.now() - 60 * 60 * 1000).toISOString(),
   )
   .option("--to <iso>", "ISO time", new Date().toISOString())
-  .option("--aggregation <name>", "none, sum, avg, max, min, rate", "none")
+  .option("--aggregation <name>", "none, sum, avg, max, min, or rate (per second: a counter's increments, a gauge's change between steps)", "none")
   .option("--step <seconds>", "query step", "60")
+  .addHelpText("after", `
+The answer is OpenCloud's, in Prometheus's matrix shape:
+  {"status":"success","data":{"resultType":"matrix","result":[
+    {"metric":{"<label>":"<value>"},             one series per label set
+     "values":[[<unix seconds>,"<value>"], ...]}  at most one point per step, at its start
+  ]}}
+A step is --step seconds, or longer when a long window would need too many points.
+A custom.<name> metric has one series per dimension set (a gauge's latest value,
+or a counter's sum, in each step); --aggregation combines the series into one.`)
   .action(async (appId, options) =>
     output(
       await client().post(`/v1/apps/${appId}/metrics/query`, {
@@ -6117,11 +7454,17 @@ program
   .description("Read the stable app health and alert contract for agents")
   .argument("<app-id>")
   .option("--since <iso>", "return events and resolved alerts after this time")
+  .addOption(new Option("--contract-version <version>", "opt into compute sources with version 2").choices(["1", "2"]))
   .action(async (appId, options) => {
-    const query = options.since
-      ? `?since=${encodeURIComponent(String(options.since))}`
-      : "";
-    output(await client().get(`/v1/apps/${appId}/agent-feed${query}`));
+    const input = computeInput("getAgentFeed", { appId: String(appId), query: {
+      ...(options.since ? { since: String(options.since) } : {}),
+      ...(options.contractVersion ? { contractVersion: options.contractVersion } : {}),
+    } });
+    // Printed as OpenCloud sends it, as before 3.21: a value this CLI does not
+    // know yet, such as a new signal or alert state, is no reason to fail the
+    // read (API_CONTRACT_MISMATCH and an error report). The input is checked.
+    const query = new URLSearchParams(Object.entries(input.query ?? {}).flatMap(([name, value]) => value === undefined ? [] : [[name, String(value)]]));
+    output(await client().get(`/v1/apps/${encodeURIComponent(input.appId)}/agent-feed${query.size ? `?${query}` : ""}`));
   });
 
 const alertRule = program
@@ -6238,9 +7581,15 @@ if (asksForVersion(process.argv.slice(2))) {
     ) {
       return;
     }
+    if (error instanceof WorkspaceNotConnectedError) await error.describe();
+    if (error instanceof MutationJournalError && error.pending && !hintOf(error)) {
+      const hint = journalHint(error.code, error.pending, runningCommand);
+      if (hint) withHint(error, hint);
+    }
     // Only the message and hint follow the brand; the report keeps the original.
     process.stderr.write(`${JSON.stringify(brandCliError(structuredCliError(error)))}\n`);
-    process.exitCode = 1;
+    // Ctrl-C while waiting for a validation exits as an interrupt does.
+    process.exitCode = (error as { code?: unknown } | null)?.code === "VALIDATION_INTERRUPTED" ? 130 : 1;
     // After the output, without changing it or the exit code; at most 2.5 s.
     await errorReporter.reportFailure(error).catch(() => undefined);
   });

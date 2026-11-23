@@ -40,6 +40,8 @@ export const CLI_COMMANDS: readonly string[] = Object.freeze([
   "artifact-check",
   "auth",
   "backup",
+  "compute",
+  "containers",
   "cron",
   "data",
   "deploy",

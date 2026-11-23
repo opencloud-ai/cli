@@ -14,8 +14,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { Command } from "commander";
 import { ApiError, OpenCloudClient } from "./api-client.js";
+import { computeErrorCatalog, computeErrorCodeSchema, computeErrorDetailsSchema, computeErrorSchema } from "@opencloud/contracts/containers";
 import { callerFailure } from "./caller-failure.js";
 import { requestIdForError } from "./cli-http.js";
+import { CliContractError, hintOf, withHint } from "./cli-contract-error.js";
+import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 
 export interface OperationOptions {
   idempotencyKey?: string;
@@ -31,24 +34,12 @@ export interface OperationLike {
   [key: string]: unknown;
 }
 
-export class CliContractError extends Error {
-  readonly retryable: boolean;
-
-  constructor(
-    readonly code: string,
-    message: string,
-    options: { retryable?: boolean; cause?: unknown } = {},
-  ) {
-    super(
-      message,
-      options.cause === undefined ? undefined : { cause: options.cause },
-    );
-    this.name = "CliContractError";
-    this.retryable = options.retryable ?? false;
-  }
-}
+export { CliContractError };
 
 export class OperationTerminalError extends CliContractError {
+  /** The release a failed operation names, with the error OpenCloud recorded on it. */
+  deployment: { id: string; error: Record<string, unknown> } | undefined;
+
   constructor(readonly operation: OperationLike) {
     super(
       operation.state === "cancelled"
@@ -58,6 +49,41 @@ export class OperationTerminalError extends CliContractError {
     );
     this.name = "OperationTerminalError";
   }
+}
+
+const OPERATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LOG_TIME = /^\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * A failed operation with the cause OpenCloud recorded on the release it
+ * names. A compensated deploy or rollback only says DEPLOYMENT_COMPENSATED;
+ * the release's own error says why, such as a container that never became
+ * ready or exited with code 3, and the hint names the logs that show it.
+ */
+async function terminalOperationError(client: Pick<OpenCloudClient, "get">, operation: OperationLike): Promise<OperationTerminalError> {
+  const failure = new OperationTerminalError(operation);
+  const { appId, deploymentId } = operation;
+  if (operation.state !== "failed" || typeof appId !== "string" || typeof deploymentId !== "string" ||
+      !OPERATION_UUID.test(appId) || !OPERATION_UUID.test(deploymentId)) return failure;
+  let cause: Record<string, unknown>;
+  try {
+    cause = record(record(await client.get(`/v1/apps/${encodeURIComponent(appId)}/deployments/${encodeURIComponent(deploymentId)}`)).error);
+  } catch {
+    // The operation's own failure is still reported.
+    return failure;
+  }
+  if (!Object.keys(cause).length) return failure;
+  failure.deployment = { id: deploymentId, error: cause };
+  if (typeof cause.code === "string" && cause.code.startsWith("COMPUTE_")) {
+    const workload = record(cause.details).workloadName;
+    const window = typeof operation.createdAt === "string" && LOG_TIME.test(operation.createdAt) &&
+      typeof operation.updatedAt === "string" && LOG_TIME.test(operation.updatedAt)
+      ? ` --from ${operation.createdAt} --to ${operation.updatedAt}`
+      : " --from <start> --to <end>";
+    const name = typeof workload === "string" && /^[a-z][a-z0-9-]{0,62}$/.test(workload) ? ` --workload ${workload}` : "";
+    withHint(failure, `OpenCloud kept the release that was live before. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container${name}${window}\`.`);
+  }
+  return failure;
 }
 
 export class OperationWaitTimeoutError extends CliContractError {
@@ -79,6 +105,11 @@ export function addOperationOptions(command: Command): Command {
     .option("--timeout <seconds>", "maximum follow time", "900");
 }
 
+/**
+ * A bounded number in the forms 3.20 accepted (`1e2`, `5.`, `0x10`), for
+ * options whose zero is out of range anyway. Options where an empty value
+ * would mean zero use parseDecimalInteger.
+ */
 export function parseBoundedNumber(
   raw: unknown,
   name: string,
@@ -97,6 +128,19 @@ export function parseBoundedNumber(
       "INVALID_OPTION",
       `${name} must be ${integer ? "an integer" : "a number"} from ${minimum} through ${maximum}`,
     );
+  }
+  return value;
+}
+
+/**
+ * Plain decimal digits only. Number() reads "" and " " as 0 and accepts 0x2
+ * or 1e1, so `--replicas "$UNSET"` would otherwise mean zero replicas.
+ */
+export function parseDecimalInteger(raw: unknown, name: string, minimum: number, maximum: number): number {
+  const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new CliContractError("INVALID_OPTION", `${name} must be an integer from ${minimum} through ${maximum}, in plain digits`);
   }
   return value;
 }
@@ -238,7 +282,7 @@ export async function followOperation(input: {
     );
   }
   if (["failed", "cancelled"].includes(operation.state)) {
-    throw new OperationTerminalError(operation);
+    throw await terminalOperationError(input.client, operation);
   }
   if (operation.state === "succeeded" || !input.options.follow) {
     return input.started;
@@ -272,7 +316,7 @@ export async function followOperation(input: {
     }
   }
   if (operation.state !== "succeeded") {
-    throw new OperationTerminalError(operation);
+    throw await terminalOperationError(input.client, operation);
   }
   return replaceOperation(input.started, operation);
 }
@@ -493,23 +537,92 @@ function safeCode(value: unknown, fallback: string): string {
   return /^[A-Z][A-Z0-9_]{1,99}$/.test(code) ? code : fallback;
 }
 
-/** Names the newer release and the two ways forward for a stale copy. */
-function staleReleaseFields(details: unknown): Record<string, unknown> {
-  const value =
-    details && typeof details === "object"
-      ? (details as Record<string, unknown>)
-      : {};
-  const identifier = (field: string) =>
-    typeof value[field] === "string" || value[field] === null
-      ? { [field]: value[field] }
-      : {};
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/** The listed identifiers of an error's details that are strings or null. */
+function identifiers(details: Record<string, unknown>, names: string[]): Record<string, unknown> {
+  return Object.fromEntries(names.flatMap((name) =>
+    (typeof details[name] === "string" && String(details[name]).length <= 200) || details[name] === null
+      ? [[name, details[name]]]
+      : []));
+}
+
+const shortText = (value: unknown, limit: number): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= limit;
+
+/**
+ * What a refused request's details say about the input, as OpenCloud names it:
+ * the field, the values it accepts and their aliases (an unknown log surface),
+ * the ones to use instead (a name that stands for lines of several), and each
+ * refused field with its reason (a malformed request). Only these, checked
+ * and bounded, so nothing else in a body is printed.
+ */
+export function inputDetails(details: Record<string, unknown>): Record<string, unknown> | null {
+  const picked: Record<string, unknown> = {};
+  if (shortText(details.field, 200)) picked.field = details.field;
+  if (Array.isArray(details.allowed) && details.allowed.length <= 50 && details.allowed.every((value) => shortText(value, 100))) {
+    picked.allowed = details.allowed;
+  }
+  // The values to use instead, when one name stands for lines of several.
+  if (Array.isArray(details.use) && details.use.length && details.use.length <= 10 && details.use.every((value) => shortText(value, 100))) {
+    picked.use = details.use;
+  }
+  const aliases = record(details.aliases);
+  const aliasEntries = Object.entries(aliases);
+  if (aliasEntries.length && aliasEntries.length <= 50 && aliasEntries.every(([name, value]) => shortText(name, 100) && shortText(value, 100))) {
+    picked.aliases = Object.fromEntries(aliasEntries);
+  }
+  if (Array.isArray(details.fields)) {
+    const fields = details.fields.slice(0, 20).map(record).filter((value) => shortText(value.field, 200) && shortText(value.message, 300))
+      .map((value) => ({ field: value.field, ...(shortText(value.code, 100) ? { code: value.code } : {}), message: redactMessage(value.message) }));
+    if (fields.length) picked.fields = fields;
+  }
+  return Object.keys(picked).length ? picked : null;
+}
+
+/**
+ * A definite refusal: OpenCloud answered with a 4xx code of its own, not
+ * retryable and naming no operation, so the request took no effect. A proxy's
+ * uncoded answer, a timeout and a retryable code (which may mean the same
+ * request is still being handled) are not. Nor is a compute code whose
+ * effects are not yet known, such as COMPUTE_OUTCOME_UNKNOWN, a 409.
+ */
+export function isDefiniteRefusal(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status < 400 || error.status > 499 || error.status === 408) return false;
+  if (error.retryable || error.operation !== null || typeof error.code !== "string" || !error.code) return false;
+  const compute = computeErrorCodeSchema.safeParse(error.code);
+  if (compute.success) {
+    const { origin, retryScope } = computeErrorCatalog[compute.data];
+    return origin !== "unknown" && retryScope !== "observer_reconciliation";
+  }
+  return true;
+}
+
+/** The next step OpenCloud names for an error, in `details.suggestedFix`. */
+function suggestedFix(details: Record<string, unknown>): string | null {
+  const value = details.suggestedFix;
+  return typeof value === "string" && value.trim() ? redactMessage(value.trim()).slice(0, 500) : null;
+}
+
+/**
+ * Names the releases involved and the way forward: the server's own next step
+ * when it gives one (a development session production overtook is stopped
+ * and started again), otherwise pull or --force for a stale copy.
+ */
+function staleReleaseFields(details: Record<string, unknown>): Record<string, unknown> {
   return {
-    ...identifier("latestDeploymentId"),
-    ...identifier("latestVersion"),
-    ...identifier("expectedActiveDeploymentId"),
-    hint: "Run opencloud pull <directory> to update this copy and reapply your change, or pass --force to replace the latest release.",
+    ...identifiers(details, ["latestDeploymentId", "latestVersion", "expectedActiveDeploymentId", "actualActiveDeploymentId"]),
+    hint: suggestedFix(details) ??
+      "Run opencloud pull <directory> to update this copy and reapply your change, or pass --force to replace the latest release.",
   };
 }
+
+/** Development sessions OpenCloud refuses because they were overtaken, stopped or expired. */
+const DEV_SESSION_REFUSALS = new Set(["DEV_SESSION_STALE", "DEV_SESSION_STOPPED", "DEV_SESSION_EXPIRED"]);
 
 function apiErrorFields(error: ApiError): Record<string, unknown> {
   const body =
@@ -521,17 +634,31 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
       ? (body.error as Record<string, unknown>)
       : {};
   const code = safeCode(body.code ?? nested.code, `HTTP_${error.status}`);
+  const compute = computeErrorSchema.safeParse({
+    statusCode: error.status, code, message: body.message ?? error.message, details: error.details,
+  });
+  const details = Object.keys(record(body.details)).length ? record(body.details) : record(nested.details);
+  const fix = code === "ACTIVE_DEPLOYMENT_CHANGED" ? null : suggestedFix(details);
+  const input = compute.success ? null : inputDetails(details);
   return {
     code,
     message: redactMessage(body.message ?? nested.message ?? error.message),
     status: error.status,
-    ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(body.details) : {}),
+    ...(code === "ACTIVE_DEPLOYMENT_CHANGED" ? staleReleaseFields(details) : {}),
+    // details.status names the session's state; `status` is already the HTTP status.
+    ...(DEV_SESSION_REFUSALS.has(code)
+      ? { ...identifiers(details, ["sessionId"]), ...(typeof details.status === "string" ? { sessionStatus: details.status } : {}),
+          ...identifiers(details, ["baseDeploymentId"]) }
+      : {}),
+    ...(fix ? { hint: fix } : {}),
+    ...(compute.success ? { details: compute.data.details } : input ? { details: input } : {}),
     retryable:
-      typeof body.retryable === "boolean"
+      compute.success ? compute.data.details.retryable : typeof body.retryable === "boolean"
         ? body.retryable
         : typeof nested.retryable === "boolean"
           ? nested.retryable
-          : error.status >= 500,
+          // As the client read it: details.retryable, else 408, 425, 429 and 5xx.
+          : error.retryable,
     ...(typeof body.requestId === "string"
       ? { requestId: body.requestId }
       : typeof nested.requestId === "string"
@@ -580,43 +707,145 @@ export function errorCause(
   return null;
 }
 
+const PENDING_STATES = new Set(["prepared", "attempted", "unknown", "completed"]);
+const PENDING_IDENTIFIER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The unresolved journal entry an error is about, as the journal retained it:
+ * its command, key, state and server coordinates, checked field by field.
+ */
+function pendingFields(error: unknown): Record<string, unknown> | null {
+  const value = record((error as { pending?: unknown } | null)?.pending);
+  if (typeof value.command !== "string" || !/^opencloud [a-z][a-z -]{0,80}$/.test(value.command) ||
+      typeof value.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{8,200}$/.test(value.idempotencyKey) ||
+      typeof value.state !== "string" || !PENDING_STATES.has(value.state)) return null;
+  return {
+    command: value.command,
+    idempotencyKey: value.idempotencyKey,
+    generatedKey: value.generatedKey === true,
+    state: value.state,
+    ...(typeof value.unknownCode === "string" && /^[A-Z][A-Z0-9_]{1,99}$/.test(value.unknownCode) ? { unknownCode: value.unknownCode } : {}),
+    ...Object.fromEntries(["appId", "operationId", "draftId", "sessionId"].flatMap((name) =>
+      typeof value[name] === "string" && PENDING_IDENTIFIER.test(String(value[name])) ? [[name, value[name]]] : [])),
+    ...(Number.isSafeInteger(value.revision) && Number(value.revision) > 0 ? { revision: value.revision } : {}),
+  };
+}
+
+/** The keys every structured error owns; extra fields never replace them. */
+const RESERVED_FIELDS = new Set(["code", "message", "status", "retryable", "details", "issues", "cause", "requestId", "pending", "hint"]);
+
+/** Extra identifiers a CLI error names, such as the releases involved. */
+function contractFields(error: unknown): Record<string, unknown> {
+  if (!(error instanceof CliContractError) || !error.fields) return {};
+  return Object.fromEntries(Object.entries(error.fields).flatMap(([name, value]) =>
+    /^[a-z][A-Za-z0-9]{0,63}$/.test(name) && !RESERVED_FIELDS.has(name) && (value === null || typeof value === "number" ||
+      typeof value === "boolean" || (typeof value === "string" && value.length <= 200)) ? [[name, value]] : []));
+}
+
+/**
+ * A failure as the CLI prints it, with what to run next: the unresolved
+ * mutation it concerns and a hint added for this failure, which replaces a
+ * generic one in place.
+ */
 export function structuredCliError(error: unknown): {
   ok: false;
   error: Record<string, unknown>;
 } {
+  const fields = structuredFields(error);
+  const pending = pendingFields(error);
+  const hint = hintOf(error);
+  return {
+    ok: false,
+    error: {
+      ...fields,
+      ...contractFields(error),
+      ...(pending ? { pending } : {}),
+      ...(hint ? { hint: redactMessage(hint) } : {}),
+    },
+  };
+}
+
+/**
+ * The error OpenCloud recorded on a release, as printed with its failed
+ * operation: code, message and the details the compute contract defines
+ * (such as exitCode, signal or workloadName), each checked against its own
+ * schema, so a partial set is kept and nothing else is printed.
+ */
+function deploymentErrorFields(deployment: { id: string; error: Record<string, unknown> }): Record<string, unknown> {
+  const { error } = deployment;
+  const message = typeof error.message === "string" && error.message ? redactMessage(error.message).slice(0, 500) : null;
+  const given = record(error.details);
+  const details = Object.fromEntries(Object.entries(computeErrorDetailsSchema.shape).flatMap(([name, schema]) => {
+    const parsed = given[name] === undefined ? null : schema.safeParse(given[name]);
+    return parsed?.success ? [[name, parsed.data]] : [];
+  }));
+  return {
+    deploymentId: deployment.id,
+    deploymentError: {
+      code: safeCode(error.code, "DEPLOYMENT_ERROR"),
+      ...(message ? { message } : {}),
+      ...(Object.keys(details).length ? { details } : {}),
+    },
+  };
+}
+
+const RETRYABLE_NETWORK_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+function isNetworkTransportError(
+  error: unknown,
+  cause: { code: string; message: string | null } | null,
+): boolean {
+  const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  // DNS says the host doesn't exist, usually a mistyped --api-url: trying
+  // again finds it no more. EAI_AGAIN, a resolver that didn't answer, stays
+  // retryable.
+  if (cause?.code === "ENOTFOUND" || code === "ENOTFOUND") return false;
+  if (cause && RETRYABLE_NETWORK_CODES.has(cause.code)) return true;
+  if (typeof code === "string" && RETRYABLE_NETWORK_CODES.has(code)) return true;
+  return error instanceof TypeError && error.message === "fetch failed";
+}
+
+function structuredFields(error: unknown): Record<string, unknown> {
   if (error instanceof ApiError) {
-    return { ok: false, error: apiErrorFields(error) };
+    return apiErrorFields(error);
   }
   if (error instanceof OperationTerminalError) {
+    const operationError = record(error.operation.error);
     return {
-      ok: false,
-      error: {
-        code: error.code,
-        message: redactMessage(error.message),
-        retryable: false,
-        operationId: error.operation.id,
-        operationState: error.operation.state,
-        ...(error.operation.error && typeof error.operation.error === "object"
-          ? {
-              operationErrorCode: safeCode(
-                (error.operation.error as Record<string, unknown>).code,
-                "OPERATION_ERROR",
-              ),
-            }
-          : {}),
-      },
+      code: error.code,
+      message: redactMessage(error.message),
+      retryable: false,
+      operationId: error.operation.id,
+      operationState: error.operation.state,
+      ...(error.operation.error && typeof error.operation.error === "object"
+        ? {
+            operationErrorCode: safeCode(operationError.code, "OPERATION_ERROR"),
+            ...(typeof operationError.message === "string" && operationError.message
+              ? { operationErrorMessage: redactMessage(operationError.message).slice(0, 500) }
+              : {}),
+          }
+        : {}),
+      ...(error.deployment ? deploymentErrorFields(error.deployment) : {}),
     };
   }
   if (error instanceof OperationWaitTimeoutError) {
     return {
-      ok: false,
-      error: {
-        code: error.code,
-        message: redactMessage(error.message),
-        retryable: true,
-        operationId: error.operation.id,
-        operationState: error.operation.state,
-      },
+      code: error.code,
+      message: redactMessage(error.message),
+      retryable: true,
+      operationId: error.operation.id,
+      operationState: error.operation.state,
     };
   }
   const candidate =
@@ -625,25 +854,35 @@ export function structuredCliError(error: unknown): {
       : {};
   const cause = errorCause(error);
   const requestId = requestIdForError(error);
+  // A Zod error's message is its whole issue tree as JSON; list each problem instead.
+  const issues = error instanceof CliContractError ? error.issues
+    : isZodError(error) ? readableIssues(error.issues) : undefined;
+  const message = isZodError(error) && issues?.length
+    ? issueSummary("The input", issues)
+    : error instanceof Error ? error.message : (candidate.message ?? error);
+  const details = error instanceof CliContractError && error.details ? inputDetails(error.details) : null;
+  const retryable =
+    typeof candidate.retryable === "boolean"
+      ? candidate.retryable
+      : isNetworkTransportError(error, cause);
   return {
-    ok: false,
-    error: {
-      code: safeCode(candidate.code, "CLI_ERROR"),
-      message: redactMessage(
-        error instanceof Error ? error.message : (candidate.message ?? error),
-      ),
-      retryable: candidate.retryable === true,
-      ...(cause
-        ? {
-            cause: {
-              code: cause.code,
-              ...(cause.message
-                ? { message: redactMessage(cause.message).slice(0, 500) }
-                : {}),
-            },
-          }
-        : {}),
-      ...(requestId ? { requestId } : {}),
-    },
+    code: safeCode(candidate.code, "CLI_ERROR"),
+    message: redactMessage(message),
+    retryable,
+    ...(details ? { details } : {}),
+    ...(issues?.length
+      ? { issues: issues.slice(0, 50).map((issue) => ({ path: issue.path, message: redactMessage(issue.message).slice(0, 500) })) }
+      : {}),
+    ...(cause
+      ? {
+          cause: {
+            code: cause.code,
+            ...(cause.message
+              ? { message: redactMessage(cause.message).slice(0, 500) }
+              : {}),
+          },
+        }
+      : {}),
+    ...(requestId ? { requestId } : {}),
   };
 }

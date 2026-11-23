@@ -21,6 +21,8 @@ export const controlPlaneAppSchema = z
     appUrl: z.url().nullable(),
     authUrl: z.url(),
     apiUrl: z.url(),
+    dashboardUrl: z.url().optional(),
+    sharingUrl: z.url().optional(),
     visibility: appVisibilitySchema,
     aiCredentialSource: appAiCredentialSourceSchema.default("owner"),
     state: appStateSchema,

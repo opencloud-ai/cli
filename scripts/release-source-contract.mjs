@@ -20,17 +20,29 @@ const now = "2026-10-14T12:00:00.000Z";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 const state = {
-  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 },
+  contracts: { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 },
   drafts: new Map(),
   deployments: new Map(),
   activeDeploymentId: null,
   /** Digest the fake validator reports; null reports the CLI's own digest. */
   validationDigests: [],
   localDigest: null,
-  /** Validations to answer with 429 FRONTEND_BUILD_BUSY first. */
+  /** Validations to answer with explicit bounded progress first. */
   validationBusy: 0,
   /** Diagnostics for a failed validation, as a failed platform build reports. */
   validationFailure: null,
+  /** Production verifications by ID; the next one fails when failNextVerification is set. */
+  verifications: new Map(),
+  /** The next production verification fails, as a worker in a crash loop does. */
+  failNextVerification: false,
+  /** The next deploy's candidate fails, as a container that exits at once does, and the live release stays. */
+  failNextDeploy: false,
+  /** What GET /v1/installation answers; null answers 404, as servers before it did. */
+  installation: null,
+  /** A 2.35.x server: how long it holds the next frontend-build validation. */
+  legacyHoldMs: 0,
+  /** A 2.35.x server: frontend-build validations to answer FRONTEND_BUILD_BUSY first. */
+  legacyBuildBusy: 0,
   requests: [],
 };
 
@@ -42,14 +54,38 @@ function deploymentRecord(release) {
     artifactSha256: release.artifactSha256,
     sdkVersion: "2.3.0",
     manifest: {},
-    state: state.activeDeploymentId === release.id ? "active" : "superseded",
+    state: release.failure ? "failed" : release.rolledBack ? "rolled_back" : state.activeDeploymentId === release.id ? "active" : "superseded",
     rollbackOfDeploymentId: null,
-    error: null,
+    error: release.failure ?? null,
     createdAt: now,
     activatedAt: now,
     source: release.source
       ? { sha256: release.source.sha256, sizeBytes: release.source.bytes.length, fileCount: release.source.fileCount }
       : null,
+  };
+}
+
+const CRASH_LOOP = "Container worker sync stopped after repeated failures (COMPUTE_CRASH_LOOP): exec /app/order-sync-bin failed";
+
+/** OpenCloud's production verification record: passed, or failed on a worker in a crash loop. */
+function verificationRecord(verification) {
+  return {
+    id: verification.id, appId, deploymentId: verification.deploymentId, operationId: verification.operationId,
+    state: verification.failed ? "failed" : "passed",
+    phases: verification.failed
+      ? [{ name: "canonical-head", passed: true, detail: "Canonical production HEAD returned HTTP 200.", durationMs: 12 }]
+      : [{ name: "canonical-head", passed: true, detail: "Canonical production HEAD returned HTTP 200.", durationMs: 12 },
+        { name: "container-workers", passed: true, detail: "sync is running (1 of 1 copy)", durationMs: 3 }],
+    diagnostics: verification.failed ? [{ level: "error", code: "COMPUTE_CRASH_LOOP", message: CRASH_LOOP }] : [],
+    startedAt: now, finishedAt: now, createdAt: now,
+  };
+}
+
+function verificationOperation(verification) {
+  return {
+    id: verification.operationId, appId, deploymentId: verification.deploymentId, type: "verify_app",
+    state: verification.failed ? "failed" : "succeeded", actorType: "user", actorId, idempotencyKey: "server-redacted",
+    error: verification.failed ? { code: "COMPUTE_CRASH_LOOP", message: CRASH_LOOP } : null, createdAt: now, updatedAt: now,
   };
 }
 
@@ -78,17 +114,17 @@ function fileRecord(filePath, value) {
   };
 }
 
-function operation(id, deploymentId) {
+function operation(id, deploymentId, failure = null) {
   return {
     id,
     appId,
     deploymentId,
     type: "deploy",
-    state: "succeeded",
+    state: failure ? "failed" : "succeeded",
     actorType: "user",
     actorId,
     idempotencyKey: "server-redacted",
-    error: null,
+    error: failure,
     createdAt: now,
     updatedAt: now,
   };
@@ -146,9 +182,14 @@ const server = createServer(async (request, response) => {
   if (url.pathname === "/version") {
     return send(response, 200, { version: "9.9.9", commit: "contract", builtAt: now, releaseId: "platform-v9.9.9", contracts: state.contracts });
   }
+  if (url.pathname === "/v1/installation") {
+    return state.installation ? send(response, 200, state.installation) : send(response, 404, { code: "NOT_FOUND", message: "not found" });
+  }
   if (parts[0] === "v1" && parts[1] === "operations") {
+    const verification = [...state.verifications.values()].find((value) => value.operationId === parts[2]);
+    if (verification) return send(response, 200, verificationOperation(verification));
     const release = [...state.deployments.values()].find((value) => value.operationId === parts[2]);
-    return send(response, 200, operation(parts[2], release?.id ?? null));
+    return send(response, 200, operation(parts[2], release?.id ?? null, release?.operationFailure ?? null));
   }
   if (parts[0] !== "v1" || parts[1] !== "apps" || parts[2] !== appId) return send(response, 404, { code: "NOT_FOUND", message: "not found" });
   if (parts.length === 3 && request.method === "GET") {
@@ -187,9 +228,28 @@ const server = createServer(async (request, response) => {
       return send(response, 200, { draft: draftRecord(draft), files: [] });
     }
     if (parts[5] === "validate") {
+      if (state.contracts.pinnedDraftValidation === 1) assert.equal(JSON.parse(body).expectedRevision, draft.revision);
+      else {
+        // A server before pinned validation (2.35.x) was never sent a revision.
+        assert.equal("expectedRevision" in JSON.parse(body), false, "an older server was sent a pinned revision");
+        if (state.legacyHoldMs) {
+          const hold = state.legacyHoldMs;
+          state.legacyHoldMs = 0;
+          await new Promise((resolve) => setTimeout(resolve, hold));
+        }
+        if (state.legacyBuildBusy > 0) {
+          state.legacyBuildBusy -= 1;
+          return send(response, 429, { statusCode: 429, code: "FRONTEND_BUILD_BUSY", retryable: true,
+            message: "OpenCloud is still building this frontend; validate the same revision again to wait for it" });
+        }
+      }
       if (state.validationBusy > 0) {
         state.validationBusy -= 1;
-        return send(response, 429, { statusCode: 429, code: "FRONTEND_BUILD_BUSY", message: "Another frontend build for this app is running; validate again shortly" });
+        response.setHeader("Retry-After", "2");
+        // As OpenCloud answers: its error filter drops the retryable flag.
+        return send(response, 429, { statusCode: 429, code: "DRAFT_VALIDATION_IN_PROGRESS",
+          message: "Validation is pending; validate this exact revision again",
+          details: { appId, draftId: draft.id, revision: draft.revision, retryAfterSeconds: 2 } });
       }
       if (state.validationFailure) {
         draft.status = "validation_failed";
@@ -230,10 +290,30 @@ const server = createServer(async (request, response) => {
         source: sourceBytes ? { bytes: sourceBytes, sha256: sha256(sourceBytes), fileCount: draft.files.size } : null,
       };
       state.deployments.set(id, release);
+      if (state.failNextDeploy) {
+        state.failNextDeploy = false;
+        release.failure = { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.",
+          details: { category: "execution", origin: "app", phase: "startup", retryScope: "none", retryable: false, billingDisposition: "confirmed_usage", exitCode: 3, workloadName: "pricing" } };
+        release.operationFailure = { code: "DEPLOYMENT_COMPENSATED",
+          message: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully." };
+        return send(response, 202, { draft: draftRecord(draft), deployment: deploymentRecord(release), operation: operation(operationId, id, release.operationFailure) });
+      }
       state.activeDeploymentId = id;
       draft.status = "deployed";
       return send(response, 202, { draft: draftRecord(draft), deployment: deploymentRecord(release), operation: operation(operationId, id) });
     }
+  }
+  if (parts[3] === "verifications" && request.method === "POST") {
+    const failed = state.failNextVerification;
+    state.failNextVerification = false;
+    const verification = { id: randomUUID(), operationId: randomUUID(), deploymentId: state.activeDeploymentId, failed };
+    state.verifications.set(verification.id, verification);
+    return send(response, 200, { verification: { ...verificationRecord(verification), state: "queued", phases: [], diagnostics: [], finishedAt: null },
+      operation: { ...verificationOperation(verification), state: "queued", error: null } });
+  }
+  if (parts[3] === "verifications" && parts[4]) {
+    const verification = state.verifications.get(parts[4]);
+    return verification ? send(response, 200, verificationRecord(verification)) : send(response, 404, { code: "NOT_FOUND", message: "verification" });
   }
   if (parts[3] === "deployments" && parts[4]) {
     const release = state.deployments.get(parts[4]);
@@ -327,13 +407,66 @@ try {
   const error = JSON.parse(refused.stderr.trim().split("\n").at(-1)).error;
   assert.equal(error.code, "ACTIVE_DEPLOYMENT_CHANGED");
   assert.equal(error.latestDeploymentId, newer);
-  assert.match(error.hint, /opencloud pull/);
+  const newerVersion = state.deployments.get(newer).version;
+  assert.equal(error.hint, `Release ${newerVersion} (${newer}) replaced the one this copy is based on. Run \`opencloud pull ${app}\` to bring it in (if your edits would be overwritten, merge them by hand and run \`opencloud pull ${app} --deployment ${newer} --merged\`), then deploy again; or deploy with --force to replace it.`);
   assert.equal(state.activeDeploymentId, newer);
 
   // 4. --force replaces the newer release deliberately.
   await runCli(["deploy", app, "--force"]);
   assert.equal(deployRequest().query, "");
   assert.notEqual(state.activeDeploymentId, newer);
+
+  // 4b. After a rollback, the release this copy is based on is rolled_back:
+  //     the hint names the exact command that records the live one as its
+  //     base, and following it lets the copy deploy again.
+  const forced = state.activeDeploymentId;
+  state.deployments.get(forced).rolledBack = true;
+  state.activeDeploymentId = newer;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3b');\n");
+  const afterRollback = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.equal(afterRollback.code, "ACTIVE_DEPLOYMENT_CHANGED");
+  assert.equal(afterRollback.hint, `The release this copy is based on was rolled back, and release ${newerVersion} (${newer}) is live. To deploy this copy over it, run \`opencloud pull ${app} --deployment ${newer} --merged\` (it records that release as this copy's base and changes no files), then deploy again; or deploy with --force.`);
+  await runCli(["pull", app, "--deployment", newer, "--merged"]);
+  await runCli(["deploy", app]);
+  assert.equal(deployRequest().query, `?expectedActiveDeploymentId=${newer}`);
+  assert.notEqual(state.activeDeploymentId, newer);
+
+  // 4c. A deploy OpenCloud compensated names the release's own failure, with
+  //     its exit code and the logs that show it, and the live release stays.
+  const liveBeforeFailure = state.activeDeploymentId;
+  state.failNextDeploy = true;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3c');\n");
+  const compensated = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.equal(state.activeDeploymentId, liveBeforeFailure);
+  assert.deepEqual({ code: compensated.code, operationErrorCode: compensated.operationErrorCode, deploymentError: compensated.deploymentError }, {
+    code: "OPERATION_FAILED", operationErrorCode: "DEPLOYMENT_COMPENSATED",
+    deploymentError: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.", details: {
+      category: "execution", origin: "app", phase: "startup", retryScope: "none", retryable: false, billingDisposition: "confirmed_usage", exitCode: 3, workloadName: "pricing" } },
+  });
+  assert.match(compensated.hint, new RegExp(`^OpenCloud kept the release that was live before\\. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container --workload pricing --from `));
+  assert.equal(compensated.operationErrorMessage, "Deployment failed and the previous runtime topology was restored: The container failed to start successfully.");
+
+  // 4d. A deploy goes live and OpenCloud's verification follows; when it
+  //     fails (a worker in a crash loop), the deploy exits non-zero with its
+  //     code, reason and the ways forward, though the release stays live.
+  const verifiedDeploy = JSON.parse((await runCli(["deploy", app])).stdout);
+  assert.equal(verifiedDeploy.verification.state, "passed");
+  assert.equal(verifiedDeploy.verification.phases.at(-1).name, "container-workers");
+  const beforeBroken = state.activeDeploymentId;
+  state.failNextVerification = true;
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3d');\n");
+  const unverified = JSON.parse((await runCli(["deploy", app], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+  assert.notEqual(state.activeDeploymentId, beforeBroken, "The release went live before verification");
+  assert.equal(unverified.code, "VERIFICATION_FAILED");
+  assert.equal(unverified.message, `The release went live, but OpenCloud's verification of it failed with COMPUTE_CRASH_LOOP: ${CRASH_LOOP}`);
+  assert.equal(unverified.verificationCode, "COMPUTE_CRASH_LOOP");
+  assert.equal(unverified.deploymentId, state.activeDeploymentId);
+  assert.ok(unverified.hint.startsWith(`The release is live. To see why, run \`opencloud logs ${appId} --page --surface container --from `), unverified.hint);
+  assert.ok(unverified.hint.endsWith(`To check it again, run \`opencloud app verify ${appId}\`. To go back to the earlier release, run \`opencloud deployment rollback ${appId} ${beforeBroken}\`.`), unverified.hint);
+  // --no-verify skips it, and the deploy's entry was settled, so this runs at once.
+  await writeFile(path.join(app, "frontend/src/main.ts"), "console.log('planner v3e');\n");
+  const unchecked = JSON.parse((await runCli(["deploy", app, "--no-verify"])).stdout);
+  assert.equal("verification" in unchecked, false);
 
   // 5. When the server resolves the author manifest differently, the CLI keeps
   //    the source but sends the canonical manifest instead.
@@ -353,7 +486,7 @@ try {
   assert.equal(deployRequest().query, "");
   assert.doesNotMatch(bundleOnly.stderr, /Also kept with the app's source/);
   assert.equal("sourceOnlyFiles" in JSON.parse(bundleOnly.stdout), false);
-  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 };
 
   // 7. pull writes a release into an empty directory and records its base.
   const live = await externalRelease({ "opencloud.yaml": manifest, "frontend/src/main.ts": "console.log('live');\n" });
@@ -429,7 +562,7 @@ try {
   state.validationDigests = ["c".repeat(64)];
   await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built v2');\n");
   const waited = await runCli(["deploy", built]);
-  assert.match(waited.stderr, /Another frontend build for this app is running; retrying/);
+  assert.match(waited.stderr, /Validation is still running for draft .* revision \d+; waiting for its result/);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "c".repeat(64));
 
   // 13. A failed build prints its diagnostics and deploys nothing.
@@ -447,14 +580,57 @@ try {
   await runCli(["deploy", built]);
   assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "d".repeat(64));
 
-  // 14. An API that cannot build frontends refuses before creating a draft.
+  // 14. A server from before pinned validation (2.35.x) gets 3.20's requests:
+  //     no revision, a frontend build's request held past 30 seconds instead
+  //     of being abandoned, and FRONTEND_BUILD_BUSY validated again on the same
+  //     revision.
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1 };
+  state.legacyHoldMs = 31_000;
+  state.legacyBuildBusy = 1;
+  state.validationDigests = ["e".repeat(64)];
+  await writeFile(path.join(built, "frontend/src/main.ts"), "console.log('built on 2.35');\n");
+  const legacyAt = state.requests.length;
+  const legacy = await runCli(["deploy", built]);
+  assert.equal(state.requests.slice(legacyAt).filter((request) => request.path.endsWith("/validate")).length, 2);
+  assert.match(legacy.stderr, /OpenCloud is still building this app's frontend .*validating the same revision again/);
+  assert.equal(state.deployments.get(state.activeDeploymentId).artifactSha256, "e".repeat(64));
+
+  // 15. A manifest with containers, on an installation that doesn't run them,
+  //     is refused plainly before any draft; one that runs them, or a server
+  //     too old to say, gets the manifest as before.
+  const containerApp = path.join(temporary, "container-app");
+  await writeTree(containerApp, {
+    "opencloud.yaml": `schemaVersion: 3\nappId: ${appId}\nfrontend:\n  container: web\ncontainers:\n  - name: web\n    kind: service\n    image: registry.example/web:1\n    service:\n      startupProbe: { path: /ready }\n      readinessProbe: { path: /ready }\n`,
+  });
+  state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1, platformBuilds: 1, pinnedDraftValidation: 1 };
+  const draftsBeforeContainers = state.drafts.size;
+  for (const installation of [
+    { schemaVersion: 1, capabilities: { organisations: true } },
+    { schemaVersion: 1, capabilities: { compute: { jobs: true, services: false, workers: true, containerFrontend: false } } },
+  ]) {
+    state.installation = installation;
+    const refusedContainers = JSON.parse((await runCli(["deploy", containerApp], { status: 1 })).stderr.trim().split("\n").at(-1)).error;
+    assert.equal(refusedContainers.code, "COMPUTE_NOT_OFFERED");
+    assert.equal(refusedContainers.message, installation.capabilities.compute
+      ? "This installation doesn't run container services or a container frontend. Remove them from opencloud.yaml to use this app here."
+      : "This installation doesn't run containers. Remove the containers, and a container frontend, from opencloud.yaml to use this app here.");
+  }
+  assert.equal(state.drafts.size, draftsBeforeContainers, "a draft was created for a manifest the installation can't run");
+  state.installation = { schemaVersion: 1, capabilities: { compute: { jobs: true, services: true, workers: true, containerFrontend: true } } };
+  state.localDigest = JSON.parse((await runCli(["validate", containerApp])).stdout).artifactSha256;
+  state.validationDigests = [];
+  await runCli(["deploy", containerApp]);
+  assert.equal(state.drafts.size, draftsBeforeContainers + 1);
+  state.installation = null;
+
+  // 16. An API that cannot build frontends refuses before creating a draft.
   state.contracts = { cliMutationJournal: 1, releaseSource: 1, deployPreconditions: 1 };
   const drafts = state.drafts.size;
   const unsupported = await runCli(["deploy", built], { status: 1 });
   assert.equal(JSON.parse(unsupported.stderr.trim().split("\n").at(-1)).error.code, "PLATFORM_BUILD_UNSUPPORTED");
   assert.equal(state.drafts.size, drafts);
 
-  process.stdout.write("Release source HTTP contract passed: full-source upload and its source-only files, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, and platform-built frontends.\n");
+  process.stdout.write("Release source HTTP contract passed: full-source upload and its source-only files, stale-release precondition and --force, canonical fallback, older APIs, base recording, pull and --merged, platform-built frontends, and 3.20's validation for a server without pinned validation.\n");
 } finally {
   server.close();
   await rm(temporary, { recursive: true, force: true });

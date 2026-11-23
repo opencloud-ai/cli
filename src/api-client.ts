@@ -1,17 +1,25 @@
 export * from "@opencloud/control-plane-client";
-import { OpenCloudClient as PlatformClient, type ClientOptions } from "@opencloud/control-plane-client";
+import { OpenCloudClient as PlatformClient, type CallOptions, type ClientOptions } from "@opencloud/control-plane-client";
+import {
+  controlPlaneOperations,
+  type ControlPlaneOperationId,
+  type ControlPlaneOperationInput,
+  type ControlPlaneOperationOutput,
+} from "@opencloud/contracts/control-plane";
 import { apiErrorFromResponse } from "../vendor/control-plane-client/src/errors.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { withCliHeaders } from "./cli-http.js";
+import { CliContractError } from "./cli-contract-error.js";
+import { isZodError, issueSummary, readableIssues } from "./readable-issues.js";
 import { slowResponseFetch } from "./slow-response-fetch.js";
 
 /**
  * CLI disk transfers remain outside the portable platform client snapshot.
  * JSON requests may wait past global fetch's 300-second header limit, for
- * example while validation builds the frontend; see slowResponseFetch.
+ * example while development prepares containers; see slowResponseFetch.
  * Every request carries the CLI's user-agent and an x-request-id.
  */
 export class OpenCloudClient extends PlatformClient {
@@ -24,6 +32,30 @@ export class OpenCloudClient extends PlatformClient {
       fetch: withCliHeaders(transferOptions.fetch ?? slowResponseFetch, attribution),
     });
     this.transferFetch = withCliHeaders(transferOptions.fetch ?? slowResponseFetch, attribution);
+  }
+
+  /**
+   * Answers are parsed with this release's strict contract schemas, so an
+   * OpenCloud API of another version can send one this CLI cannot read. Say
+   * so, instead of a bare schema error that reads like a mistake in the input.
+   */
+  override async call<T extends ControlPlaneOperationId>(
+    operationId: T,
+    rawInput: ControlPlaneOperationInput<T>,
+    options: CallOptions = {},
+  ): Promise<ControlPlaneOperationOutput<T>> {
+    try {
+      return await super.call(operationId, rawInput, options);
+    } catch (error) {
+      // The input is parsed before anything is sent; valid input means the answer failed.
+      if (!isZodError(error) || !controlPlaneOperations[operationId].input.safeParse(rawInput).success) throw error;
+      const issues = readableIssues(error.issues);
+      throw new CliContractError(
+        "API_CONTRACT_MISMATCH",
+        `${issueSummary(`OpenCloud's answer to ${operationId}`, issues)}. This CLI and the OpenCloud API may be different versions.`,
+        { issues, cause: error },
+      );
+    }
   }
 
   private async transferHeaders(): Promise<Record<string, string>> {

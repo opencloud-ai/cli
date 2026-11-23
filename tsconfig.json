@@ -13,9 +13,12 @@
     "skipLibCheck": true,
     "noEmit": true,
     "paths": {
+      "@opencloud/agent-protocol": ["./src/agent-protocol-snapshot.ts"],
+      "@opencloud/compute-protocol": ["./vendor/compute-protocol/src/index.ts"],
+      "@opencloud/contracts/containers": ["./vendor/contracts/src/containers.ts"],
       "@opencloud/contracts/control-plane": ["./vendor/contracts/src/control-plane.ts"],
       "@opencloud/contracts": ["./vendor/contracts/src/index.ts"],
-      "@opencloud/js": ["./vendor/browser-client/src/index.ts"],
+      "@opencloud/js": ["./src/sdk-version.ts"],
       "@opencloud/bundler": ["./vendor/bundler/src/index.ts"],
       "@opencloud/control-plane-client": [
         "./vendor/control-plane-client/src/index.ts"

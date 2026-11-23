@@ -168,8 +168,9 @@ export async function buildBundle(
     migration.sha256 = await sha256File(migrationFile);
   }
   const manifest = parseManifest(raw);
+  const staticFrontend = "directory" in manifest.frontend ? manifest.frontend : null;
   const platformFrontend =
-    options.platformFrontend === true && manifest.frontend.build !== undefined;
+    options.platformFrontend === true && staticFrontend?.build !== undefined;
   const selection = await selectBundleFiles(
     root,
     manifest,
@@ -178,8 +179,8 @@ export async function buildBundle(
   );
   if (!platformFrontend) await validateAppRouteAssets(root, manifest);
   const e2eTest = await selectE2eTest(root, selection, manifestFile);
-  if (e2eTest) {
-    assertE2eTestOutsideFrontend(manifest.frontend.directory);
+  if (e2eTest && staticFrontend) {
+    assertE2eTestOutsideFrontend(staticFrontend.directory);
   }
   const functionWarnings = await inspectFunctionEntrypoints(
     manifest,
@@ -188,12 +189,12 @@ export async function buildBundle(
   await assertSelfContainedFunctions(manifest, selection);
   const warnings = [
     ...(await findUndeclaredConventionalFiles(root, manifest)),
-    ...(platformFrontend
+    ...(platformFrontend && staticFrontend
       ? [
           {
             code: "FRONTEND_BUILT_BY_PLATFORM" as const,
-            path: manifest.frontend.directory,
-            message: `OpenCloud builds ${manifest.frontend.directory} with npm run ${manifest.frontend.build!.script} during validation; this local bundle leaves it out.`,
+            path: staticFrontend.directory,
+            message: `OpenCloud builds ${staticFrontend.directory} with npm run ${staticFrontend.build!.script} during validation; this local bundle leaves it out.`,
           },
         ]
       : await findFrontendSdkWarnings(manifest, selection)),
@@ -265,6 +266,7 @@ export async function validateAppRouteAssets(
   root: string,
   manifest: OpenCloudManifest,
 ): Promise<void> {
+  if (!("directory" in manifest.frontend)) return;
   const frontend = resolveBundlePath(
     root,
     manifest.frontend.directory,
@@ -358,16 +360,16 @@ async function selectE2eTest(
 }
 
 function validateE2eTestSource(source: string): void {
-  const code = maskJavaScriptCommentsAndLiterals(source);
+  const withImport = maskJavaScriptCommentsAndLiterals(source).code;
   const imports = [
     ...source.matchAll(
       /\bimport\s*\{([\s\S]*?)\}\s*from\s*(["'])([^"']+)\2\s*;?/g,
     ),
   ].filter((match) => {
     const index = match.index ?? -1;
-    return index >= 0 && code.slice(index, index + 6) === "import";
+    return index >= 0 && withImport.slice(index, index + 6) === "import";
   });
-  const importTokenCount = code.match(/\bimport\b/g)?.length ?? 0;
+  const importTokenCount = withImport.match(/\bimport\b/g)?.length ?? 0;
   if (
     imports.length !== 1 ||
     importTokenCount !== 1 ||
@@ -390,6 +392,16 @@ function validateE2eTestSource(source: string): void {
       `OpenCloud E2E test must import exactly test and expect from "@opencloud/test": ${OPEN_CLOUD_E2E_TEST_PATH}`,
     );
   }
+  // The runner deletes the import line and runs the rest, so check the rest
+  // as it runs: with the import blanked (line breaks kept), the code before
+  // it meets the code after it, `x = a` then `/ 2; ...` on the next line.
+  const [importText = ""] = imports[0] ?? [];
+  const importStart = imports[0]?.index ?? 0;
+  const { code, problem } = maskJavaScriptCommentsAndLiterals(
+    source.slice(0, importStart) +
+      importText.replace(/[^\n\r\u2028\u2029]/g, " ") +
+      source.slice(importStart + importText.length),
+  );
   if (!/\btest\s*\(/.test(code)) {
     throw new Error(
       `OpenCloud E2E test must declare at least one test(...): ${OPEN_CLOUD_E2E_TEST_PATH}`,
@@ -410,9 +422,10 @@ function validateE2eTestSource(source: string): void {
     );
   }
 
+  // `$1` in a label names what matched.
   const forbiddenPatterns: Array<[RegExp, string]> = [
     [/\bfetch\s*\(/, "fetch"],
-    [/\b(?:XMLHttpRequest|WebSocket|EventSource)\b/, "direct network APIs"],
+    [/\b(XMLHttpRequest|WebSocket|EventSource)\b/, "$1, a direct network API"],
     [/\bnavigator\s*[.]\s*sendBeacon\s*\(/, "sendBeacon"],
     [
       /[.]\s*(?:evaluate|evaluateAll|evaluateHandle|\$eval|\$\$eval)\s*\(/,
@@ -429,11 +442,19 @@ function validateE2eTestSource(source: string): void {
     ],
   ];
   for (const [pattern, label] of forbiddenPatterns) {
-    if (pattern.test(code)) {
+    const match = pattern.exec(code);
+    if (match) {
       throw new Error(
-        `OpenCloud E2E test cannot use ${label}; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+        `OpenCloud E2E test cannot use ${label.replace("$1", match[1] ?? "")}; drive the app through the bounded @opencloud/test UI fixtures: ${OPEN_CLOUD_E2E_TEST_PATH}`,
       );
     }
+  }
+  // Checked after the named refusals, which stay the clearer message when
+  // they match anyway.
+  if (problem) {
+    throw new Error(
+      `OpenCloud E2E test cannot be checked at line ${problem.line}: ${problem.reason}: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+    );
   }
   if (/\/(?:rest|storage|functions)\/v1(?:\/|\b)/.test(source)) {
     throw new Error(
@@ -442,7 +463,148 @@ function validateE2eTestSource(source: string): void {
   }
 }
 
-function maskJavaScriptCommentsAndLiterals(source: string): string {
+// How far a `for (...)` header has got: still expecting its binding or
+// assignment target, just after one (so an `of` here is the for-of keyword),
+// or past the point where an `of` keyword could come.
+type ForHeadState = "target" | "afterTarget" | "done";
+
+type LexerScope =
+  | {
+      kind: "paren";
+      regexAfter: boolean;
+      // Set only on a `for` statement's header.
+      forHead: ForHeadState | null;
+      ternaryDepth: number;
+    }
+  | { kind: "bracket"; ternaryDepth: number }
+  | {
+      kind: "brace";
+      regexAfter: boolean;
+      // An object literal, where `key:` is followed by a value; other braces
+      // with `regexAfter: false` are function or class expression bodies,
+      // where `label:` starts a statement.
+      objectLiteral: boolean;
+      ternaryDepth: number;
+    }
+  | { kind: "template"; ternaryDepth: number };
+
+// Keywords after which a `/` starts a regular expression literal rather than division.
+// The runner compiles an E2E test as a strict-mode function body, so `yield`
+// is reserved. `await` is a keyword only inside async functions; the masker
+// reads it as one and reports the uses it can't read either way.
+const REGULAR_EXPRESSION_KEYWORDS = new Set([
+  "await",
+  "case",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "extends",
+  "in",
+  "instanceof",
+  "new",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// Keywords after which `{` opens an object literal rather than a statement block.
+const EXPRESSION_BRACE_KEYWORDS = new Set([
+  "await",
+  "case",
+  "default",
+  "delete",
+  "extends",
+  "in",
+  "instanceof",
+  "new",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// Statement-header keywords whose closing `)` can be followed directly by a
+// statement (and therefore a regular expression literal).
+const STATEMENT_HEADER_KEYWORDS = new Set(["if", "while", "for", "with"]);
+
+// In a `for (...)` header, words after which the binding or target that an
+// `of` keyword follows is still to come: `for (const of of items)` and
+// `for (new Box().value of items)`.
+const FOR_HEAD_TARGET_PREFIX_WORDS = new Set([
+  "class",
+  "const",
+  "extends",
+  "function",
+  "let",
+  "new",
+  "var",
+]);
+
+// In a `for (...)` header, operator and statement words after which no `of`
+// keyword can come, so a later `of` is a name: `for (k in of / 2)`.
+const FOR_HEAD_ENDING_WORDS = new Set([
+  "case",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "in",
+  "instanceof",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// Words that can't continue an expression across a line break, so the next
+// line starts a statement: after `async` a `function` there is a declaration,
+// and after `return` or `yield` a `{` there opens a block.
+const LINE_BREAK_ENDS_EXPRESSION_WORDS = new Set(["async", "return", "yield"]);
+
+type MaskedJavaScript = {
+  /**
+   * The source with the text of comments and of string, template and regular
+   * expression literals blanked, position for position. A template's `${...}`
+   * stays code.
+   */
+  code: string;
+  /** Where the masker knows it can't vouch for `code`, and why. */
+  problem: { line: number; reason: string } | null;
+};
+
+// `await` is a keyword inside async functions and a name elsewhere, and the
+// masker doesn't track which kind of function it is in. These are the places
+// where the two readings take what follows differently.
+const AWAIT_SLASH_PROBLEM =
+  'a "/" after await there reads one way if await is a keyword and another if it is a name; put the regular expression in parentheses';
+const AWAIT_LINE_BREAK_PROBLEM =
+  'a line ending in await is followed by a "{", or a named function or class, that may start a statement of its own; keep what await waits for on the same line';
+// After a declaration without a value, `break`, `continue` or `debugger`,
+// JavaScript ends the statement and reads a regular expression; after most
+// other code it divides. The masker can't always tell those apart.
+const LEADING_SLASH_PROBLEM =
+  'the line starts with "/" after something it could divide; start the line with ";" if the "/" begins a regular expression, or end the line before with the "/" if it divides';
+// Either the test doesn't parse or the masker misread what came before, so
+// neither message says what the author wrote is wrong.
+const UNCLOSED_REGULAR_EXPRESSION_PROBLEM =
+  'the checker reads a "/" there as starting a regular expression, but none ends on that line within 1,024 characters; if the "/" divides, put what comes before it in parentheses';
+const UNCLOSED_QUOTE_PROBLEM =
+  "the checker lost track of where strings and regular expressions end, at a quote with no closing quote on that line; if the line has a regular expression, put it in parentheses";
+
+/**
+ * Blanks comments and literal text so the checks read code. Decides whether a
+ * `/` starts a regular expression or divides from the tokens before it, as the
+ * JavaScript grammar does, and reports a problem where it knows it can't
+ * decide. It is a careful reader rather than a parser, so unusual code it
+ * doesn't know can still be misread; it gives an early, clear refusal, and the
+ * runner's blank page, which aborts every request, keeps tests off the network.
+ */
+function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
   let output = "";
   let index = 0;
   let state:
@@ -452,10 +614,99 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
     | "single-quote"
     | "double-quote"
     | "template" = "code";
+  const scopes: LexerScope[] = [];
+  let topTernaryDepth = 0;
+  let regexAllowed = true;
+  let expectObjectBrace = false;
+  let afterMemberAccess = false;
+  // Straight after `=>`, where `function` and `class` start expressions.
+  let afterArrow = false;
+  let prevWord: string | null = null;
+  let prevPrevWord: string | null = null;
+  // Scope depths at which expression-position `function`s and `class`es await
+  // their `{` bodies, innermost last: `function (a = function () {}) {}`.
+  const pendingExpressionBodies: number[] = [];
+  let awaitBeforeLineBreak = false;
+  // `await ++` or `await --`, which a "/" can't follow unambiguously.
+  let afterAwaitIncrement = false;
+  // A `function`, `class` or `async` on the line after an `await`: anonymous
+  // it can only be what await waits for; named it may be a declaration.
+  let declarationAfterAwait: "async" | "function" | "class" | null = null;
+  // No token yet on this line. The runner puts the test on a line of its own.
+  let atLineStart = true;
+  let problem: MaskedJavaScript["problem"] = null;
+
+  const report = (at: number, reason: string): void => {
+    if (problem) return;
+    let line = 1;
+    for (let position = 0; position < at; position += 1) {
+      const character = source[position] ?? "";
+      // CR LF ends one line.
+      if (isLineTerminator(character) && !(character === "\r" && source[position + 1] === "\n")) {
+        line += 1;
+      }
+    }
+    problem = { line, reason };
+  };
+
+  // A body that didn't open in its own scope never will (the code isn't what
+  // the masker took it for), so it can't claim a later brace.
+  const dropUnopenedBodies = (): void => {
+    while ((pendingExpressionBodies.at(-1) ?? -1) > scopes.length) {
+      pendingExpressionBodies.pop();
+    }
+  };
+  const closedScope = (): void => {
+    dropUnopenedBodies();
+    // A group closing in a for header completes (part of) its target:
+    // `for ([a, b] of pairs)`.
+    const top = scopes.at(-1);
+    if (top?.kind === "paren" && top.forHead !== null && top.forHead !== "done") {
+      top.forHead = "afterTarget";
+    }
+  };
+  const lineBreak = (): void => {
+    atLineStart = true;
+    if (prevWord !== null && LINE_BREAK_ENDS_EXPRESSION_WORDS.has(prevWord)) {
+      expectObjectBrace = false;
+      afterArrow = false;
+    }
+    if (prevWord === "await") awaitBeforeLineBreak = true;
+    // `async` then a line break is a name in either reading.
+    if (declarationAfterAwait === "async") declarationAfterAwait = null;
+  };
+
+  const incrementTernary = (): void => {
+    const top = scopes.at(-1);
+    if (top) top.ternaryDepth += 1;
+    else topTernaryDepth += 1;
+  };
+  const consumeTernary = (): boolean => {
+    const top = scopes.at(-1);
+    if (top) {
+      if (top.ternaryDepth > 0) {
+        top.ternaryDepth -= 1;
+        return true;
+      }
+      return false;
+    }
+    if (topTernaryDepth > 0) {
+      topTernaryDepth -= 1;
+      return true;
+    }
+    return false;
+  };
+
   while (index < source.length) {
     const character = source[index] ?? "";
     const next = source[index + 1] ?? "";
     if (state === "code") {
+      if (/\s/.test(character)) {
+        if (isLineTerminator(character)) lineBreak();
+        output += character;
+        index += 1;
+        continue;
+      }
       if (character === "/" && next === "/") {
         output += "  ";
         index += 2;
@@ -468,15 +719,426 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
         state = "block-comment";
         continue;
       }
-      if (character === "'") state = "single-quote";
-      else if (character === '"') state = "double-quote";
-      else if (character === "`") state = "template";
-      output += state === "code" ? character : " ";
+      // Outside modules JavaScript also reads `<!--`, and `-->` that starts a
+      // line, as the start of a line comment. (`<<!--` is a shift: `<<` is
+      // read as one token below, so its second `<` never starts one here.)
+      const htmlComment = source.startsWith("<!--", index)
+        ? 4
+        : atLineStart && source.startsWith("-->", index)
+          ? 3
+          : 0;
+      if (htmlComment) {
+        output += " ".repeat(htmlComment);
+        index += htmlComment;
+        state = "line-comment";
+        continue;
+      }
+
+      // A token starts here.
+      const tokenStartsLine = atLineStart;
+      atLineStart = false;
+      const tokenFollowsArrow: boolean = afterArrow;
+      afterArrow = false;
+      const afterAwait = prevWord === "await";
+      const awaitLineBreak = awaitBeforeLineBreak;
+      awaitBeforeLineBreak = false;
+      const followsAwaitIncrement = afterAwaitIncrement;
+      afterAwaitIncrement = false;
+      const pendingDeclaration: "async" | "function" | "class" | null =
+        declarationAfterAwait;
+      declarationAfterAwait = null;
+      const top = scopes.at(-1);
+      // In a for header, a token ends the stretch where an `of` keyword can
+      // come unless it belongs to the binding or target; those set it back.
+      const forHead =
+        top?.kind === "paren" && top.forHead !== null ? top : undefined;
+      const forHeadBefore = forHead?.forHead ?? "done";
+      if (forHead) forHead.forHead = "done";
+      const inForTarget = forHeadBefore !== "done";
+
+      if (character === "/") {
+        if (followsAwaitIncrement) report(index, AWAIT_SLASH_PROBLEM);
+        if (!regexAllowed && tokenStartsLine) report(index, LEADING_SLASH_PROBLEM);
+        if (regexAllowed) {
+          const end = regularExpressionLiteralEnd(source, index);
+          if (afterAwait && !regularExpressionAfterAwaitIsCertain(source, index, end)) {
+            report(index, AWAIT_SLASH_PROBLEM);
+          }
+          if (end === index) report(index, UNCLOSED_REGULAR_EXPRESSION_PROBLEM);
+          if (end > index) {
+            output += " ".repeat(end - index);
+            index = end;
+            if (forHead && inForTarget) forHead.forHead = "afterTarget";
+            regexAllowed = false;
+            expectObjectBrace = false;
+            afterMemberAccess = false;
+            prevWord = null;
+            prevPrevWord = null;
+            continue;
+          }
+        }
+        if (next === "=") {
+          output += "/=";
+          index += 2;
+        } else {
+          output += "/";
+          index += 1;
+        }
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "'" || character === '"' || character === "`") {
+        // A literal can start a target: `for ("".length of items)`.
+        if (forHead && inForTarget) forHead.forHead = "afterTarget";
+        state =
+          character === "'"
+            ? "single-quote"
+            : character === '"'
+              ? "double-quote"
+              : "template";
+        output += " ";
+        index += 1;
+        continue;
+      }
+      if (character === "}") {
+        if (top?.kind === "template") {
+          scopes.pop();
+          dropUnopenedBodies();
+          output += " ";
+          index += 1;
+          state = "template";
+          continue;
+        }
+        const popped = top?.kind === "brace" ? scopes.pop() : undefined;
+        closedScope();
+        output += "}";
+        index += 1;
+        regexAllowed = popped?.kind === "brace" ? popped.regexAfter : true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "{") {
+        // An object await waits for, or a block of its own after `await;`.
+        if (afterAwait && awaitLineBreak) report(index, AWAIT_LINE_BREAK_PROBLEM);
+        if (forHead) forHead.forHead = forHeadBefore;
+        // An expression-position `function` or `class` opens its body here,
+        // unless this brace is an object literal in the class heritage:
+        // `class extends {}.constructor {}`.
+        const opensExpressionBody =
+          !expectObjectBrace &&
+          pendingExpressionBodies.at(-1) === scopes.length;
+        if (opensExpressionBody) pendingExpressionBodies.pop();
+        scopes.push({
+          kind: "brace",
+          regexAfter: !expectObjectBrace && !opensExpressionBody,
+          objectLiteral: expectObjectBrace,
+          ternaryDepth: 0,
+        });
+        output += "{";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "(") {
+        if (forHead) forHead.forHead = forHeadBefore;
+        const isForHeader =
+          prevWord === "for" || (prevWord === "await" && prevPrevWord === "for");
+        const isStatementHeader =
+          isForHeader ||
+          (prevWord !== null && STATEMENT_HEADER_KEYWORDS.has(prevWord));
+        scopes.push({
+          kind: "paren",
+          regexAfter: isStatementHeader,
+          forHead: isForHeader ? "target" : null,
+          ternaryDepth: 0,
+        });
+        output += "(";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ")") {
+        const popped = top?.kind === "paren" ? scopes.pop() : undefined;
+        closedScope();
+        output += ")";
+        index += 1;
+        regexAllowed = popped?.kind === "paren" ? popped.regexAfter : false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "[") {
+        if (forHead) forHead.forHead = forHeadBefore;
+        scopes.push({ kind: "bracket", ternaryDepth: 0 });
+        output += "[";
+        index += 1;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "]") {
+        if (top?.kind === "bracket") scopes.pop();
+        closedScope();
+        output += "]";
+        index += 1;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "=" && next === ">") {
+        output += "=>";
+        index += 2;
+        regexAllowed = true;
+        // A `{` here opens the arrow's body, but `function` and `class`
+        // start an expression: `() => function () {} / 2`.
+        expectObjectBrace = false;
+        afterArrow = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if ((character === "+" || character === "-") && next === character) {
+        if (afterAwait) afterAwaitIncrement = true;
+        output += character + next;
+        index += 2;
+        // Prefix where an operand can start (also after a line break, where
+        // JavaScript ends the statement first): `++/a/.lastIndex`. Postfix
+        // after an operand on its line: `count++ / 2`.
+        regexAllowed = regexAllowed || tokenStartsLine;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      // JavaScript reads the longest punctuator, so `<<!--` is `<<`, `!`, `--`.
+      if (character === "<" && next === "<") {
+        output += "<<";
+        index += 2;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      // Before a digit, `?.` is a conditional and a number: `ok ?.5 : 1`.
+      if (character === "?" && next === "." && !/[0-9]/.test(source[index + 2] ?? "")) {
+        if (forHead && inForTarget) forHead.forHead = "target";
+        output += "?.";
+        index += 2;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = true;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "?" && next === "?") {
+        output += "??";
+        index += 2;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "?") {
+        output += "?";
+        index += 1;
+        incrementTernary();
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ":") {
+        output += ":";
+        index += 1;
+        const inTernary = consumeTernary();
+        const inObject = top?.kind === "brace" && top.objectLiteral;
+        regexAllowed = true;
+        expectObjectBrace = inTernary || inObject;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "." && next === "." && source[index + 2] === ".") {
+        output += "...";
+        index += 3;
+        regexAllowed = true;
+        expectObjectBrace = true;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      // A number, including one that starts with its decimal point: `.5`.
+      if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(next))) {
+        let end = index + 1;
+        while (end < source.length && /[0-9A-Za-z_]/.test(source[end] ?? "")) {
+          end += 1;
+        }
+        // A decimal integer takes its point and any fraction, so in `1. in x`
+        // the `in` is a keyword, not a property.
+        if (source[end] === "." && /^[0-9][0-9_]*$/.test(source.slice(index, end))) {
+          end += 1;
+          while (end < source.length && /[0-9A-Za-z_]/.test(source[end] ?? "")) {
+            end += 1;
+          }
+        }
+        if (forHead && inForTarget) forHead.forHead = "afterTarget";
+        output += source.slice(index, end);
+        index = end;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === "." || character === "#") {
+        if (forHead && inForTarget) forHead.forHead = "target";
+        output += character;
+        index += 1;
+        regexAllowed = false;
+        expectObjectBrace = false;
+        afterMemberAccess = true;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (character === ";") {
+        while (pendingExpressionBodies.at(-1) === scopes.length) {
+          pendingExpressionBodies.pop();
+        }
+        output += ";";
+        index += 1;
+        regexAllowed = true;
+        // In a for header an expression follows: `for (; {}.done; )`.
+        expectObjectBrace = forHead !== undefined;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      if (/[A-Za-z_$\\]|[^\x00-\x7f]/.test(character)) {
+        let end = index + 1;
+        // Non-ASCII spaces and line terminators (U+00A0, U+2028) end a word;
+        // a `\u{61}` escape belongs to it.
+        while (end < source.length) {
+          if (source[end] === "{" && source[end - 1] === "u" && source[end - 2] === "\\") {
+            const escape = /\{[0-9A-Fa-f]+\}/y;
+            escape.lastIndex = end;
+            if (!escape.test(source)) break;
+            end = escape.lastIndex;
+          } else if (/[A-Za-z0-9_$\\]|[^\x00-\x7f\s]/.test(source[end] ?? "")) {
+            end += 1;
+          } else {
+            break;
+          }
+        }
+        const word = source.slice(index, end);
+        output += word;
+        index = end;
+        const asciiWord = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(word);
+        const keyword = !afterMemberAccess && asciiWord;
+        // `of` is the for-of keyword only straight after the binding or
+        // target; elsewhere in the header it can be a name: `for (i = of / 2;`.
+        const isForOf =
+          keyword && word === "of" && forHeadBefore === "afterTarget";
+        if (forHead && inForTarget && !isForOf) {
+          forHead.forHead = !keyword
+            ? "afterTarget"
+            : FOR_HEAD_ENDING_WORDS.has(word)
+              ? "done"
+              : FOR_HEAD_TARGET_PREFIX_WORDS.has(word)
+                ? "target"
+                : "afterTarget";
+        }
+        // On the line after `await`, an anonymous function or class can only
+        // be what await waits for (as a statement it would need a name); a
+        // named one may be a declaration of its own.
+        if (
+          keyword &&
+          ((afterAwait && awaitLineBreak) || pendingDeclaration === "async") &&
+          (word === "function" || word === "class" || word === "async")
+        ) {
+          declarationAfterAwait =
+            pendingDeclaration === "async" && word !== "function" ? null : word;
+        } else if (
+          (pendingDeclaration === "function" || pendingDeclaration === "class") &&
+          !(pendingDeclaration === "class" && keyword && word === "extends")
+        ) {
+          report(index, AWAIT_LINE_BREAK_PROBLEM);
+        }
+        if (
+          keyword &&
+          (word === "function" || word === "class") &&
+          (expectObjectBrace || tokenFollowsArrow) &&
+          prevWord !== "default"
+        ) {
+          pendingExpressionBodies.push(scopes.length);
+        }
+        regexAllowed =
+          keyword && (REGULAR_EXPRESSION_KEYWORDS.has(word) || isForOf);
+        if (keyword && word === "async") {
+          // Preserve expression position across `async function() {}`.
+          afterArrow = tokenFollowsArrow;
+        } else {
+          expectObjectBrace =
+            keyword && (EXPRESSION_BRACE_KEYWORDS.has(word) || isForOf);
+        }
+        prevPrevWord = keyword ? prevWord : null;
+        prevWord = keyword ? word : null;
+        afterMemberAccess = false;
+        continue;
+      }
+      // `function*` after an `await` line break: the name, if any, is next.
+      if (character === "*" && pendingDeclaration === "function") {
+        declarationAfterAwait = "function";
+      }
+      output += character;
       index += 1;
+      const isOperator = ",=!&|+-*%<>~^".includes(character);
+      regexAllowed = isOperator;
+      expectObjectBrace = isOperator;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
       continue;
     }
     if (state === "line-comment") {
-      if (character === "\n") {
+      if (isLineTerminator(character)) {
+        lineBreak();
         output += "\n";
         state = "code";
       } else output += " ";
@@ -489,6 +1151,7 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
         index += 2;
         state = "code";
       } else {
+        if (isLineTerminator(character)) lineBreak();
         output += character === "\n" ? "\n" : " ";
         index += 1;
       }
@@ -500,13 +1163,108 @@ function maskJavaScriptCommentsAndLiterals(source: string): string {
       output += " ";
       if (index + 1 < source.length) output += next === "\n" ? "\n" : " ";
       index += 2;
+      // A line continuation may end with CR LF.
+      if (next === "\r" && source[index] === "\n") {
+        output += "\n";
+        index += 1;
+      }
+      continue;
+    }
+    if (state !== "template" && (character === "\n" || character === "\r")) {
+      // Read code again from the line break, so the checks still see the
+      // lines after it.
+      report(index, UNCLOSED_QUOTE_PROBLEM);
+      state = "code";
+      continue;
+    }
+    if (state === "template" && character === "$" && next === "{") {
+      // `{` opens an expression, so a `/` straight after it starts a regular expression.
+      output += " {";
+      index += 2;
+      scopes.push({ kind: "template", ternaryDepth: 0 });
+      state = "code";
+      regexAllowed = true;
+      expectObjectBrace = true;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
       continue;
     }
     output += character === "\n" ? "\n" : " ";
     index += 1;
-    if (character === terminator) state = "code";
+    if (character === terminator) {
+      state = "code";
+      regexAllowed = false;
+      expectObjectBrace = false;
+      afterMemberAccess = false;
+      prevWord = null;
+      prevPrevWord = null;
+    }
   }
-  return output;
+  return { code: output, problem };
+}
+
+// A longer literal is reported as unreadable; the bound keeps the scan linear.
+const MAX_REGULAR_EXPRESSION_LITERAL = 1_024;
+
+/**
+ * Whether the regular expression literal at `start`..`end` straight after
+ * `await` can't be a division instead (with `await` a name): its body is one
+ * plain word with no flags, and what follows on the line can't follow a
+ * division, so `await / a / .exec(s)` doesn't parse: `await /a/.exec(s)`.
+ */
+function regularExpressionAfterAwaitIsCertain(
+  source: string,
+  start: number,
+  end: number,
+): boolean {
+  const body = /^\/([A-Za-z0-9_$]+)\/$/.exec(source.slice(start, end))?.[1];
+  // A keyword body would start a regular expression at the closing "/".
+  if (!body || REGULAR_EXPRESSION_KEYWORDS.has(body) || body === "of") return false;
+  let after = end;
+  while (source[after] === " " || source[after] === "\t") after += 1;
+  const next = source[after] ?? "";
+  return (
+    next === "" ||
+    /[)\]};,:?]/.test(next) ||
+    (next === "." && !/[0-9]/.test(source[after + 1] ?? ""))
+  );
+}
+
+/** JavaScript's line terminators, which a regular expression literal can't contain. */
+function isLineTerminator(character: string): boolean {
+  const code = character.charCodeAt(0);
+  return code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029;
+}
+
+/**
+ * The index just after a one-line regular expression literal (including any
+ * trailing flag letters) at `start`, or `start` if none closes within the line
+ * and the length limit.
+ */
+function regularExpressionLiteralEnd(source: string, start: number): number {
+  let inClass = false;
+  const limit = Math.min(source.length, start + MAX_REGULAR_EXPRESSION_LITERAL);
+  for (let index = start + 1; index < limit; index += 1) {
+    const character = source[index] ?? "";
+    if (isLineTerminator(character)) return start;
+    if (character === "\\") {
+      index += 1;
+      if (index >= source.length || isLineTerminator(source[index] ?? "")) return start;
+      continue;
+    }
+    if (inClass) {
+      if (character === "]") inClass = false;
+    } else if (character === "[") inClass = true;
+    else if (character === "/") {
+      let end = index + 1;
+      while (end < source.length && /[A-Za-z]/.test(source[end] ?? "")) {
+        end += 1;
+      }
+      return end;
+    }
+  }
+  return start;
 }
 
 async function inspectFunctionEntrypoints(
@@ -591,6 +1349,7 @@ async function findFrontendSdkWarnings(
   manifest: OpenCloudManifest,
   selection: BundleSelection,
 ): Promise<BundleWarning[]> {
+  if (!("directory" in manifest.frontend)) return [];
   const frontendPrefix = manifest.frontend.directory + "/";
   const candidates = [...selection.files.entries()].filter(
     ([relative]) =>
@@ -728,7 +1487,7 @@ async function selectBundleFiles(
     await walkDirectory(root, absoluteDirectory, selection, manifestFile);
   };
 
-  if (!platformFrontend) {
+  if (!platformFrontend && "directory" in manifest.frontend) {
     await addDirectoryTree(
       manifest.frontend.directory,
       `Frontend directory ${manifest.frontend.directory}`,

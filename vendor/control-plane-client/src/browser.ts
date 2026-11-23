@@ -1,4 +1,5 @@
 import { ControlPlaneTransport } from "./transport.js";
+export { waitForDraftValidation, draftValidationWaitTimeoutMs, DraftValidationWaitTimeoutError } from "./draft-validation.js";
 
 export { ApiError, isApiError } from "./errors.js";
 export type { ApiErrorOptions } from "./errors.js";

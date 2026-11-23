@@ -17,14 +17,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api-client.js";
 import { apiErrorFromResponse } from "../vendor/control-plane-client/src/errors.js";
 import { withCliHeaders } from "./cli-http.js";
+import { hintOf, withHint } from "./cli-contract-error.js";
+import { isReportableFailure } from "./error-reports.js";
+import { MutationJournalError } from "./mutation-journal.js";
 import {
   CliContractError,
   OperationTerminalError,
   OperationWaitTimeoutError,
   downloadToFile,
   followOperation,
+  isDefiniteRefusal,
   jsonOption,
   parseBoundedNumber,
+  parseDecimalInteger,
   persistCredentialToken,
   secretFromStdin,
   structuredCliError,
@@ -57,6 +62,44 @@ describe("owner-parity CLI helpers", () => {
     expect(() => parseBoundedNumber("101", "--limit", 1, 100)).toThrow(
       /--limit/,
     );
+    // The forms 3.20 accepted still work for general options.
+    expect(parseBoundedNumber("1e2", "--timeout", 1, 600)).toBe(100);
+    expect(parseBoundedNumber("5.", "--timeout", 1, 600)).toBe(5);
+    expect(parseBoundedNumber(50, "--limit", 1, 100)).toBe(50);
+    // Compute controls take plain digits: Number() reads these as 0, 16 or 10.
+    for (const typed of ["", "   ", "0x10", "1e1", "Infinity", "-0", "5."]) {
+      expect(() => parseDecimalInteger(typed, "--replicas", 0, 100), typed).toThrow(/--replicas must be an integer from 0 through 100, in plain digits/);
+    }
+    expect(parseDecimalInteger(" 07 ", "--replicas", 0, 20)).toBe(7);
+  });
+
+  it("treats only OpenCloud's own non-retryable 4xx codes as refusals that took no effect", () => {
+    const compute = (status: number, code: string, details: Record<string, unknown>) => new ApiError(status, {
+      statusCode: status, code, message: "refused", details: { billingDisposition: "none", ...details },
+    });
+    const definite = [
+      compute(409, "COMPUTE_REVISION_CONFLICT", { category: "configuration", origin: "policy", phase: "admission", retryScope: "none", retryable: false }),
+      compute(429, "COMPUTE_BUDGET_EXCEEDED", { category: "billing", origin: "policy", phase: "admission", retryScope: "none", retryable: false }),
+      new ApiError(422, { code: "INVALID_REGISTRY_HOST", message: "refused" }),
+      new ApiError(404, { code: "NOT_FOUND", message: "missing" }),
+    ];
+    for (const error of definite) expect(isDefiniteRefusal(error), error.code ?? "").toBe(true);
+    const uncertain = [
+      // Its effects may still happen.
+      compute(409, "COMPUTE_OUTCOME_UNKNOWN", { category: "execution", origin: "unknown", phase: "running", retryScope: "observer_reconciliation", retryable: false }),
+      // Retryable: the same request may still be in hand.
+      compute(429, "COMPUTE_CAPACITY_EXCEEDED", { category: "capacity", origin: "policy", phase: "admission", retryScope: "request", retryable: true }),
+      new ApiError(409, { code: "REQUEST_IN_PROGRESS", message: "busy", retryable: true }),
+      // A proxy's or an older server's uncoded answer, and a timeout.
+      new ApiError(404, "<html>not found</html>"),
+      new ApiError(408, { code: "REQUEST_TIMEOUT", message: "slow" }),
+      new ApiError(503, { code: "APP_LOCK_BUSY", message: "busy", retryable: true }),
+      new ApiError(500, { code: "INTERNAL", message: "fault" }),
+      // An answer naming an operation is about work that exists.
+      new ApiError(409, { code: "OPERATION_EXISTS", message: "exists", operation: { id: "11111111-1111-4111-8111-111111111111", state: "running" } }),
+      new Error("fetch failed"),
+    ];
+    for (const error of uncertain) expect(isDefiniteRefusal(error), String((error as ApiError).code ?? error.message)).toBe(false);
   });
 
   it("loads exactly one JSON input source and checks its shape", async () => {
@@ -137,6 +180,46 @@ describe("owner-parity CLI helpers", () => {
         sleep: async () => undefined,
       }),
     ).rejects.toBeInstanceOf(OperationWaitTimeoutError);
+  });
+
+  it("prints retryable as the client read it when the answer has no flag of its own", () => {
+    expect(structuredCliError(new ApiError(429, { code: "RATE_LIMITED", message: "slow down" })).error.retryable).toBe(true);
+    expect(structuredCliError(new ApiError(404, { code: "NOT_FOUND", message: "missing" })).error.retryable).toBe(false);
+    expect(structuredCliError(new ApiError(503, { code: "busy", message: "busy" })).error.retryable).toBe(true);
+    expect(structuredCliError(new ApiError(503, { code: "gone", message: "gone", details: { retryable: false } })).error.retryable).toBe(false);
+    expect(structuredCliError(new ApiError(429, { code: "LIMITED", message: "no", retryable: false })).error.retryable).toBe(false);
+  });
+
+  it("names why a compensated deploy failed: the release's own error, its exit code, and the logs that show it", async () => {
+    const appId = "11111111-1111-4111-8111-111111111111", deploymentId = "22222222-2222-4222-8222-222222222222";
+    const failed = { id: "33333333-3333-4333-8333-333333333333", appId, deploymentId, state: "failed", type: "deploy",
+      createdAt: "2026-11-20T05:07:28.700Z", updatedAt: "2026-11-20T05:07:52.700Z",
+      error: { code: "DEPLOYMENT_COMPENSATED", message: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully." } };
+    const release = { id: deploymentId, state: "failed", error: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.",
+      details: { exitCode: 3, workloadName: "pricing", notADetail: "dropped", signal: "not a signal" } } };
+    const get = vi.fn().mockResolvedValueOnce({ ...failed, state: "running" }).mockResolvedValueOnce(failed).mockResolvedValueOnce(release);
+    const error = await followOperation({ client: { get }, started: { operation: { ...failed, state: "queued" } },
+      options: { follow: true, interval: "0.05", timeout: "5" }, sleep: async () => undefined }).catch((caught: unknown) => caught);
+    expect(get).toHaveBeenLastCalledWith(`/v1/apps/${appId}/deployments/${deploymentId}`);
+    expect(structuredCliError(error).error).toMatchObject({
+      code: "OPERATION_FAILED", operationErrorCode: "DEPLOYMENT_COMPENSATED",
+      operationErrorMessage: "Deployment failed and the previous runtime topology was restored: The container failed to start successfully.",
+      deploymentId,
+      deploymentError: { code: "COMPUTE_STARTUP_FAILED", message: "The container failed to start successfully.", details: { exitCode: 3, workloadName: "pricing" } },
+      hint: `OpenCloud kept the release that was live before. To see what the new release's containers wrote, run \`opencloud logs ${appId} --page --surface container --workload pricing --from 2026-11-20T05:07:28.700Z --to 2026-11-20T05:07:52.700Z\`.`,
+    });
+    // The app's own container failed: the caller's outcome, not a fault to report.
+    expect(isReportableFailure(error)).toBe(false);
+    // A release OpenCloud itself failed is still reported, and no answer leaves only the operation.
+    const hostDown = vi.fn().mockResolvedValue({ id: deploymentId, error: { code: "COMPUTE_HOST_UNAVAILABLE", message: "No compute host" } });
+    const platform = await followOperation({ client: { get: hostDown }, started: failed, options: { follow: false, interval: "2", timeout: "5" } })
+      .catch((caught: unknown) => caught);
+    expect(isReportableFailure(platform)).toBe(true);
+    expect(structuredCliError(platform).error).toMatchObject({ deploymentError: { code: "COMPUTE_HOST_UNAVAILABLE" } });
+    const unreadable = await followOperation({ client: { get: vi.fn().mockRejectedValue(new TypeError("fetch failed")) }, started: failed,
+      options: { follow: false, interval: "2", timeout: "5" } }).catch((caught: unknown) => caught);
+    expect(structuredCliError(unreadable).error).not.toHaveProperty("deploymentError");
+    expect(hintOf(unreadable)).toBeUndefined();
   });
 
   it("reads bounded secrets from standard input without echo metadata", async () => {
@@ -329,6 +412,100 @@ describe("owner-parity CLI helpers", () => {
     expect(failed).not.toHaveProperty("error.operation.error.secret");
   });
 
+  it("shows OpenCloud's next step and the session or releases a development refusal names", () => {
+    const stale = structuredCliError(new ApiError(409, {
+      code: "DEV_SESSION_STALE",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      details: { sessionId: "11111111-1111-4111-8111-111111111111", status: "stale", baseDeploymentId: null,
+        suggestedFix: "Run opencloud app dev stop, then opencloud app dev start." },
+      requestId: "request-1",
+    }));
+    expect(stale.error).toEqual({
+      code: "DEV_SESSION_STALE",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      status: 409,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      sessionStatus: "stale",
+      baseDeploymentId: null,
+      hint: "Run opencloud app dev stop, then opencloud app dev start.",
+      retryable: false,
+      requestId: "request-1",
+    });
+    const overtaken = structuredCliError(new ApiError(409, {
+      code: "ACTIVE_DEPLOYMENT_CHANGED",
+      message: "Production changed after this development session started, so it can no longer sync, verify or promote.",
+      details: { expectedActiveDeploymentId: "22222222-2222-4222-8222-222222222222", actualActiveDeploymentId: "33333333-3333-4333-8333-333333333333",
+        suggestedFix: "Run opencloud app dev stop, then opencloud app dev start." },
+    }));
+    expect(overtaken.error).toMatchObject({
+      code: "ACTIVE_DEPLOYMENT_CHANGED",
+      expectedActiveDeploymentId: "22222222-2222-4222-8222-222222222222",
+      actualActiveDeploymentId: "33333333-3333-4333-8333-333333333333",
+      hint: "Run opencloud app dev stop, then opencloud app dev start.",
+    });
+    // A stale copy, which names no next step, keeps pull or --force.
+    expect(structuredCliError(new ApiError(409, { code: "ACTIVE_DEPLOYMENT_CHANGED", details: { latestDeploymentId: null } })).error.hint)
+      .toMatch(/^Run opencloud pull <directory> /);
+    expect(structuredCliError(new ApiError(409, {
+      code: "DEV_MIGRATION_FAILED", message: "Migration 0002 failed", details: { suggestedFix: "Correct the migration source, validate the new draft revision, then apply it again." },
+    })).error.hint).toBe("Correct the migration source, validate the new draft revision, then apply it again.");
+  });
+
+  it("prints what OpenCloud says about refused input: the field, accepted values, aliases and each refused field", () => {
+    const surface = structuredCliError(new ApiError(400, {
+      code: "LOG_SURFACE_UNKNOWN",
+      message: 'Unknown log surface "edge": use function, container, http, ai or platform (runtime, the older name for function, still works)',
+      details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function", containers: "container" } },
+    }));
+    expect(surface.error).toMatchObject({
+      code: "LOG_SURFACE_UNKNOWN", status: 400, retryable: false,
+      details: { field: "surface", allowed: ["function", "container", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function", containers: "container" } },
+    });
+    const split = structuredCliError(new ApiError(400, {
+      code: "LOG_SURFACE_UNKNOWN",
+      message: "\"realtime\" isn't one log surface: realtime connections are http lines and realtime deliveries are platform lines; use http or platform",
+      details: { field: "surface", allowed: ["function", "http", "ai", "platform"], aliases: { functions: "function", runtime: "function" }, use: ["http", "platform"] },
+    }));
+    expect(split.error.details).toEqual({ field: "surface", allowed: ["function", "http", "ai", "platform"],
+      aliases: { functions: "function", runtime: "function" }, use: ["http", "platform"] });
+    const malformed = structuredCliError(new ApiError(400, {
+      code: "invalid_request",
+      message: "Request validation failed: query.limit: Too big: expected number to be <=100",
+      details: { fields: [{ field: "query.limit", code: "too_big", message: "Too big: expected number to be <=100" }, { field: "body", message: "Bearer oc_owner_do-not-print-0123456789" }, { nope: 1 }] },
+    }));
+    expect(malformed.error.details).toEqual({ fields: [
+      { field: "query.limit", code: "too_big", message: "Too big: expected number to be <=100" },
+      { field: "body", message: "[REDACTED]" },
+    ] });
+    // The CLI login's owner-only refusal: OpenCloud's next step is the hint.
+    const owner = structuredCliError(new ApiError(403, {
+      code: "OWNER_ACTION_BROWSER_ONLY",
+      message: "This credential can manage the app but can't run owner-only actions on the live app.",
+      details: { appId: "11111111-1111-4111-8111-111111111111", suggestedFix: "Do this in the app or on its page in the dashboard, or ask the owner to approve an app access token for a script: opencloud app access-token request 11111111-1111-4111-8111-111111111111 --name <name>" },
+    }));
+    expect(owner.error).toMatchObject({ code: "OWNER_ACTION_BROWSER_ONLY", status: 403, hint: expect.stringMatching(/^Do this in the app or on its page/) });
+    expect(owner.error).not.toHaveProperty("details");
+  });
+
+  it("names the unresolved journal entry and a hint added for the failure", () => {
+    const pending = {
+      command: "opencloud app dev start" as const, idempotencyKey: "ocj1:f96d3c45-0000-4000-8000-000000000001", generatedKey: true,
+      state: "attempted" as const, appId: "11111111-1111-4111-8111-111111111111", draftId: "22222222-2222-4222-8222-222222222222", revision: 3,
+    };
+    const failure = withHint(new MutationJournalError("MUTATION_IN_PROGRESS", "An earlier request has not finished.", true, pending), "Run it again.");
+    expect(structuredCliError(failure).error).toEqual({
+      code: "MUTATION_IN_PROGRESS", message: "An earlier request has not finished.", retryable: true, pending, hint: "Run it again.",
+    });
+    // A hint added for this failure replaces OpenCloud's generic one in place.
+    const refused = withHint(new ApiError(409, { code: "ACTIVE_DEPLOYMENT_CHANGED", details: {} }), "Run `opencloud app dev stop .` first.");
+    const error = structuredCliError(refused).error;
+    expect(error.hint).toBe("Run `opencloud app dev stop .` first.");
+    expect(Object.keys(error)).toEqual(["code", "message", "status", "hint", "retryable"]);
+    // Malformed journal coordinates are dropped rather than printed.
+    expect(structuredCliError(new MutationJournalError("MUTATION_IN_PROGRESS", "x", true, { ...pending, idempotencyKey: "has spaces" })).error)
+      .not.toHaveProperty("pending");
+  });
+
   it("quotes the answer's x-request-id when the error body has none", () => {
     const fromHeader = structuredCliError(
       apiErrorFromResponse(
@@ -367,7 +544,7 @@ describe("owner-parity CLI helpers", () => {
     expect(output.error).toMatchObject({
       code: "CLI_ERROR",
       message: "fetch failed",
-      retryable: false,
+      retryable: true,
       cause: {
         code: "ECONNREFUSED",
         message: "connect ECONNREFUSED 127.0.0.1:4010 [REDACTED]",
@@ -387,5 +564,40 @@ describe("owner-parity CLI helpers", () => {
       message: "plain",
       retryable: false,
     });
+  });
+
+  it("marks network transport failures retryable and leaves non-transport CLI errors non-retryable", () => {
+    expect(structuredCliError(new TypeError("fetch failed")).error.retryable).toBe(true);
+    for (const code of [
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_BODY_TIMEOUT",
+    ]) {
+      const wrapped = new TypeError("fetch failed", {
+        cause: Object.assign(new Error(`transport ${code}`), { code }),
+      });
+      expect(structuredCliError(wrapped).error.retryable, `wrapped ${code}`).toBe(true);
+      const direct = Object.assign(new Error(`direct ${code}`), { code });
+      expect(structuredCliError(direct).error.retryable, `direct ${code}`).toBe(true);
+    }
+    // A host DNS says doesn't exist, such as a mistyped --api-url, is no nearer on a retry.
+    const notFound = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.opencluod.example"), { code: "ENOTFOUND" }),
+    });
+    expect(structuredCliError(notFound).error).toMatchObject({ retryable: false, cause: { code: "ENOTFOUND" } });
+    expect(structuredCliError(Object.assign(new Error("direct ENOTFOUND"), { code: "ENOTFOUND" })).error.retryable).toBe(false);
+    expect(structuredCliError(new TypeError("Cannot read properties of undefined")).error.retryable).toBe(false);
+    expect(
+      structuredCliError(new CliContractError("DOWNLOAD_INTEGRITY_FAILED", "mismatch", {
+        cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+      })).error.retryable,
+    ).toBe(false);
   });
 });

@@ -19,6 +19,9 @@ await build({
   legalComments: "none",
   external: ["@napi-rs/keyring"],
   alias: {
+    "@opencloud/agent-protocol": path.join(root, "src/agent-protocol-snapshot.ts"),
+    "@opencloud/compute-protocol": path.join(root, "vendor/compute-protocol/src/index.ts"),
+    "@opencloud/contracts/containers": path.join(root, "vendor/contracts/src/containers.ts"),
     "@opencloud/contracts/control-plane": path.join(root, "vendor/contracts/src/control-plane.ts"),
     "@opencloud/contracts": path.join(
       root,
@@ -27,13 +30,8 @@ await build({
       "src",
       "index.ts",
     ),
-    "@opencloud/js": path.join(
-      root,
-      "vendor",
-      "browser-client",
-      "src",
-      "index.ts",
-    ),
+    // The vendored browser client, with the CLI's own SDK default.
+    "@opencloud/js": path.join(root, "src", "sdk-version.ts"),
     "@opencloud/bundler": path.join(
       root,
       "vendor",
