@@ -42,6 +42,32 @@ export function qualifyAiModel(ref: AiModelRef): string {
   return `${ref.provider}/${ref.model}`;
 }
 
+/**
+ * A model an app's code names for one AI call: a provider-native id
+ * (`claude-haiku-5-5`, `moonshotai/kimi-k3`) or a qualified one
+ * (`anthropic/claude-haiku-5-5`).
+ */
+export const requestedAiModelSchema = z
+  .string()
+  .min(1)
+  .max(220)
+  .regex(/^[a-z0-9][a-z0-9._:/-]*$/)
+  .refine((value) => !value.endsWith("/") && !value.includes("//"), "AI model is invalid");
+
+/**
+ * The model a requested id means on the provider that pays. A native id runs
+ * on that provider; a qualified id names its provider, which must match.
+ * OpenRouter ids already contain a vendor slash (`openai/gpt-5`), so on
+ * OpenRouter only an `openrouter/` prefix is a provider.
+ */
+export function resolveRequestedAiModel(value: string, provider: AiModelProvider): AiModelRef {
+  if (value.startsWith(`${provider}/`)) return { provider, model: value.slice(provider.length + 1) };
+  if (provider === "openrouter") return { provider, model: value };
+  const slash = value.indexOf("/");
+  const named = aiModelProviderSchema.safeParse(slash > 0 ? value.slice(0, slash) : "");
+  return named.success ? { provider: named.data, model: value.slice(slash + 1) } : { provider, model: value };
+}
+
 export function parseQualifiedAiModel(value: string): AiModelRef {
   const parsed = aiQualifiedModelIdSchema.parse(value);
   const slash = parsed.indexOf("/");

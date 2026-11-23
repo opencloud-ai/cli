@@ -112,14 +112,20 @@ bundler, `compute-protocol/src/{index.ts,index.test.ts}`,
 Function SDK (`server/src`, SDK 2.9.0) are then refreshed verbatim from platform
 `2214629ca` (`feat/container-runtime-exploration`), and `server/src/index.ts`
 and its tests again from `4f4d1e023`, whose `decodeBase64` takes linear time.
-Platform `b3c1aaa18` changes none of these files: every file this release
-changed under `vendor/` is byte-identical to that commit. The bundler (`bundler/src/{index.ts,index.test.ts}`) is then refreshed verbatim from platform `46e12328d`, whose E2E test check reads regular expressions the way JavaScript does; every other vendored file is unchanged from `b3c1aaa18`. The trimmed
-`package.json` stubs and the brand and installer snapshots keep their earlier
-provenance.
+Platform `b3c1aaa18` changes none of these files. The bundler
+(`bundler/src/{index.ts,index.test.ts}`) and
+`agent-protocol/src/model-choices.ts` are then refreshed verbatim from
+platform `46e12328d`: the bundler's E2E test check reads regular expressions
+the way JavaScript does, and `model-choices.ts` adds `requestedAiModelSchema`
+and `resolveRequestedAiModel`, which nothing vendored imports. Every file this
+release changed under `vendor/` is byte-identical to platform `46e12328d`.
+The trimmed `package.json` stubs and the brand and installer snapshots keep
+their earlier provenance.
 
 The Contracts public type graph requires the exact `model-choices`, `reasoning`,
-`identifiers`, `task-preparation`, and `platform-ai` Agent protocol files from
-`f7249b1c`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only
+`identifiers`, `task-preparation`, and `platform-ai` Agent protocol files:
+`model-choices` from `46e12328d` (see above), the other four from `f7249b1c`,
+unchanged at `46e12328d`. The CLI-owned `src/agent-protocol-snapshot.ts` facade exports only
 their public credential-free dependencies; no Agent service implementation is
 included. The public package still contains only the standalone bundle and
 release documents.
@@ -146,12 +152,6 @@ The public CLI owns disk upload/download adapters and manifest serialization in
 `src/api-client.ts` and `src/bundle.ts`. Two upstream tests that inspect platform
 package metadata/OpenAPI files are excluded from the public Vitest configuration.
 All portable upstream contract and transport tests run here.
-
-Browser SDK 2.3 source and tests are copied from platform commit
-`d0c223a8f074bcb1c508ed6cc63654a11a5a499a` (`packages/browser-client/src`), including custom-origin session and
-Realtime reconnect behavior. Previous immutable SDK artifacts are not changed.
-Its `OPEN_CLOUD_SDK_VERSION` is the default for `init` and unpinned bundles, so
-this snapshot changes only when the CLI deliberately changes that default.
 
 ## CLI 3.11.0 organisation-built integrations
 
