@@ -1227,6 +1227,11 @@ export const computeRouteRevisionSchema = z
     routeGeneration: computeGenerationSchema,
     serving: z.enum(["active", "candidate", "retired"]),
     paused: z.boolean(),
+    /** Why no copy of an active revision can be placed now, when that is the
+     * platform's: every host down, quarantined or out of contact, or every
+     * host full. A request that waits its admission deadline without a ready
+     * copy is answered with it (nothing billed), not as a slow start. */
+    unavailable: z.enum(["COMPUTE_HOST_UNAVAILABLE", "COMPUTE_NO_CAPACITY"]).optional(),
     concurrency: z.number().int().min(1).max(1_000),
     instances: z
       .array(

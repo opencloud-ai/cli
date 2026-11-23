@@ -81,15 +81,46 @@ describe("container Function client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("bounds a service request body at 4 MiB before fetching", async () => {
+  it("bounds a service request body at 4 MiB before fetching, with the documented code", async () => {
     const fetch = vi.fn(async () => Response.json({ status: 200, headers: {}, bodyBase64: "" }));
     vi.stubGlobal("fetch", fetch);
     const oversized = scoped();
+    let refused: unknown;
     defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
-      await containers.request("image-api", { path: "/render", method: "POST", body: new Uint8Array(4 * 1024 * 1024 + 1) });
+      try {
+        await containers.request("image-api", { path: "/render", method: "POST", body: new Uint8Array(4 * 1024 * 1024 + 1) });
+      } catch (error) {
+        refused = error;
+        throw error;
+      }
       return {};
     } });
-    expect((await oversized.invoke()).status).toBe(400);
+    const response = await oversized.invoke();
+    expect(response.status).toBe(413);
+    expect(fetch).not.toHaveBeenCalled();
+    // The code the platform answers for it (round 5, item 38), in the same shape.
+    expect(refused).toBeInstanceOf(OpenCloudError);
+    expect(refused).toMatchObject({
+      code: "COMPUTE_REQUEST_TOO_LARGE",
+      status: 413,
+      retryable: false,
+      message: "Service request body is 4194305 bytes, over the 4 MiB (4194304-byte) limit. Send less, or put large content in Files.",
+      details: {
+        statusCode: 413,
+        code: "COMPUTE_REQUEST_TOO_LARGE",
+        details: { origin: "app", retryable: false, billingDisposition: "none" },
+      },
+    });
+    expect((await response.json()).error.code).toBe("COMPUTE_REQUEST_TOO_LARGE");
+    // A body of another type is still malformed input.
+    const malformed = scoped();
+    defineFunction({ input: schema.object({}), handler: async ({ containers }) => {
+      await containers.request("image-api", { path: "/render", method: "POST", body: [1, 2, 3] as never });
+      return {};
+    } });
+    const wrongType = await malformed.invoke();
+    expect(wrongType.status).toBe(400);
+    expect((await wrongType.json()).error.code).toBe("INVALID_CONTAINER_INPUT");
     expect(fetch).not.toHaveBeenCalled();
     const largest = scoped();
     defineFunction({ input: schema.object({}), handler: async ({ containers }) => {

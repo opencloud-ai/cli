@@ -3144,6 +3144,25 @@ function agentTasksClient(bindings: RuntimeBindings, requestId: string): OpenClo
   };
 }
 
+/** The largest body `containers.request` sends to a service. */
+const SERVICE_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+/**
+ * A body over the limit is refused before anything is sent, with the code
+ * the platform answers for it, `COMPUTE_REQUEST_TOO_LARGE`, and the same
+ * shape: `details` is the refusal's body, its compute fields in
+ * `details.details`. Nothing reached the service, so nothing is billed.
+ */
+function serviceRequestTooLarge(size: number, requestId: string): never {
+  const message = `Service request body is ${size} bytes, over the 4 MiB (${SERVICE_REQUEST_BODY_BYTES}-byte) limit. Send less, or put large content in Files.`;
+  throw new OpenCloudError(message, {
+    code: "COMPUTE_REQUEST_TOO_LARGE", status: 413, requestId, retryable: false,
+    details: { statusCode: 413, code: "COMPUTE_REQUEST_TOO_LARGE", message, requestId, details: {
+      category: "ingress", origin: "app", phase: "ingress", retryScope: "none", retryable: false,
+      billingDisposition: "none",
+    } },
+  });
+}
+
 function containersClient(bindings: RuntimeBindings, requestId: string): OpenCloudContainersClient {
   const invalid = (message: string): never => { throw new OpenCloudError(message, {
     code: "INVALID_CONTAINER_INPUT", status: 400, requestId, retryable: false,
@@ -3188,7 +3207,8 @@ function containersClient(bindings: RuntimeBindings, requestId: string): OpenClo
     async request(workload, input, options) {
       if (!input || !input.path?.startsWith("/") || input.path.startsWith("//") || input.path.length > 4_096 || /[\\#\u0000-\u001f\u007f]/.test(input.path)) invalid("Service path must be a bounded relative application path");
       const bytes = typeof input.body === "string" ? new TextEncoder().encode(input.body) : input.body;
-      if (bytes && (!(bytes instanceof Uint8Array) || bytes.byteLength > 4 * 1024 * 1024)) invalid("Service request body exceeds 4 MiB");
+      if (bytes && !(bytes instanceof Uint8Array)) invalid("Service request body must be a string or a Uint8Array");
+      if (bytes && bytes.byteLength > SERVICE_REQUEST_BODY_BYTES) serviceRequestTooLarge(bytes.byteLength, requestId);
       const result = await request<{ status: number; headers: Record<string, string>; bodyBase64: string }>("request", {
         name: name(workload), path: input.path, method: input.method ?? "GET", headers: input.headers ?? {},
         ...(bytes ? { bodyBase64: encodeBase64(bytes) } : {}),

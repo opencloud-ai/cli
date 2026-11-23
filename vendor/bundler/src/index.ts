@@ -360,16 +360,16 @@ async function selectE2eTest(
 }
 
 function validateE2eTestSource(source: string): void {
-  const { code, problem } = maskJavaScriptCommentsAndLiterals(source);
+  const withImport = maskJavaScriptCommentsAndLiterals(source).code;
   const imports = [
     ...source.matchAll(
       /\bimport\s*\{([\s\S]*?)\}\s*from\s*(["'])([^"']+)\2\s*;?/g,
     ),
   ].filter((match) => {
     const index = match.index ?? -1;
-    return index >= 0 && code.slice(index, index + 6) === "import";
+    return index >= 0 && withImport.slice(index, index + 6) === "import";
   });
-  const importTokenCount = code.match(/\bimport\b/g)?.length ?? 0;
+  const importTokenCount = withImport.match(/\bimport\b/g)?.length ?? 0;
   if (
     imports.length !== 1 ||
     importTokenCount !== 1 ||
@@ -392,6 +392,16 @@ function validateE2eTestSource(source: string): void {
       `OpenCloud E2E test must import exactly test and expect from "@opencloud/test": ${OPEN_CLOUD_E2E_TEST_PATH}`,
     );
   }
+  // The runner deletes the import line and runs the rest, so check the rest
+  // as it runs: with the import blanked (line breaks kept), the code before
+  // it meets the code after it, `x = a` then `/ 2; ...` on the next line.
+  const [importText = ""] = imports[0] ?? [];
+  const importStart = imports[0]?.index ?? 0;
+  const { code, problem } = maskJavaScriptCommentsAndLiterals(
+    source.slice(0, importStart) +
+      importText.replace(/[^\n\r\u2028\u2029]/g, " ") +
+      source.slice(importStart + importText.length),
+  );
   if (!/\btest\s*\(/.test(code)) {
     throw new Error(
       `OpenCloud E2E test must declare at least one test(...): ${OPEN_CLOUD_E2E_TEST_PATH}`,
@@ -443,7 +453,7 @@ function validateE2eTestSource(source: string): void {
   // they match anyway.
   if (problem) {
     throw new Error(
-      `OpenCloud E2E test cannot be checked: ${problem}: ${OPEN_CLOUD_E2E_TEST_PATH}`,
+      `OpenCloud E2E test cannot be checked at line ${problem.line}: ${problem.reason}: ${OPEN_CLOUD_E2E_TEST_PATH}`,
     );
   }
   if (/\/(?:rest|storage|functions)\/v1(?:\/|\b)/.test(source)) {
@@ -563,22 +573,36 @@ type MaskedJavaScript = {
    * stays code.
    */
   code: string;
-  /** Why the masker can't vouch for `code`, if it can't. */
-  problem: string | null;
+  /** Where the masker knows it can't vouch for `code`, and why. */
+  problem: { line: number; reason: string } | null;
 };
 
-// `await` is a keyword only inside async functions and a name elsewhere, and
-// each reading takes what follows differently.
-const AMBIGUOUS_AWAIT_PROBLEM =
-  'a "/" straight after await, or a line ending in await followed by "{", function, class or async, reads two ways; don\'t name anything await, and keep what await waits for on its line';
-// A quoted string can't contain a line break, so one that seems to means the
-// test doesn't parse or the masker took something else for its opening quote.
-const UNTERMINATED_STRING_PROBLEM = "a quoted string runs past the end of its line";
+// `await` is a keyword inside async functions and a name elsewhere, and the
+// masker doesn't track which kind of function it is in. These are the places
+// where the two readings take what follows differently.
+const AWAIT_SLASH_PROBLEM =
+  'a "/" after await there reads one way if await is a keyword and another if it is a name; put the regular expression in parentheses';
+const AWAIT_LINE_BREAK_PROBLEM =
+  'a line ending in await is followed by a "{", or a named function or class, that may start a statement of its own; keep what await waits for on the same line';
+// After a declaration without a value, `break`, `continue` or `debugger`,
+// JavaScript ends the statement and reads a regular expression; after most
+// other code it divides. The masker can't always tell those apart.
+const LEADING_SLASH_PROBLEM =
+  'the line starts with "/" after something it could divide; start the line with ";" if the "/" begins a regular expression, or end the line before with the "/" if it divides';
+// Either the test doesn't parse or the masker misread what came before, so
+// neither message says what the author wrote is wrong.
+const UNCLOSED_REGULAR_EXPRESSION_PROBLEM =
+  'the checker reads a "/" there as starting a regular expression, but none ends on that line within 1,024 characters; if the "/" divides, put what comes before it in parentheses';
+const UNCLOSED_QUOTE_PROBLEM =
+  "the checker lost track of where strings and regular expressions end, at a quote with no closing quote on that line; if the line has a regular expression, put it in parentheses";
 
 /**
- * Blanks comments and literal text so checks read only code. Reads a `/` as a
- * regular expression or a division from the tokens before it, the way the
- * JavaScript grammar does, so neither can hide code from the checks.
+ * Blanks comments and literal text so the checks read code. Decides whether a
+ * `/` starts a regular expression or divides from the tokens before it, as the
+ * JavaScript grammar does, and reports a problem where it knows it can't
+ * decide. It is a careful reader rather than a parser, so unusual code it
+ * doesn't know can still be misread; it gives an early, clear refusal, and the
+ * runner's blank page, which aborts every request, keeps tests off the network.
  */
 function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
   let output = "";
@@ -603,9 +627,27 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
   // their `{` bodies, innermost last: `function (a = function () {}) {}`.
   const pendingExpressionBodies: number[] = [];
   let awaitBeforeLineBreak = false;
+  // `await ++` or `await --`, which a "/" can't follow unambiguously.
+  let afterAwaitIncrement = false;
+  // A `function`, `class` or `async` on the line after an `await`: anonymous
+  // it can only be what await waits for; named it may be a declaration.
+  let declarationAfterAwait: "async" | "function" | "class" | null = null;
   // No token yet on this line. The runner puts the test on a line of its own.
   let atLineStart = true;
-  let problem: string | null = null;
+  let problem: MaskedJavaScript["problem"] = null;
+
+  const report = (at: number, reason: string): void => {
+    if (problem) return;
+    let line = 1;
+    for (let position = 0; position < at; position += 1) {
+      const character = source[position] ?? "";
+      // CR LF ends one line.
+      if (isLineTerminator(character) && !(character === "\r" && source[position + 1] === "\n")) {
+        line += 1;
+      }
+    }
+    problem = { line, reason };
+  };
 
   // A body that didn't open in its own scope never will (the code isn't what
   // the masker took it for), so it can't claim a later brace.
@@ -630,6 +672,8 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
       afterArrow = false;
     }
     if (prevWord === "await") awaitBeforeLineBreak = true;
+    // `async` then a line break is a name in either reading.
+    if (declarationAfterAwait === "async") declarationAfterAwait = null;
   };
 
   const incrementTernary = (): void => {
@@ -676,7 +720,8 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
         continue;
       }
       // Outside modules JavaScript also reads `<!--`, and `-->` that starts a
-      // line, as the start of a line comment.
+      // line, as the start of a line comment. (`<<!--` is a shift: `<<` is
+      // read as one token below, so its second `<` never starts one here.)
       const htmlComment = source.startsWith("<!--", index)
         ? 4
         : atLineStart && source.startsWith("-->", index)
@@ -690,12 +735,18 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
       }
 
       // A token starts here.
+      const tokenStartsLine = atLineStart;
       atLineStart = false;
       const tokenFollowsArrow: boolean = afterArrow;
       afterArrow = false;
       const afterAwait = prevWord === "await";
       const awaitLineBreak = awaitBeforeLineBreak;
       awaitBeforeLineBreak = false;
+      const followsAwaitIncrement = afterAwaitIncrement;
+      afterAwaitIncrement = false;
+      const pendingDeclaration: "async" | "function" | "class" | null =
+        declarationAfterAwait;
+      declarationAfterAwait = null;
       const top = scopes.at(-1);
       // In a for header, a token ends the stretch where an `of` keyword can
       // come unless it belongs to the binding or target; those set it back.
@@ -706,9 +757,14 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
       const inForTarget = forHeadBefore !== "done";
 
       if (character === "/") {
-        if (afterAwait) problem ??= AMBIGUOUS_AWAIT_PROBLEM;
+        if (followsAwaitIncrement) report(index, AWAIT_SLASH_PROBLEM);
+        if (!regexAllowed && tokenStartsLine) report(index, LEADING_SLASH_PROBLEM);
         if (regexAllowed) {
           const end = regularExpressionLiteralEnd(source, index);
+          if (afterAwait && !regularExpressionAfterAwaitIsCertain(source, index, end)) {
+            report(index, AWAIT_SLASH_PROBLEM);
+          }
+          if (end === index) report(index, UNCLOSED_REGULAR_EXPRESSION_PROBLEM);
           if (end > index) {
             output += " ".repeat(end - index);
             index = end;
@@ -769,7 +825,8 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
         continue;
       }
       if (character === "{") {
-        if (afterAwait && awaitLineBreak) problem ??= AMBIGUOUS_AWAIT_PROBLEM;
+        // An object await waits for, or a block of its own after `await;`.
+        if (afterAwait && awaitLineBreak) report(index, AWAIT_LINE_BREAK_PROBLEM);
         if (forHead) forHead.forHead = forHeadBefore;
         // An expression-position `function` or `class` opens its body here,
         // unless this brace is an object literal in the class heritage:
@@ -865,10 +922,25 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
         continue;
       }
       if ((character === "+" || character === "-") && next === character) {
+        if (afterAwait) afterAwaitIncrement = true;
         output += character + next;
         index += 2;
-        regexAllowed = false;
+        // Prefix where an operand can start (also after a line break, where
+        // JavaScript ends the statement first): `++/a/.lastIndex`. Postfix
+        // after an operand on its line: `count++ / 2`.
+        regexAllowed = regexAllowed || tokenStartsLine;
         expectObjectBrace = false;
+        afterMemberAccess = false;
+        prevWord = null;
+        prevPrevWord = null;
+        continue;
+      }
+      // JavaScript reads the longest punctuator, so `<<!--` is `<<`, `!`, `--`.
+      if (character === "<" && next === "<") {
+        output += "<<";
+        index += 2;
+        regexAllowed = true;
+        expectObjectBrace = true;
         afterMemberAccess = false;
         prevWord = null;
         prevPrevWord = null;
@@ -935,6 +1007,14 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
         while (end < source.length && /[0-9A-Za-z_]/.test(source[end] ?? "")) {
           end += 1;
         }
+        // A decimal integer takes its point and any fraction, so in `1. in x`
+        // the `in` is a keyword, not a property.
+        if (source[end] === "." && /^[0-9][0-9_]*$/.test(source.slice(index, end))) {
+          end += 1;
+          while (end < source.length && /[0-9A-Za-z_]/.test(source[end] ?? "")) {
+            end += 1;
+          }
+        }
         if (forHead && inForTarget) forHead.forHead = "afterTarget";
         output += source.slice(index, end);
         index = end;
@@ -972,12 +1052,19 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
       }
       if (/[A-Za-z_$\\]|[^\x00-\x7f]/.test(character)) {
         let end = index + 1;
-        // Non-ASCII spaces and line terminators (U+00A0, U+2028) end a word.
-        while (
-          end < source.length &&
-          /[A-Za-z0-9_$\\]|[^\x00-\x7f\s]/.test(source[end] ?? "")
-        ) {
-          end += 1;
+        // Non-ASCII spaces and line terminators (U+00A0, U+2028) end a word;
+        // a `\u{61}` escape belongs to it.
+        while (end < source.length) {
+          if (source[end] === "{" && source[end - 1] === "u" && source[end - 2] === "\\") {
+            const escape = /\{[0-9A-Fa-f]+\}/y;
+            escape.lastIndex = end;
+            if (!escape.test(source)) break;
+            end = escape.lastIndex;
+          } else if (/[A-Za-z0-9_$\\]|[^\x00-\x7f\s]/.test(source[end] ?? "")) {
+            end += 1;
+          } else {
+            break;
+          }
         }
         const word = source.slice(index, end);
         output += word;
@@ -997,11 +1084,21 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
                 ? "target"
                 : "afterTarget";
         }
-        const startsDeclaration =
+        // On the line after `await`, an anonymous function or class can only
+        // be what await waits for (as a statement it would need a name); a
+        // named one may be a declaration of its own.
+        if (
           keyword &&
-          (word === "function" || word === "class" || word === "async");
-        if (afterAwait && awaitLineBreak && startsDeclaration) {
-          problem ??= AMBIGUOUS_AWAIT_PROBLEM;
+          ((afterAwait && awaitLineBreak) || pendingDeclaration === "async") &&
+          (word === "function" || word === "class" || word === "async")
+        ) {
+          declarationAfterAwait =
+            pendingDeclaration === "async" && word !== "function" ? null : word;
+        } else if (
+          (pendingDeclaration === "function" || pendingDeclaration === "class") &&
+          !(pendingDeclaration === "class" && keyword && word === "extends")
+        ) {
+          report(index, AWAIT_LINE_BREAK_PROBLEM);
         }
         if (
           keyword &&
@@ -1024,6 +1121,10 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
         prevWord = keyword ? word : null;
         afterMemberAccess = false;
         continue;
+      }
+      // `function*` after an `await` line break: the name, if any, is next.
+      if (character === "*" && pendingDeclaration === "function") {
+        declarationAfterAwait = "function";
       }
       output += character;
       index += 1;
@@ -1072,7 +1173,7 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
     if (state !== "template" && (character === "\n" || character === "\r")) {
       // Read code again from the line break, so the checks still see the
       // lines after it.
-      problem ??= UNTERMINATED_STRING_PROBLEM;
+      report(index, UNCLOSED_QUOTE_PROBLEM);
       state = "code";
       continue;
     }
@@ -1103,8 +1204,32 @@ function maskJavaScriptCommentsAndLiterals(source: string): MaskedJavaScript {
   return { code: output, problem };
 }
 
-// A longer literal stays code, which keeps the scan linear in the source.
+// A longer literal is reported as unreadable; the bound keeps the scan linear.
 const MAX_REGULAR_EXPRESSION_LITERAL = 1_024;
+
+/**
+ * Whether the regular expression literal at `start`..`end` straight after
+ * `await` can't be a division instead (with `await` a name): its body is one
+ * plain word with no flags, and what follows on the line can't follow a
+ * division, so `await / a / .exec(s)` doesn't parse: `await /a/.exec(s)`.
+ */
+function regularExpressionAfterAwaitIsCertain(
+  source: string,
+  start: number,
+  end: number,
+): boolean {
+  const body = /^\/([A-Za-z0-9_$]+)\/$/.exec(source.slice(start, end))?.[1];
+  // A keyword body would start a regular expression at the closing "/".
+  if (!body || REGULAR_EXPRESSION_KEYWORDS.has(body) || body === "of") return false;
+  let after = end;
+  while (source[after] === " " || source[after] === "\t") after += 1;
+  const next = source[after] ?? "";
+  return (
+    next === "" ||
+    /[)\]};,:?]/.test(next) ||
+    (next === "." && !/[0-9]/.test(source[after + 1] ?? ""))
+  );
+}
 
 /** JavaScript's line terminators, which a regular expression literal can't contain. */
 function isLineTerminator(character: string): boolean {

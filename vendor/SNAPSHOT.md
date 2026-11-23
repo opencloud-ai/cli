@@ -117,8 +117,13 @@ Platform `b3c1aaa18` changes none of these files. The bundler
 `agent-protocol/src/model-choices.ts` are then refreshed verbatim from
 platform `46e12328d`: the bundler's E2E test check reads regular expressions
 the way JavaScript does, and `model-choices.ts` adds `requestedAiModelSchema`
-and `resolveRequestedAiModel`, which nothing vendored imports. Every file this
-release changed under `vendor/` is byte-identical to platform `46e12328d`.
+and `resolveRequestedAiModel`, which nothing vendored imports. The bundler,
+`compute-protocol/src/index.ts` and `server/src/{index.ts,index.test.ts}` are
+then refreshed verbatim from platform `b124a41c8`: the E2E test check refuses
+the shapes it misread, the route table may carry a host-outage reason, and
+`containers.request` refuses a body over 4 MiB with `COMPUTE_REQUEST_TOO_LARGE`.
+Every file this release changed under `vendor/` is byte-identical to platform
+`b124a41c8`.
 The trimmed `package.json` stubs and the brand and installer snapshots keep
 their earlier provenance.
 
