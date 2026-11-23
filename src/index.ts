@@ -2112,6 +2112,15 @@ function idempotencyKey(options: { idempotencyKey?: string }): string {
       "--idempotency-key must contain 8 through 200 characters",
     );
   }
+  // Sent as a header and kept by OpenCloud with the request, so a pasted
+  // credential is refused here too, as the journal refuses it, never repeated.
+  const credential = credentialShape(key);
+  if (credential) {
+    throw new CliContractError(
+      "INVALID_IDEMPOTENCY_KEY",
+      `This idempotency key looks like ${credential}; don't put credentials in idempotency keys. Choose a key that names the change, such as import-2026-11-20-1.`,
+    );
+  }
   return key;
 }
 

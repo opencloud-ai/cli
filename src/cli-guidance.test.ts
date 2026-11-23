@@ -422,6 +422,33 @@ describe("metrics names", spawning, () => {
   });
 });
 
+describe("account commands' idempotency keys", spawning, () => {
+  it("refuses a credential-shaped key before sending anything, without repeating it", async () => {
+    const context = await workspace("account-key-credential");
+    const zip = path.join(context.folder, "app.zip");
+    await writeFile(zip, "PK synthetic");
+    const importId = "40000000-0000-4000-8000-0000000000c1";
+    // Built from parts, so no complete synthetic secret sits in the source.
+    const key = `oc_${"cli_"}${"Synthetic0123456789".repeat(2)}`;
+    for (const args of [
+      ["app", "import", "upload", zip],
+      ["app", "import", "from-url", "https://example.test/app.zip", "--sha256", "a".repeat(64), "--bytes", "12"],
+      ["app", "import", "stage", importId],
+      ["app", "import", "install", importId, "--name", "Copy"],
+      ["app", "import", "publish", importId],
+    ]) {
+      requests = [];
+      const refused = await run(["--token", "synthetic-token", ...args, "--idempotency-key", key], context);
+      expect(refused.status, args.join(" ")).toBe(1);
+      const error = JSON.parse(refused.stderr.trim().split("\n").at(-1)!).error as { code: string; message: string };
+      expect(error.code, args.join(" ")).toBe("INVALID_IDEMPOTENCY_KEY");
+      expect(error.message).toContain("an OpenCloud access token");
+      expect(refused.stderr).not.toContain(key);
+      expect(requests).toEqual([]);
+    }
+  });
+});
+
 describe("app connect", spawning, () => {
   it("says what the folder can do now without naming one kind of agent", async () => {
     const context = await workspace("connect", { signedIn: true });
