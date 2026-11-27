@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { sameRequestedWorkspace } from "./api-core.js";
 
 /** Organisation directory and retained accounting contracts. */
 /** Exact non-negative quantities; callers must use bigint for arithmetic. */
@@ -9,11 +10,31 @@ export const organisationRoleSchema = z.enum(["admin", "member"]);
 export const workspaceRoleSchema = organisationRoleSchema;
 export const appSharePermissionSchema = z.enum(["edit", "view"]);
 export const directoryNameSchema = z.string().trim().min(1).max(120);
+export const workspacePlanSchema = z.enum(["free", "core", "scale", "enterprise"]);
+export type WorkspacePlan = z.infer<typeof workspacePlanSchema>;
+/** Maximum active Free workspaces an account may administer at once. */
+export const MAX_FREE_WORKSPACES_PER_USER = 3;
+/**
+ * `workspaceId` is the canonical name of a workspace's ID; `organisationId`
+ * is the older name for the same value. Workspace responses carry both, so
+ * clients that read `organisationId` keep working.
+ */
+export const workspaceIdAliasSchema = z
+  .uuid()
+  .optional()
+  .describe("The same ID as organisationId; workspaceId is its canonical name.");
+/** Adds `workspaceId`, the canonical name of `organisationId`, to a response. */
+export function withWorkspaceId<T extends { organisationId: string }>(
+  value: T,
+): T & { workspaceId: string } {
+  return { ...value, workspaceId: value.organisationId };
+}
 export const organisationSchema = z.object({
   id: z.uuid(),
   name: directoryNameSchema,
   status: z.enum(["active", "suspended"]),
   policyVersion: capacityQuantitySchema,
+  plan: workspacePlanSchema.default("free"),
 });
 export const workspaceSchema = z.object({
   id: z.uuid(),
@@ -24,6 +45,7 @@ export const workspaceSchema = z.object({
 });
 export const organisationMembershipSchema = z.object({
   organisationId: z.uuid(),
+  workspaceId: workspaceIdAliasSchema,
   userId: z.uuid(),
   role: organisationRoleSchema,
 });
@@ -42,6 +64,7 @@ export const organisationInvitationDeliverySchema = z.object({
 export const organisationInvitationSchema = z.object({
   id: z.uuid(),
   organisationId: z.uuid(),
+  workspaceId: workspaceIdAliasSchema,
   recipientEmail: z.email(),
   organisationRole: organisationRoleSchema,
   expiresAt: z.iso.datetime(),
@@ -57,6 +80,7 @@ export const organisationInvitationSchema = z.object({
 export const organisationInvitationPreviewSchema = z.object({
   invitationId: z.uuid(),
   organisationId: z.uuid(),
+  workspaceId: workspaceIdAliasSchema,
   organisationName: z.string(),
   organisationRole: organisationRoleSchema,
   recipientEmail: z.email(),
@@ -78,6 +102,18 @@ export const createOrganisationRequestSchema = z
   .object({ name: directoryNameSchema, autoJoinEmailDomain: z.boolean().optional() })
   .strict();
 export const updateOrganisationRequestSchema = z.object({ name: directoryNameSchema }).strict();
+/** `workspaceId`, or `organisationId` as its older name; two different values are refused. */
+export const setActiveWorkspaceRequestSchema = z
+  .object({
+    workspaceId: z.uuid().optional(),
+    organisationId: z.uuid().optional().describe("Older name for workspaceId."),
+  })
+  .strict()
+  .superRefine(sameRequestedWorkspace)
+  .refine((value) => Boolean(value.workspaceId ?? value.organisationId), {
+    path: ["workspaceId"],
+    message: "Send the workspace's workspaceId",
+  });
 export const createWorkspaceRequestSchema = z
   .object({ name: directoryNameSchema })
   .strict();
@@ -196,6 +232,9 @@ export const directoryCapabilitiesSchema = z.object({
   inviteMembers: z.boolean(),
   manageLimits: z.boolean(),
   leaveOrganisation: z.boolean(),
+  /** A Free workspace you created and still administer: it counts toward
+   * MAX_FREE_WORKSPACES_PER_USER. */
+  countsTowardFreeLimit: z.boolean().optional(),
 });
 export const workspaceCapabilitiesSchema = z.object({
   manageMembers: z.boolean(),
@@ -215,9 +254,30 @@ export const workspaceMemberViewSchema = workspaceMembershipSchema.extend({
   displayName: z.string().nullable(),
   isPrimary: z.boolean(),
 });
+/**
+ * Scale-and-Enterprise features this workspace has now: its current plan
+ * includes them, or the installation sells no plans. A downgrade removes them
+ * at once; what they already set up (members who joined by email domain,
+ * published workspace addresses) stays.
+ */
+export const workspacePlanFeaturesSchema = z.object({
+  /** New accounts with a confirmed email at a verified, enabled domain join automatically. */
+  verifiedDomainAutoJoin: z.boolean(),
+  /** New workspace addresses (`<workspace>.<base>` and `<app>.<workspace>.<base>`) can be claimed and activated. */
+  workspaceSubdomain: z.boolean(),
+  /** 90-day workspace activity log and CSV export. */
+  auditLog: z.boolean().optional(),
+  /** Workspace security policies (no public apps, delete protection, admin-only publish, email-link-only sign-in). */
+  securityPolicies: z.boolean().optional(),
+  /** Workspace alert webhooks (app errors and repairs, spending, AI credit). */
+  alertWebhooks: z.boolean().optional(),
+});
+export type WorkspacePlanFeatures = z.infer<typeof workspacePlanFeaturesSchema>;
 export const organisationDirectoryViewSchema = organisationContextSchema.extend(
   {
     capabilities: directoryCapabilitiesSchema,
+    /** Absent from releases before plans gated these features. */
+    planFeatures: workspacePlanFeaturesSchema.optional(),
   },
 );
 export type OrganisationDirectoryView = z.infer<
@@ -238,6 +298,8 @@ export const capacityMetricSchema = z.enum([
   "file_bytes",
   "agent_concurrency",
   "ai_cost",
+  /** Company organisations only: current members against the member ceiling. */
+  "member_count",
 ]);
 export const capacityUsageVectorSchema = z
   .object({

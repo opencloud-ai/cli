@@ -1,5 +1,16 @@
 # Public platform snapshots
 
+## CLI 3.23.0 multi-workspace awareness
+
+Workspace contract updates (`contracts/src/api-core.ts`,
+`contracts/src/organisation-directory.ts`, `contracts/src/app-portability.ts`,
+and the `/v1/workspaces`, `/v1/workspaces/{workspaceId}`, and
+`/v1/account/workspace` routes in `contracts/src/control-plane.ts`) are
+snapshotted from platform commit `957637c55` (PR #528 unified workspaces).
+`organisationSchema.plan` defaults to `"free"` and the CLI falls back from
+`GET /v1/workspaces` to `GET /v1/organisations` on 404 so older installations
+remain compatible.
+
 ## CLI 3.22.0 container compute
 
 Public Contracts and control-plane client files needed by this release are

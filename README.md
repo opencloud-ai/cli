@@ -12,12 +12,12 @@ offline source bundle, but cannot connect to or deploy through OpenCloud.
 
 ## Install a pinned release
 
-OpenCloud application skills pin an exact CLI release. To install `v3.22.1` in
+OpenCloud application skills pin an exact CLI release. To install `v3.23.0` in
 an isolated task directory:
 
 ```bash
-OPENCLOUD_CLI_VERSION="v3.22.1"
-OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.22.1.tgz"
+OPENCLOUD_CLI_VERSION="v3.23.0"
+OPENCLOUD_CLI_PACKAGE="opencloud-cli-3.23.0.tgz"
 OPENCLOUD_CLI_DIR="$(mktemp -d)"
 
 curl -fsSLo "$OPENCLOUD_CLI_DIR/$OPENCLOUD_CLI_PACKAGE" \
@@ -114,9 +114,15 @@ credential may remain orphaned until expiry and rerunning connect mints a
 replacement.
 
 ```bash
+# Inspect workspaces and optionally pin a default for this API URL:
+"$OPENCLOUD_CLI" workspace list
+"$OPENCLOUD_CLI" workspace use "$WORKSPACE_ID"
+"$OPENCLOUD_CLI" workspace current
+
 # Only when the requested app does not already exist:
 "$OPENCLOUD_CLI" app create \
   --name "Family tasks" \
+  --workspace "$WORKSPACE_ID" \
   --visibility private \
   --idempotency-key "$IDEMPOTENCY_KEY"
 

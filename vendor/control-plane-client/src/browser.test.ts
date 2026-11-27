@@ -21,7 +21,7 @@ describe("browser OpenCloudClient", () => {
     const organisationId = "00000000-0000-4000-8000-000000000001";
     const userId = "00000000-0000-4000-8000-000000000003";
     const directory = {
-      organisation: { id: organisationId, name: "Example", status: "active", policyVersion: "1" },
+      organisation: { id: organisationId, name: "Example", status: "active", policyVersion: "1", plan: "free" },
       membership: { organisationId, userId, role: "member" },
       capabilities: { manageOrganisation: false, inviteMembers: false, manageLimits: false, leaveOrganisation: true },
     };

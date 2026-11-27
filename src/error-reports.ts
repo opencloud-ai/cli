@@ -233,8 +233,12 @@ const CALLER_OUTCOME_CODES = new Set([
   "SECRET_TOO_LARGE",
   "SOURCE_TOO_LARGE",
   "TOKEN_FILE_EXISTS",
+  "UNKNOWN_WORKSPACE",
   "VALIDATION_INTERRUPTED",
+  "WORKSPACE_MISMATCH",
   "WORKSPACE_NOT_CONNECTED",
+  "WORKSPACE_NOT_FOUND",
+  "WORKSPACE_REQUIRED",
 ]);
 
 function record(value: unknown): Record<string, unknown> | null {

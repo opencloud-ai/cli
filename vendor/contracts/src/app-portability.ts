@@ -220,6 +220,8 @@ export const installAppPackageRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(120),
     identityMappings: z.record(z.uuid(), z.uuid()),
+    /** The workspace to install into. Required when the account has more than one. */
+    workspaceId: z.uuid().optional(),
   })
   .strict();
 export type AppImportReview = z.infer<typeof appImportReviewSchema>;

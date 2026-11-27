@@ -581,6 +581,19 @@ export function inputDetails(details: Record<string, unknown>): Record<string, u
       .map((value) => ({ field: value.field, ...(shortText(value.code, 100) ? { code: value.code } : {}), message: redactMessage(value.message) }));
     if (fields.length) picked.fields = fields;
   }
+  if (Array.isArray(details.choices)) {
+    const choices = details.choices.slice(0, 50).flatMap((choice) => {
+      if (!choice || typeof choice !== "object" || Array.isArray(choice)) return [];
+      const entry = choice as Record<string, unknown>;
+      const mapped = Object.fromEntries(
+        (["id", "name", "plan", "role"] as const)
+          .filter((key) => shortText(entry[key], 200))
+          .map((key) => [key, redactMessage(entry[key]).slice(0, 200)]),
+      );
+      return Object.keys(mapped).length ? [mapped] : [];
+    });
+    if (choices.length) picked.choices = choices;
+  }
   return Object.keys(picked).length ? picked : null;
 }
 
@@ -638,7 +651,13 @@ function apiErrorFields(error: ApiError): Record<string, unknown> {
     statusCode: error.status, code, message: body.message ?? error.message, details: error.details,
   });
   const details = Object.keys(record(body.details)).length ? record(body.details) : record(nested.details);
-  const fix = code === "ACTIVE_DEPLOYMENT_CHANGED" ? null : suggestedFix(details);
+  const fix =
+    code === "ACTIVE_DEPLOYMENT_CHANGED"
+      ? null
+      : suggestedFix(details) ??
+        (code === "WORKSPACE_REQUIRED"
+          ? "Run opencloud workspace list and pass --workspace <id> (or set a default with opencloud workspace use <id>)."
+          : null);
   const input = compute.success ? null : inputDetails(details);
   return {
     code,
