@@ -71,7 +71,7 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const apiUrl = `http://127.0.0.1:${server.address().port}`;
 async function run(args, expected = 0) {
   const env = { ...process.env, OPENCLOUD_TELEMETRY: "0", OPENCLOUD_MUTATION_JOURNAL_DIR: path.join(temporary, "journal") };
-  for (const name of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_TOKEN", "OPENCLOUD_API_URL"]) delete env[name];
+  for (const name of ["INIT_CWD", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_WORKSPACE", "OPENCLOUD_TOKEN", "OPENCLOUD_API_URL"]) delete env[name];
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binary, "--api-url", apiUrl, "--token", token, "app", ...args], { cwd: temporary, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";

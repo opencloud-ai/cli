@@ -67,6 +67,7 @@ export const CLI_COMMANDS: readonly string[] = Object.freeze([
   "validate",
   "visitors",
   "whoami",
+  "workspace",
 ]);
 
 /** The brand an environment names; an absent or invalid value keeps OpenCloud's. */

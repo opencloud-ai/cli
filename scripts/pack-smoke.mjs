@@ -80,7 +80,7 @@ try {
     process.platform === "win32" ? "opencloud.cmd" : "opencloud",
   );
   const childEnvironment = { ...process.env };
-  for (const name of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_MUTATION_JOURNAL_DIR"]) delete childEnvironment[name];
+  for (const name of ["INIT_CWD", "OPENCLOUD_API_URL", "OPENCLOUD_TOKEN", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_WORKSPACE", "OPENCLOUD_MUTATION_JOURNAL_DIR"]) delete childEnvironment[name];
   // These failures have no fake API; never report them to a real installation.
   childEnvironment.OPENCLOUD_TELEMETRY = "0";
   const version = run(binary, ["--cli-version"], {

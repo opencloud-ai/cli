@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.23.0
+
+- Added multi-workspace awareness and default workspace pinning:
+  - New `opencloud workspace` command group: `workspace list` (reads
+    `GET /v1/workspaces`, falling back to `GET /v1/organisations` on older
+    installations), `workspace current`, `workspace use <workspace-id>` (pins
+    a per-API default in `<configDir>/workspaces.json`), and
+    `workspace clear`.
+  - Added `--workspace <workspace-id>` and `OPENCLOUD_WORKSPACE` (precedence:
+    `--workspace` flag > `OPENCLOUD_WORKSPACE` env > saved default) across
+    `app create`, `app list` (with `--all-workspaces` to bypass any pin), and
+    `app import install`.
+  - `auth status` reports `defaultWorkspace` and `whoami` includes
+    `defaultWorkspace` when a workspace is pinned (for example inside a
+    Personal Agent Sandbox session).
+  - Structured error output now preserves `details.choices` and adds an
+    actionable hint when OpenCloud returns `409 WORKSPACE_REQUIRED`.
+
 ## 3.22.1
 
 - `app dev verify` now completes its mutation-journal entry when OpenCloud

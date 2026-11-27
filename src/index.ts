@@ -113,6 +113,19 @@ import {
   loadWorkspaceBinding,
   resolveWorkspaceFile,
 } from "./workspace-store.js";
+import {
+  WORKSPACE_PREFERENCES_FILE,
+  clearSavedWorkspace,
+  fetchAccessibleWorkspaces,
+  filterAppsByWorkspace,
+  parseWorkspaceId,
+  resolveEnvWorkspace,
+  resolvePinnedWorkspace,
+  savedWorkspaceForApi,
+  setSavedWorkspace,
+  summarizeWorkspaces,
+  type ResolvedWorkspacePin,
+} from "./workspace-preference.js";
 import type { MutationCommandId } from "./mutation-dispositions.js";
 import {
   assertMutationJournalCompatibility,
@@ -169,7 +182,7 @@ import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.22.1";
+const CLI_VERSION = "3.23.0";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -189,6 +202,12 @@ const program = new Command()
     new Option("--token <token>", "API or app-scoped agent token").env(
       "OPENCLOUD_TOKEN",
     ),
+  )
+  .addOption(
+    new Option(
+      "--workspace <workspace-id>",
+      "Target OpenCloud workspace UUID (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)",
+    ).env("OPENCLOUD_WORKSPACE"),
   )
   .addOption(
     new Option(
@@ -349,6 +368,113 @@ function targetApiUrl(cwd?: string): string {
     availableSession()?.apiUrl ??
     DEFAULT_API_URL
   );
+}
+
+function workspaceSettingsFile(): string {
+  return path.join(credentialStore.configDirectory, WORKSPACE_PREFERENCES_FILE);
+}
+
+type InvalidWorkspacePin = {
+  state: "invalid";
+  source: "env:OPENCLOUD_WORKSPACE" | "flag";
+  reason: string;
+};
+
+type EnvWorkspaceInspection =
+  | { state: "pinned"; pin: ResolvedWorkspacePin }
+  | { state: "unpinned" }
+  | { state: "invalid"; reason: string };
+
+function explicitWorkspaceFlag(commandFlagValue?: string): string | undefined {
+  if (commandFlagValue !== undefined) return commandFlagValue;
+  return program.getOptionValueSource("workspace") === "cli"
+    ? program.opts<{ workspace?: string }>().workspace
+    : undefined;
+}
+
+function inspectEnvWorkspace(): EnvWorkspaceInspection {
+  try {
+    const pin = resolveEnvWorkspace(process.env);
+    return pin ? { state: "pinned", pin } : { state: "unpinned" };
+  } catch (error) {
+    return {
+      state: "invalid",
+      reason: brandText(error instanceof Error ? error.message : String(error)),
+    };
+  }
+}
+
+/**
+ * Resolves the target OpenCloud workspace UUID:
+ *   1. explicit `--workspace` CLI flag (Commander routes both top-level and
+ *      subcommand `--workspace` options onto the root program unless a
+ *      subcommand receives its own parsed value)
+ *   2. `OPENCLOUD_WORKSPACE` environment variable
+ *   3. saved per-`apiUrl` default (`opencloud workspace use <id>`)
+ */
+function effectiveWorkspacePin(
+  options?: {
+    flagValue?: string | undefined;
+    apiUrl?: string | undefined;
+    cwd?: string | undefined;
+  },
+): ResolvedWorkspacePin | null {
+  const apiUrl = normalizeApiUrl(options?.apiUrl ?? targetApiUrl(options?.cwd));
+  return resolvePinnedWorkspace({
+    flagValue: explicitWorkspaceFlag(options?.flagValue),
+    env: process.env,
+    settingsFile: workspaceSettingsFile(),
+    apiUrl,
+  });
+}
+
+/**
+ * Resolves the workspace pin for read-only inspection commands (`whoami`,
+ * `workspace list`, `workspace current`): fails fast on an explicit invalid
+ * `--workspace` CLI flag, but reports a malformed `OPENCLOUD_WORKSPACE` env
+ * var cleanly instead of crashing discovery commands.
+ */
+function inspectWorkspacePin(apiUrl: string): {
+  pin: ResolvedWorkspacePin | null;
+  invalid: InvalidWorkspacePin | null;
+  savedWorkspaceId: string | null;
+} {
+  const normalizedApiUrl = normalizeApiUrl(apiUrl);
+  const settingsFile = workspaceSettingsFile();
+  const savedWorkspaceId = savedWorkspaceForApi(settingsFile, normalizedApiUrl);
+  const flag = explicitWorkspaceFlag();
+  if (flag !== undefined) {
+    return {
+      pin: {
+        workspaceId: parseWorkspaceId(flag, "--workspace"),
+        source: "flag",
+      },
+      invalid: null,
+      savedWorkspaceId,
+    };
+  }
+  const envState = inspectEnvWorkspace();
+  if (envState.state === "pinned") {
+    return { pin: envState.pin, invalid: null, savedWorkspaceId };
+  }
+  if (envState.state === "invalid") {
+    return {
+      pin: null,
+      invalid: {
+        state: "invalid",
+        source: "env:OPENCLOUD_WORKSPACE",
+        reason: envState.reason,
+      },
+      savedWorkspaceId,
+    };
+  }
+  return {
+    pin: savedWorkspaceId
+      ? { workspaceId: savedWorkspaceId, source: "config" }
+      : null,
+    invalid: null,
+    savedWorkspaceId,
+  };
 }
 
 function client(cwd?: string): OpenCloudClient {
@@ -2414,11 +2540,28 @@ auth
     const workspaceCredential = binding
       ? await credentialStore.loadWorkspace(binding.apiUrl, binding.appId)
       : null;
+    let defaultWorkspace:
+      | ResolvedWorkspacePin
+      | { state: "invalid"; source: "env:OPENCLOUD_WORKSPACE" | "flag"; reason: string }
+      | null = null;
+    try {
+      defaultWorkspace = effectiveWorkspacePin({ apiUrl });
+    } catch (error) {
+      defaultWorkspace = {
+        state: "invalid",
+        source:
+          program.getOptionValueSource("workspace") === "cli"
+            ? "flag"
+            : "env:OPENCLOUD_WORKSPACE",
+        reason: brandText(error instanceof Error ? error.message : String(error)),
+      };
+    }
     output({
       authenticated: account?.state === "authenticated",
       apiUrl,
       ...user,
       account,
+      defaultWorkspace,
       workspace: binding
         ? {
             bindingFile: workspaceFile(),
@@ -2483,6 +2626,10 @@ program
   .command("whoami")
   .description("Show who the CLI is signed in as and which credential it uses")
   .action(async () => {
+    const flag = explicitWorkspaceFlag();
+    if (flag !== undefined) {
+      parseWorkspaceId(flag, "--workspace");
+    }
     const authority = await managementAuthority();
     const identity = await readIdentity(authority.control);
     if (!identity) {
@@ -2490,10 +2637,221 @@ program
         `${IDENTITY_UNSUPPORTED} Run opencloud auth status for the local login state.`,
       ));
     }
+    const workspacePin = inspectWorkspacePin(authority.apiUrl);
+    const defaultWorkspace = workspacePin.pin ?? workspacePin.invalid;
     output({
       apiUrl: authority.apiUrl,
       user: identity.user,
       credential: { ...identity.credential, source: authority.source },
+      ...(defaultWorkspace ? { defaultWorkspace } : {}),
+    });
+  });
+
+const workspace = program
+  .command("workspace")
+  .description("List or pin the default OpenCloud workspace for this CLI");
+
+workspace
+  .command("list")
+  .description("List active OpenCloud workspaces accessible to the signed-in account")
+  .action(async () => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const workspacePin = inspectWorkspacePin(apiUrl);
+    const views = await fetchAccessibleWorkspaces(await managementClient());
+    const workspaces = summarizeWorkspaces(
+      views,
+      workspacePin.pin?.workspaceId ?? null,
+    );
+    const matched = workspacePin.pin
+      ? (workspaces.find((item) => item.pinned) ?? null)
+      : null;
+    output({
+      apiUrl,
+      pinned: workspacePin.pin
+        ? {
+            workspaceId: workspacePin.pin.workspaceId,
+            source: workspacePin.pin.source,
+            ...(matched
+              ? {
+                  name: matched.name,
+                  plan: matched.plan,
+                  role: matched.role,
+                  status: matched.status,
+                }
+              : {}),
+          }
+        : workspacePin.invalid,
+      workspaces,
+    });
+  });
+
+workspace
+  .command("current")
+  .description("Show the active pinned OpenCloud workspace and where it came from")
+  .action(async () => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const settingsFile = workspaceSettingsFile();
+    const workspacePin = inspectWorkspacePin(apiUrl);
+    const { pin: pinned, invalid, savedWorkspaceId } = workspacePin;
+    let matched: ReturnType<typeof summarizeWorkspaces>[number] | null = null;
+    if (pinned) {
+      try {
+        const control = await managementClient();
+        const views = await fetchAccessibleWorkspaces(control);
+        matched =
+          summarizeWorkspaces(views, pinned.workspaceId).find(
+            (item) => item.pinned,
+          ) ?? null;
+      } catch {
+        // Offline or unauthenticated checks still report the local pin.
+      }
+    }
+    output({
+      apiUrl,
+      pinned: pinned
+        ? {
+            workspaceId: pinned.workspaceId,
+            source: pinned.source,
+            ...(matched
+              ? {
+                  name: matched.name,
+                  plan: matched.plan,
+                  role: matched.role,
+                  status: matched.status,
+                }
+              : {}),
+          }
+        : invalid,
+      savedDefault: savedWorkspaceId
+        ? { workspaceId: savedWorkspaceId, settingsFile }
+        : null,
+      environmentOverride: Boolean(
+        pinned?.source === "env:OPENCLOUD_WORKSPACE" &&
+          savedWorkspaceId &&
+          pinned.workspaceId !== savedWorkspaceId,
+      ),
+    });
+  });
+
+workspace
+  .command("use")
+  .description("Pin a default OpenCloud workspace UUID for the current API URL")
+  .argument("<workspace-id>", "workspace UUID from opencloud workspace list")
+  .action(async (workspaceIdArg) => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const workspaceId = parseWorkspaceId(workspaceIdArg, "<workspace-id>");
+    const settingsFile = workspaceSettingsFile();
+    let verified = false;
+    let matched: ReturnType<typeof summarizeWorkspaces>[number] | null = null;
+    try {
+      const control = await managementClient();
+      const views = await fetchAccessibleWorkspaces(control);
+      const summaries = summarizeWorkspaces(views, workspaceId);
+      matched = summaries.find((item) => item.pinned) ?? null;
+      if (!matched) {
+        throw callerFailure(
+          new CliContractError(
+            "WORKSPACE_NOT_FOUND",
+            `Workspace ${workspaceId} is not available to this account. Run opencloud workspace list to see available workspaces.`,
+            {
+              details: {
+                choices: summaries.map((item) => ({
+                  id: item.id,
+                  name: item.name,
+                  plan: item.plan,
+                  role: item.role,
+                })),
+              },
+            },
+          ),
+        );
+      }
+      verified = true;
+    } catch (error) {
+      if (
+        error instanceof CliContractError ||
+        !(error instanceof ApiError) ||
+        (error.status !== 403 && error.status !== 404)
+      ) {
+        throw error;
+      }
+      // Older installations that do not expose GET /v1/workspaces to CLI logins
+      // can still store a validated UUID obtained from the dashboard or 409 details.
+    }
+    const envState = inspectEnvWorkspace();
+    setSavedWorkspace(settingsFile, apiUrl, workspaceId);
+    output({
+      state: "pinned",
+      apiUrl,
+      workspaceId,
+      verified,
+      ...(matched
+        ? {
+            name: matched.name,
+            plan: matched.plan,
+            role: matched.role,
+            status: matched.status,
+          }
+        : {}),
+      settingsFile,
+      ...(envState.state === "pinned" && envState.pin.workspaceId !== workspaceId
+        ? {
+            activeWorkspaceId: envState.pin.workspaceId,
+            activeSource: envState.pin.source,
+            note: brandText(
+              "OPENCLOUD_WORKSPACE is set in this shell and takes precedence over the saved default until unset or overridden with --workspace.",
+            ),
+          }
+        : envState.state === "invalid"
+          ? {
+              invalidEnvironmentVariable: {
+                name: "OPENCLOUD_WORKSPACE",
+                reason: envState.reason,
+              },
+              note: brandText(
+                "OPENCLOUD_WORKSPACE is set to an invalid value in this shell and will cause workspace-aware commands to fail until unset or fixed.",
+              ),
+            }
+          : {}),
+    });
+  });
+
+workspace
+  .command("clear")
+  .description("Remove the saved default OpenCloud workspace for the current API URL")
+  .action(() => {
+    const apiUrl = normalizeApiUrl(targetApiUrl());
+    const settingsFile = workspaceSettingsFile();
+    const envState = inspectEnvWorkspace();
+    const { cleared, previousWorkspaceId } = clearSavedWorkspace(
+      settingsFile,
+      apiUrl,
+    );
+    output({
+      state: "cleared",
+      apiUrl,
+      cleared,
+      previousWorkspaceId,
+      settingsFile,
+      ...(envState.state === "pinned"
+        ? {
+            activeWorkspaceId: envState.pin.workspaceId,
+            activeSource: envState.pin.source,
+            note: brandText(
+              "OPENCLOUD_WORKSPACE is still set in this shell and will remain active until unset.",
+            ),
+          }
+        : envState.state === "invalid"
+          ? {
+              invalidEnvironmentVariable: {
+                name: "OPENCLOUD_WORKSPACE",
+                reason: envState.reason,
+              },
+              note: brandText(
+                "OPENCLOUD_WORKSPACE is set to an invalid value in this shell and will cause workspace-aware commands to fail until unset or fixed.",
+              ),
+            }
+          : {}),
     });
   });
 
@@ -2782,12 +3140,17 @@ appImport.command("get").argument("<import-id>")
 appImport.command("install").argument("<import-id>")
   .requiredOption("--name <name>", "name of the new private app")
   .option("--mappings <json-file>", "JSON object mapping every source user UUID to a destination user UUID")
+  .option("--workspace <workspace-id>", "workspace UUID to install into (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)")
   .requiredOption("--idempotency-key <key>", "stable retry key for this installation")
   .description("Install a reviewed full copy as a new private draft with staged data")
   .action(async (importId, options) => {
     const key = idempotencyKey(options);
-    const body = installAppPackageRequestSchema.parse({ name: options.name,
-      identityMappings: options.mappings ? JSON.parse(await readFile(callerPath(options.mappings), "utf8")) : {} });
+    const pinnedWorkspace = effectiveWorkspacePin({ flagValue: options.workspace });
+    const body = installAppPackageRequestSchema.parse({
+      name: options.name,
+      identityMappings: options.mappings ? JSON.parse(await readFile(callerPath(options.mappings), "utf8")) : {},
+      ...(pinnedWorkspace ? { workspaceId: pinnedWorkspace.workspaceId } : {}),
+    });
     output(await (await managementClient()).call("installAppImport", { importId, body }, {
       idempotencyKey: key, timeoutMs: packageTimeoutMs,
     }));
@@ -2873,6 +3236,10 @@ app
   .requiredOption("--name <name>")
   .option("--visibility <visibility>", "public or private", "private")
   .option(
+    "--workspace <workspace-id>",
+    "workspace UUID to create the app in (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)",
+  )
+  .option(
     "--owner-user-id <uuid>",
     "required when using the platform operator credential",
   )
@@ -2881,6 +3248,7 @@ app
     "stable retry key required before the app-scoped journal exists",
   )
   .action(async (options) => {
+    const pinnedWorkspace = effectiveWorkspacePin({ flagValue: options.workspace });
     output(
       await (
         await managementClient()
@@ -2890,6 +3258,9 @@ app
           body: {
             name: options.name,
             visibility: options.visibility,
+            ...(pinnedWorkspace
+              ? { organisationId: pinnedWorkspace.workspaceId }
+              : {}),
             ...(options.ownerUserId
               ? { ownerUserId: options.ownerUserId }
               : {}),
@@ -2905,7 +3276,38 @@ app
 app
   .command("list")
   .description("List apps available to the signed-in account")
-  .action(async () => output(await (await managementClient()).get("/v1/apps")));
+  .option(
+    "--workspace <workspace-id>",
+    "filter apps to one workspace UUID (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)",
+  )
+  .option(
+    "--all-workspaces",
+    "list apps across all workspaces, ignoring any pinned workspace",
+    false,
+  )
+  .action(async (options) => {
+    const explicitFlag = explicitWorkspaceFlag(options.workspace);
+    if (options.allWorkspaces && explicitFlag !== undefined) {
+      throw callerFailure(
+        new CliContractError(
+          "INVALID_OPTIONS",
+          "Pass either --workspace or --all-workspaces, not both.",
+        ),
+      );
+    }
+    const pinnedWorkspace = options.allWorkspaces
+      ? null
+      : effectiveWorkspacePin({ flagValue: options.workspace });
+    const apps = (await (await managementClient()).get("/v1/apps")) as Array<{
+      workspaceId?: string;
+      organisationId?: string;
+    }>;
+    output(
+      pinnedWorkspace
+        ? filterAppsByWorkspace(apps, pinnedWorkspace.workspaceId)
+        : apps,
+    );
+  });
 
 app
   .command("get")

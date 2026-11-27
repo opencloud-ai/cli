@@ -5,7 +5,7 @@ import { controlPlaneOperations } from "./control-plane.js";
 describe("single organisation account contract", () => {
   it("exposes a user-only read without scopes or mutation intent", () => {
     const operation = controlPlaneOperations.getAccountOrganisationContext;
-    expect(operation).toMatchObject({ method: "GET", path: "/v1/account/organisation", auth: "user", scopes: [], idempotency: "none" });
+    expect(operation).toMatchObject({ method: "GET", path: "/v1/account/workspace", auth: "user", scopes: [], idempotency: "none" });
   });
   it("keeps inactive context minimal and distinguishes no assignment", () => {
     expect(accountOrganisationContextSchema.parse({ state: "onboarding_required", organisation: null })).toEqual({ state: "onboarding_required", organisation: null });

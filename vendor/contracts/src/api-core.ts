@@ -43,20 +43,56 @@ export const operationStateSchema = z.enum([
   "cancelled",
 ]);
 
-export const createAppRequestSchema = z.object({
+/**
+ * Where a new app goes. `workspaceId` names the workspace (its organisation
+ * ID); `organisationId` is the older name for the same value and stays
+ * accepted. Sending both with different values is refused. With neither, an
+ * account with exactly one workspace uses it, and one with several gets 409
+ * `WORKSPACE_REQUIRED` listing them.
+ */
+const appPlacementFields = {
+  workspaceId: z.uuid().optional().describe("The workspace to create the app in. Required when the account has more than one workspace."),
+  organisationId: z.uuid().optional().describe("Older name for workspaceId."),
+};
+
+/** Refuses a request that names two different workspaces. */
+export function sameRequestedWorkspace(
+  value: { workspaceId?: string | undefined; organisationId?: string | undefined },
+  context: z.RefinementCtx,
+): void {
+  if (value.workspaceId && value.organisationId && value.workspaceId !== value.organisationId) {
+    context.addIssue({
+      code: "custom",
+      path: ["workspaceId"],
+      message: "workspaceId and organisationId name different workspaces; send one of them",
+    });
+  }
+}
+
+/** The workspace a create request names, from either field. */
+export function requestedWorkspaceId(value: {
+  workspaceId?: string | undefined;
+  organisationId?: string | undefined;
+}): string | undefined {
+  return value.workspaceId ?? value.organisationId;
+}
+
+/** Unrefined shape, for schemas that extend or narrow it. */
+export const createAppRequestBodySchema = z.object({
   name: z.string().min(1).max(120),
-  organisationId: z.uuid().optional(),
-  workspaceId: z.uuid().optional(),
+  ...appPlacementFields,
   visibility: appVisibilitySchema.default("private"),
 });
 
+export const createAppRequestSchema = createAppRequestBodySchema.superRefine(sameRequestedWorkspace);
+
 export const createPendingAppRequestSchema = z
   .object({
-    organisationId: z.uuid().optional(),
-    workspaceId: z.uuid().optional(),
+    ...appPlacementFields,
     visibility: appVisibilitySchema.default("private"),
   })
-  .strict();
+  .strict()
+  .superRefine(sameRequestedWorkspace);
 
 export const assignAppIdentityLegacyRequestSchema = z
   .object({
@@ -129,10 +165,10 @@ export const resolveAppIdentityActivationResponseSchema = z
   })
   .strict();
 
-export const operatorCreateAppRequestSchema = createAppRequestSchema.extend({
+export const operatorCreateAppRequestSchema = createAppRequestBodySchema.extend({
   slug: appSlugSchema.optional(),
   ownerUserId: z.uuid().optional(),
-});
+}).superRefine(sameRequestedWorkspace);
 
 export const createCredentialRequestSchema = z.object({
   name: z.string().min(1).max(120),
