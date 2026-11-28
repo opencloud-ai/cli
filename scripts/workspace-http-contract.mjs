@@ -151,6 +151,82 @@ const server = createServer(async (request, response) => {
       error: null,
     });
   }
+  const parsedUrl = new URL(request.url, "http://127.0.0.1");
+  const computePrice = {
+    id: "ffff6666-6666-4666-8666-666666666666",
+    version: 1,
+    key: "standard",
+    currency: "usd",
+    taxBehavior: "exclusive",
+    quantumSeconds: 1,
+    minimumSeconds: 1,
+    ratesMinorPerUnit: { vcpu_second: "0.00001", gib_memory_second: "0.000002", gib_scratch_second: "0" },
+    effectiveFrom: stamp,
+    state: "published",
+    publishedAt: stamp,
+  };
+  const computeUsage = {
+    quantities: { vcpuSeconds: "0", memoryGiBSeconds: "0", scratchGiBSeconds: "0" },
+    currency: null,
+    grossEstimatedCostMinor: null,
+    appliedCreditMinor: null,
+    netEstimatedCostMinor: null,
+    priceVersionIds: [],
+    pendingEvidenceCount: 0,
+    lastSettledAt: null,
+    observedAt: stamp,
+  };
+  if (
+    request.method === "GET" &&
+    (parsedUrl.pathname === "/v1/billing/compute" ||
+      parsedUrl.pathname === "/v1/billing/compute/prices" ||
+      parsedUrl.pathname === "/v1/billing/compute/usage")
+  ) {
+    const workspaceId = parsedUrl.searchParams.get("workspaceId");
+    if (!workspaceId) {
+      return send(409, {
+        code: "WORKSPACE_REQUIRED",
+        message: "This account belongs to 2 workspaces. Ask which one to use, then send its ID as workspaceId.",
+        details: {
+          choices: [
+            { id: wsA, name: "Alpha Free", plan: "free", role: "admin" },
+            { id: wsB, name: "Beta Core", plan: "core", role: "member" },
+          ],
+        },
+      });
+    }
+    if (parsedUrl.pathname === "/v1/billing/compute/prices") {
+      return send(200, { prices: [computePrice] });
+    }
+    if (parsedUrl.pathname === "/v1/billing/compute") {
+      return send(200, {
+        payerId: workspaceId,
+        enabled: true,
+        mode: "workspace_plan",
+        currency: "usd",
+        priceVersionId: computePrice.id,
+        price: computePrice,
+        nextPriceVersionId: null,
+        nextEffectiveAt: null,
+        monthlyLimitMinor: null,
+        dailyLimitMinor: null,
+        activeInstanceLimit: 4,
+        dailyTransferBytes: "10737418240",
+        subscriptionState: "active",
+        consentedAt: stamp,
+        updatedAt: stamp,
+      });
+    }
+    return send(200, {
+      payerId: workspaceId,
+      from: parsedUrl.searchParams.get("from"),
+      to: parsedUrl.searchParams.get("to"),
+      production: computeUsage,
+      development: computeUsage,
+      reservedMinor: "0",
+      availableCreditMinor: "0",
+    });
+  }
   return send(404, { message: `Unhandled ${request.method} ${request.url}` });
 });
 
@@ -219,7 +295,7 @@ try {
   assert.equal(listed.workspaces[0].id, wsA);
   assert.equal(listed.workspaces[1].plan, "core");
 
-  // 2. app create without workspace surfaces 409 WORKSPACE_REQUIRED with choices and hint
+  // 2. app create & compute settings without workspace surface 409 WORKSPACE_REQUIRED with choices and hint
   const conflict = await run(
     ["app", "create", "--name", "Ambiguous", "--idempotency-key", "ws-create-0001"],
     { status: 1 },
@@ -229,6 +305,12 @@ try {
   assert.equal(conflict.error.details.choices.length, 2);
   assert.equal(conflict.error.details.choices[1].id, wsB);
   assert.match(conflict.error.hint, /opencloud workspace list/);
+
+  const computeConflict = await run(["compute", "settings"], { status: 1 });
+  assert.equal(computeConflict.ok, false);
+  assert.equal(computeConflict.error.code, "WORKSPACE_REQUIRED");
+  assert.equal(computeConflict.error.details.choices.length, 2);
+  assert.match(computeConflict.error.hint, /opencloud workspace list/);
 
   // 3. app list unpinned returns apps from all workspaces
   const allApps = await run(["app", "list"]);
@@ -339,6 +421,19 @@ try {
   );
   const installFlagReq = requests.filter((r) => r.url === `/v1/app-imports/${importId}/install`).at(-1);
   assert.equal(installFlagReq.body.workspaceId, wsA);
+
+  // compute settings/prices/usage honor saved workspace use, OPENCLOUD_WORKSPACE, and --workspace
+  const computeSavedSettings = await run(["compute", "settings"]);
+  assert.equal(computeSavedSettings.payerId, wsA);
+  const computeEnvSettings = await run(["compute", "settings"], { workspaceEnv: wsB });
+  assert.equal(computeEnvSettings.payerId, wsB);
+  const computeFlagPrices = await run(["compute", "prices", "--workspace", wsA], { workspaceEnv: wsB });
+  assert.equal(computeFlagPrices.prices.length, 1);
+  assert.equal(requests.at(-1).url, `/v1/billing/compute/prices?workspaceId=${wsA}`);
+  const computeTopFlagUsage = await run(
+    ["--workspace", wsB, "compute", "usage", "--from", "2026-11-27T00:00:00Z", "--to", "2026-11-28T00:00:00Z"],
+  );
+  assert.equal(computeTopFlagUsage.payerId, wsB);
 
   // 6. Invalid OPENCLOUD_WORKSPACE never crashes discovery/status/config commands
   const invalidStatus = await run(["auth", "status"], { workspaceEnv: "not-a-uuid" });

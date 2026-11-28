@@ -182,7 +182,7 @@ import { hintOf, withHint } from "./cli-contract-error.js";
 import { brandCliError, brandText, commandName } from "./brand.js";
 import { asksForVersion } from "./version-request.js";
 
-const CLI_VERSION = "3.23.0";
+const CLI_VERSION = "3.23.1";
 setCliVersion(CLI_VERSION);
 
 const program = new Command()
@@ -7292,18 +7292,42 @@ const compute = program.command("compute")
 
 compute.command("settings")
   .description("Read rates, limits and funding for your authorized payer")
-  .action(async () => output(await (await computePayerClient()).call("getComputeSettings", {})));
+  .option("--workspace <workspace-id>", "workspace UUID (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)")
+  .action(async (options) => {
+    const pinnedWorkspace = effectiveWorkspacePin({ flagValue: options.workspace });
+    const input = computeInput(
+      "getComputeSettings",
+      pinnedWorkspace ? { query: { workspaceId: pinnedWorkspace.workspaceId } } : {},
+    );
+    output(await (await computePayerClient()).call("getComputeSettings", input));
+  });
 
 compute.command("prices")
   .description("Read immutable rates available for explicit compute consent")
-  .action(async () => output(await (await computePayerClient()).call("getComputePrices", {})));
+  .option("--workspace <workspace-id>", "workspace UUID (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)")
+  .action(async (options) => {
+    const pinnedWorkspace = effectiveWorkspacePin({ flagValue: options.workspace });
+    const input = computeInput(
+      "getComputePrices",
+      pinnedWorkspace ? { query: { workspaceId: pinnedWorkspace.workspaceId } } : {},
+    );
+    output(await (await computePayerClient()).call("getComputePrices", input));
+  });
 
 compute.command("usage")
   .description("Read ledger quantities, costs, credits and reservations for your payer")
   .requiredOption("--from <iso>")
   .requiredOption("--to <iso>", "exclusive end, at most 31 days after from")
+  .option("--workspace <workspace-id>", "workspace UUID (defaults to OPENCLOUD_WORKSPACE or opencloud workspace use)")
   .action(async (options) => {
-    const input = computeInput("getComputePayerUsage", { query: { from: options.from, to: options.to } });
+    const pinnedWorkspace = effectiveWorkspacePin({ flagValue: options.workspace });
+    const input = computeInput("getComputePayerUsage", {
+      query: {
+        from: options.from,
+        to: options.to,
+        ...(pinnedWorkspace ? { workspaceId: pinnedWorkspace.workspaceId } : {}),
+      },
+    });
     output(await (await computePayerClient()).call("getComputePayerUsage", input));
   });
 

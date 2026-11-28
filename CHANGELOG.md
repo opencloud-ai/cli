@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.23.1
+
+- Forward the active workspace pin (`--workspace`, `OPENCLOUD_WORKSPACE`, or
+  `opencloud workspace use`) as `workspaceId` on `opencloud compute settings`,
+  `opencloud compute prices`, and `opencloud compute usage` so multi-workspace
+  accounts (including Personal Agent Sandbox sessions) can read compute payer
+  state without hitting `409 WORKSPACE_REQUIRED`. Omitted when no workspace is
+  pinned to stay compatible with older OpenCloud installations.
+- Accept `mode: "workspace_plan"` in `opencloud compute settings` responses for
+  workspaces funded through unified Core/Scale/Enterprise workspace plans.
+
 ## 3.23.0
 
 - Added multi-workspace awareness and default workspace pinning:
