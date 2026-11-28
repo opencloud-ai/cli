@@ -132,9 +132,10 @@ await writeFile(path.join(credentials, `${accountName}.json`), JSON.stringify({ 
   accessExpiresAt: new Date(Date.now() + 900000).toISOString(), refreshToken: "synthetic-account-refresh",
   refreshExpiresAt: new Date(Date.now() + 86400000).toISOString() }), { mode: 0o600 });
 
-async function run(args, status = 0, stdin = "", account = false) {
+async function run(args, status = 0, stdin = "", account = false, workspaceEnv) {
   const env = { ...process.env, HOME: taskHome, XDG_CONFIG_HOME: taskConfig, OPENCLOUD_TELEMETRY: "0", OPENCLOUD_MUTATION_JOURNAL_DIR: path.join(temporary, "journal") };
-  for (const key of ["INIT_CWD", "OPENCLOUD_TOKEN", "OPENCLOUD_API_URL", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "DO_NOT_TRACK"]) delete env[key];
+  for (const key of ["INIT_CWD", "OPENCLOUD_TOKEN", "OPENCLOUD_API_URL", "OPENCLOUD_SESSION_FILE", "OPENCLOUD_WORKSPACE_FILE", "OPENCLOUD_WORKSPACE", "DO_NOT_TRACK"]) delete env[key];
+  if (workspaceEnv !== undefined) env.OPENCLOUD_WORKSPACE = workspaceEnv;
   const result = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [binary, "--api-url", apiUrl, ...(account ? [] : ["--token", "synthetic-compute-authority"]), ...args], { cwd: temporary, env, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
@@ -302,8 +303,31 @@ try {
   assert.equal((await run(["containers", "registry", "list", appId])).connections.length, 1);
   await run(["containers", "registry", "remove", appId, revisionId]);
   assert.equal((await run(["compute", "settings"], 0, "", true)).price.id, revisionId);
+  assert.equal(requests.at(-1).query.workspaceId, undefined);
   assert.equal((await run(["compute", "prices"], 0, "", true)).prices[0].ratesMinorPerUnit.vcpu_second, "0.00001");
+  assert.equal(requests.at(-1).query.workspaceId, undefined);
   assert.equal((await run(["compute", "usage", "--from", now, "--to", "2026-11-14T01:00:00Z"], 0, "", true)).production.quantities.vcpuSeconds, "9007199254740993");
+  assert.equal(requests.at(-1).query.workspaceId, undefined);
+  // Multi-workspace payer reads forward workspaceId from OPENCLOUD_WORKSPACE or --workspace (flag overrides env).
+  const workspaceEnvId = "20000000-0000-4000-8000-000000000001";
+  const workspaceFlagId = "20000000-0000-4000-8000-000000000002";
+  await run(["compute", "settings"], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { workspaceId: workspaceEnvId });
+  await run(["compute", "settings", "--workspace", workspaceFlagId], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { workspaceId: workspaceFlagId });
+  await run(["--workspace", workspaceFlagId, "compute", "prices"], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { workspaceId: workspaceFlagId });
+  await run(["compute", "prices"], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { workspaceId: workspaceEnvId });
+  await run(["compute", "usage", "--from", now, "--to", "2026-11-14T01:00:00Z"], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { from: now, to: "2026-11-14T01:00:00Z", workspaceId: workspaceEnvId });
+  await run(["compute", "usage", "--from", now, "--to", "2026-11-14T01:00:00Z", "--workspace", workspaceFlagId], 0, "", true, workspaceEnvId);
+  assert.deepEqual(requests.at(-1).query, { from: now, to: "2026-11-14T01:00:00Z", workspaceId: workspaceFlagId });
+  const badWsBefore = requests.length;
+  assert.equal((await run(["compute", "settings", "--workspace", "not-a-uuid"], 1, "", true)).error.code, "INVALID_OPTION");
+  assert.equal((await run(["compute", "prices", "--workspace", "not-a-uuid"], 1, "", true)).error.code, "INVALID_OPTION");
+  assert.equal((await run(["compute", "usage", "--from", now, "--to", "2026-11-14T01:00:00Z", "--workspace", "not-a-uuid"], 1, "", true)).error.code, "INVALID_OPTION");
+  assert.equal(requests.length, badWsBefore, "invalid --workspace on compute payer reads reached the API");
   for (const args of [
     ["containers", "list", appId, "--limit", "101"],
     ["containers", "executions", appId, "--state", "crash_loop"],

@@ -1,5 +1,15 @@
 # Public platform snapshots
 
+## CLI 3.23.1 workspace-scoped compute payer queries
+
+`contracts/src/compute-control-plane.ts` adds the optional `workspaceId` query
+parameter to `getComputePrices`, `getComputeSettings`, `updateComputeSettings`,
+`createComputeCheckout`, `createComputeBillingPortal`, and
+`getComputePayerUsage`, and `contracts/src/containers.ts` adds
+`"workspace_plan"` to `computeCommercialModeSchema` so `opencloud compute
+settings` accepts unified workspace-plan compute bindings, snapshotted from the
+platform `evaluate-app-dashboard-kumo-ui` branch on top of `dfd82a724`.
+
 ## CLI 3.23.0 multi-workspace awareness
 
 Workspace contract updates (`contracts/src/api-core.ts`,

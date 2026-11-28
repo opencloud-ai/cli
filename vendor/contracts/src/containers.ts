@@ -512,7 +512,7 @@ export const computePriceVersionSchema = computePriceDefinitionSchema.extend({
   state: z.enum(["published", "retired"]), publishedAt: computeTimestampSchema,
 });
 export const computePriceDraftSchema = computePriceDefinitionSchema.extend({ revision: computeIntegerSchema, updatedAt: computeTimestampSchema });
-export const computeCommercialModeSchema = z.enum(["operator", "organisation_stripe", "personal_managed"]);
+export const computeCommercialModeSchema = z.enum(["operator", "workspace_plan", "organisation_stripe", "personal_managed"]);
 export const computePayerSettingsSchema = z.object({
   payerId: computeIdSchema, enabled: z.boolean(), mode: computeCommercialModeSchema,
   currency: computeCurrencySchema, priceVersionId: computeIdSchema.nullable(),
